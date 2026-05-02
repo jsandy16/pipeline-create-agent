@@ -139,8 +139,7 @@
     .sidebar > .destroy-btn,
     .sidebar > .monitor-btn,
     .sidebar > label.autofix-toggle { margin: 3px 14px; }
-    .sidebar > button.deploy-btn:last-of-type,
-    .sidebar > #pipeBuilderBtn { margin: 3px 14px 6px; width: calc(100% - 28px); box-sizing: border-box; }
+    .sidebar > button.deploy-btn:last-of-type { margin: 3px 14px 6px; width: calc(100% - 28px); box-sizing: border-box; }
 
     .sec-label {
       font-size: 10px;
@@ -1097,6 +1096,11 @@
       padding:2px 8px;border-radius:10px}
     .admin-row-badge.warn{color:var(--muted);background:var(--surface2)}
     .admin-row-arrow{font-size:10px;color:var(--muted)}
+    .admin-row-icon-img{width:18px;height:18px;object-fit:contain;flex-shrink:0;border-radius:3px}
+    .admin-row.tf-row.disabled{opacity:.35;cursor:not-allowed}
+    .admin-row.tf-row.enabled{opacity:1;cursor:pointer}
+    .admin-row.tf-row.enabled:hover{background:var(--surface2);border-color:var(--border)}
+    .admin-row.tf-row.enabled .admin-row-label{color:var(--text)}
 
     /* ── ADMIN ACTION MODALS (small, focused) ── */
     .adm-overlay {

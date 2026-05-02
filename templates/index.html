@@ -76,8 +76,6 @@
       </button>
     </div>
 
-    <button class="deploy-btn enabled" id="pipeBuilderBtn" style="border-color:var(--accent);color:var(--accent);opacity:1;cursor:pointer;background:var(--accent-glow)">Pipeline Builder Agent</button>
-
     <!-- TERRAFORM / AWS SECTION (collapsible) -->
     <div class="admin-sec" id="tfSec">
       <div class="admin-sec-hdr" id="tfSecHdr">
@@ -85,13 +83,22 @@
         <span class="admin-chevron" id="tfChevron">&#9654;</span>
       </div>
       <div class="admin-menu-rows" id="tfMenuRows">
-        <button class="cancel-btn" id="cancelBtn" style="margin:3px 0">Cancel</button>
+        <div class="admin-row tf-row disabled" id="cancelBtn" style="display:none">
+          <span class="admin-row-icon">&#10005;</span>
+          <span class="admin-row-label" style="color:var(--red)">Cancel</span>
+        </div>
         <div class="result-card" id="resultCard">
           <div class="rc-head" id="rcHead"></div>
           <div class="rc-rows" id="rcRows"></div>
         </div>
-        <button class="deploy-btn" id="planBtn" disabled style="margin:3px 0">Deploy to AWS: Plan</button>
-        <button class="apply-btn" id="applyBtn" disabled style="margin:3px 0">Deploy to AWS: Deploy</button>
+        <div class="admin-row tf-row disabled" id="planBtn">
+          <img class="admin-row-icon-img" src="/static/icons/icon-plan.png" alt="">
+          <span class="admin-row-label">Terraform Plan</span>
+        </div>
+        <div class="admin-row tf-row disabled" id="applyBtn">
+          <img class="admin-row-icon-img" src="/static/icons/icon-deploy.png" alt="">
+          <span class="admin-row-label">Terraform Deploy</span>
+        </div>
 
         <div id="autofixBanner" style="display:none; margin:8px 0; padding:14px 16px; border-radius:8px; background:var(--surface2); border:1px solid rgba(248,81,73,0.3); font-size:12px;">
           <div style="font-weight:600; color:var(--red); margin-bottom:6px;" id="autofixTitle">Auto-Fix Available</div>
@@ -105,14 +112,34 @@
           </div>
         </div>
 
-        <button class="dl-btn" id="dlPlanBtn" disabled style="margin:3px 0">Download Plan</button>
-        <button class="dl-btn" id="matrixBtn" disabled style="margin:3px 0">Download Matrix</button>
-        <button class="destroy-btn" id="destroyBtn" disabled style="margin:3px 0">Destroy Resources</button>
-        <button class="monitor-btn" id="monitorBtn" disabled style="margin:3px 0">Monitor Pipeline Run</button>
+        <div class="admin-row tf-row disabled" id="dlPlanBtn">
+          <img class="admin-row-icon-img" src="/static/icons/icon-download.png" alt="">
+          <span class="admin-row-label">Download Plan</span>
+        </div>
+        <div class="admin-row tf-row disabled" id="matrixBtn">
+          <img class="admin-row-icon-img" src="/static/icons/icon-download.png" alt="">
+          <span class="admin-row-label">Download Matrix</span>
+        </div>
+        <div class="admin-row tf-row disabled" id="destroyBtn">
+          <span class="admin-row-icon">&#128465;&#65039;</span>
+          <span class="admin-row-label">Destroy Resources</span>
+        </div>
+        <div class="admin-row tf-row disabled" id="monitorBtn">
+          <span class="admin-row-icon">&#128225;</span>
+          <span class="admin-row-label">Monitor Pipeline Run</span>
+        </div>
         <label class="autofix-toggle" id="autofixToggle" style="display:none">
           <input type="checkbox" id="autofixCheck">
           <span class="autofix-label">Auto-fix errors (AI Inspector)</span>
         </label>
+      </div>
+    </div>
+
+    <!-- Pipeline Builder Agent (placed after TF/AWS, before Admin) -->
+    <div class="admin-sec" style="border:none;margin:0;padding:0">
+      <div class="admin-row enabled" id="pipeBuilderBtn" style="margin:4px 0">
+        <img class="admin-row-icon-img" src="/static/icons/icon-robot.png" alt="">
+        <span class="admin-row-label" style="color:var(--accent)">Pipeline Builder Agent</span>
       </div>
     </div>
 

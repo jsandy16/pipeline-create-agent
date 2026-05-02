@@ -65,6 +65,39 @@ function makeWs(url, onMessage, { onGiveUp, retries = 4 } = {}) {
   return { close(){ abandoned=true; try{ ws.close() }catch(_){} } };
 }
 
+// ── Compatibility shim for div-based "buttons" (tf-row items) ────────────────
+// Makes .disabled and .textContent work on div.tf-row elements
+// so existing JS (deploy.js, core.js, etc.) doesn't need changes.
+function _shimTfRow(el) {
+  if (!el || !el.classList.contains('tf-row')) return;
+  const label = el.querySelector('.admin-row-label');
+  const origText = label ? label.textContent : '';
+  Object.defineProperty(el, 'disabled', {
+    get() { return el.classList.contains('disabled'); },
+    set(v) {
+      if (v) { el.classList.add('disabled'); el.classList.remove('enabled'); }
+      else   { el.classList.remove('disabled'); el.classList.add('enabled'); }
+    },
+    configurable: true,
+  });
+  // .textContent setter updates only the label span, not the icon.
+  // Transient states (e.g. "Running plan…", "Deploying…") update the label.
+  // Reset values (with emoji prefixes) restore the original label text.
+  Object.defineProperty(el, 'textContent', {
+    get() { return label ? label.textContent : ''; },
+    set(v) {
+      if (!label) return;
+      // If the value starts with an emoji or matches the old button pattern, restore original
+      if (/^[\u{1F4CB}\u{1F680}\u2705\u274C\u23F3\u{1F4E1}\u{1F5D1}\u{1F4E5}\u{1FA84}\u00a0\u2718\u2716✕📋🚀✅📡🗑📥\s]/u.test(v)) {
+        label.textContent = origText;
+      } else {
+        label.textContent = v || origText;
+      }
+    },
+    configurable: true,
+  });
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ── DEPLOY TO AWS (plan + apply — all output goes to main console) ────────────
 // ══════════════════════════════════════════════════════════════════════════════
@@ -72,6 +105,11 @@ function makeWs(url, onMessage, { onGiveUp, retries = 4 } = {}) {
 const planBtn   = $('planBtn');
 const applyBtn  = $('applyBtn');
 const dlPlanBtn = $('dlPlanBtn');
+
+// Apply shim to all tf-row elements so .disabled/.textContent work
+[planBtn, applyBtn, dlPlanBtn,
+ $('matrixBtn'), $('destroyBtn'), $('monitorBtn'), $('cancelBtn')
+].forEach(_shimTfRow);
 
 let _deployJobId  = null;
 let _deployWs     = null;
