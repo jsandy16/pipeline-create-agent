@@ -868,6 +868,48 @@ async def cancel_job(job_id: str) -> JSONResponse:
     return JSONResponse({"cancelled": False, "detail": "Job already finished"})
 
 
+# ─── Job polling fallback (when WebSocket fails on Render/proxied envs) ───────
+
+@app.get("/job/{job_id}/poll")
+async def poll_job(job_id: str) -> JSONResponse:
+    """Polling fallback for environments where WebSocket is unreliable.
+
+    Drains any queued messages and returns them as a batch, plus current status.
+    The client calls this every ~2s when the WebSocket gives up.
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"detail": "Job not found"})
+
+    q: stdlib_queue.SimpleQueue = job["log_q"]
+    messages: list[dict] = []
+    done = False
+
+    # Drain queued messages (max 200 per poll to bound response size)
+    for _ in range(200):
+        try:
+            msg = q.get_nowait()
+            messages.append(msg)
+            if msg.get("type") == "done":
+                done = True
+                break
+        except stdlib_queue.Empty:
+            break
+
+    # If the job finished but we didn't get a 'done' from the queue
+    # (it was already consumed by a previous WS/poll), synthesise one.
+    if not done and job["status"] in ("done", "error", "cancelled"):
+        messages.append({
+            "type": "done",
+            "exit_code": 0 if job["status"] == "done" else (2 if job["status"] == "cancelled" else 1),
+            "result": job.get("result_info"),
+            "cancelled": job["status"] == "cancelled",
+        })
+        done = True
+
+    return JSONResponse({"messages": messages, "done": done})
+
+
 @app.websocket("/ws/{job_id}")
 async def websocket_logs(websocket: WebSocket, job_id: str) -> None:
     """Stream log events and final result for a running job."""
@@ -880,6 +922,8 @@ async def websocket_logs(websocket: WebSocket, job_id: str) -> None:
         return
 
     q: stdlib_queue.SimpleQueue = job["log_q"]
+    ping_interval = 10  # seconds — keep connection alive through proxies
+    last_send = asyncio.get_event_loop().time()
 
     try:
         while True:
@@ -889,6 +933,7 @@ async def websocket_logs(websocket: WebSocket, job_id: str) -> None:
                     msg = q.get_nowait()
                     await websocket.send_json(msg)
                     sent += 1
+                    last_send = asyncio.get_event_loop().time()
                     if msg.get("type") == "done":
                         await websocket.close()
                         return
@@ -903,6 +948,12 @@ async def websocket_logs(websocket: WebSocket, job_id: str) -> None:
                 })
                 await websocket.close()
                 return
+
+            # Send keepalive ping to prevent proxy idle-timeout disconnects
+            now_t = asyncio.get_event_loop().time()
+            if now_t - last_send > ping_interval:
+                await websocket.send_json({"type": "ping"})
+                last_send = now_t
 
             await asyncio.sleep(0.15)
 
