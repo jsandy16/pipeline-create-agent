@@ -876,8 +876,10 @@ async def poll_job(job_id: str) -> JSONResponse:
 
     Drains any queued messages and returns them as a batch, plus current status.
     The client calls this every ~2s when the WebSocket gives up.
+    Looks up job_id in _jobs, _deploys, and _destroys.
     """
-    job = _jobs.get(job_id)
+    # Look up in all three stores
+    job = _jobs.get(job_id) or _deploys.get(job_id) or _destroys.get(job_id)
     if not job:
         return JSONResponse(status_code=404, content={"detail": "Job not found"})
 
@@ -898,13 +900,16 @@ async def poll_job(job_id: str) -> JSONResponse:
 
     # If the job finished but we didn't get a 'done' from the queue
     # (it was already consumed by a previous WS/poll), synthesise one.
-    if not done and job["status"] in ("done", "error", "cancelled"):
-        messages.append({
+    if not done and job.get("status") in ("done", "error", "cancelled"):
+        done_msg: dict = {
             "type": "done",
             "exit_code": 0 if job["status"] == "done" else (2 if job["status"] == "cancelled" else 1),
-            "result": job.get("result_info"),
-            "cancelled": job["status"] == "cancelled",
-        })
+        }
+        if "result_info" in job:
+            done_msg["result"] = job.get("result_info")
+        if job["status"] == "cancelled":
+            done_msg["cancelled"] = True
+        messages.append(done_msg)
         done = True
 
     return JSONResponse({"messages": messages, "done": done})
@@ -1134,6 +1139,8 @@ async def websocket_deploy(websocket: WebSocket, deploy_id: str) -> None:
         return
 
     q: stdlib_queue.SimpleQueue = deploy["log_q"]
+    ping_interval = 10
+    last_send = asyncio.get_event_loop().time()
     try:
         while True:
             sent = 0
@@ -1142,6 +1149,7 @@ async def websocket_deploy(websocket: WebSocket, deploy_id: str) -> None:
                     msg = q.get_nowait()
                     await websocket.send_json(msg)
                     sent += 1
+                    last_send = asyncio.get_event_loop().time()
                     if msg.get("type") == "done":
                         await websocket.close()
                         return
@@ -1152,6 +1160,10 @@ async def websocket_deploy(websocket: WebSocket, deploy_id: str) -> None:
                                            "exit_code": 0 if deploy["status"] == "done" else 1})
                 await websocket.close()
                 return
+            now_t = asyncio.get_event_loop().time()
+            if now_t - last_send > ping_interval:
+                await websocket.send_json({"type": "ping"})
+                last_send = now_t
             await asyncio.sleep(0.15)
     except WebSocketDisconnect:
         pass
@@ -1344,6 +1356,8 @@ async def websocket_destroy(websocket: WebSocket, destroy_id: str) -> None:
         return
 
     q: stdlib_queue.SimpleQueue = d["log_q"]
+    ping_interval = 10
+    last_send = asyncio.get_event_loop().time()
     try:
         while True:
             sent = 0
@@ -1352,6 +1366,7 @@ async def websocket_destroy(websocket: WebSocket, destroy_id: str) -> None:
                     msg = q.get_nowait()
                     await websocket.send_json(msg)
                     sent += 1
+                    last_send = asyncio.get_event_loop().time()
                     if msg.get("type") == "done":
                         await websocket.close()
                         return
@@ -1362,6 +1377,10 @@ async def websocket_destroy(websocket: WebSocket, destroy_id: str) -> None:
                                            "exit_code": 0 if d["status"] == "done" else 1})
                 await websocket.close()
                 return
+            now_t = asyncio.get_event_loop().time()
+            if now_t - last_send > ping_interval:
+                await websocket.send_json({"type": "ping"})
+                last_send = now_t
             await asyncio.sleep(0.15)
     except WebSocketDisconnect:
         pass

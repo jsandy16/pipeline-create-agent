@@ -5,8 +5,12 @@
 function makeWs(url, onMessage, { onGiveUp, retries = 4 } = {}) {
   let attempt = 0, ws, abandoned = false;
 
-  // Extract job_id from ws URL: wss://host/ws/{job_id}
-  const jobId = url.split('/ws/').pop();
+  // Extract job_id from ws URL patterns:
+  //   wss://host/ws/{job_id}
+  //   wss://host/ws/deploy/{deploy_id}
+  //   wss://host/ws/destroy/{destroy_id}
+  const wsPath = url.split('/ws/').pop();  // "abc123" or "deploy/abc123"
+  const jobId = wsPath.includes('/') ? wsPath.split('/').pop() : wsPath;
 
   function open() {
     ws = new WebSocket(url);
