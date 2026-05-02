@@ -1,0 +1,778 @@
+# ============================================================================
+# Kinesis Data Firehose Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Kinesis Firehose knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/kinesis_firehose.yaml with
+# exhaustive coverage of capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — delivery stream naming rules
+#   3. defaults            — Terraform attribute defaults (minimum-cost)
+#   4. quotas              — AWS service limits
+#   5. delivery_streams    — stream types, source configurations
+#   6. destinations        — S3, Redshift, OpenSearch, HTTP, Splunk, etc.
+#   7. buffering           — buffer size and interval tuning
+#   8. transformation      — Lambda transformation, format conversion
+#   9. compression         — compression formats
+#  10. encryption          — at-rest and in-transit encryption
+#  11. error_handling      — backup bucket, retry policies
+#  12. iam                 — complete IAM action catalog & integration graph rules
+#  13. env_vars            — auto-wired environment variables
+#  14. vpc_triggers        — VPC placement rules
+#  15. integrations        — wiring ownership with all supported service types
+#  16. terraform_resources — all TF resource types this service uses
+#  17. boto3_operations    — complete API operation reference
+#  18. runtime_diagnostics — error patterns & auto-fix rules
+#  19. tags                — tagging constraints
+#  20. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: kinesis_firehose
+  aws_service_name: "Amazon Kinesis Data Firehose"
+  is_principal: true             # Firehose has an IAM execution role
+  terraform_resource: aws_kinesis_firehose_delivery_stream
+  description: >
+    Fully managed service for loading streaming data into data stores and
+    analytics services. Captures, transforms, and delivers data to S3, Redshift,
+    OpenSearch, Splunk, HTTP endpoints, and more. Automatically handles batching,
+    compression, encryption, and error handling. No code needed for basic delivery.
+  free_tier:
+    status: never_free
+    details: >
+      Kinesis Firehose is NOT free tier eligible.
+      ~$0.029/GB for the first 500 TB/month ingested to S3 destination.
+      Additional charges for data format conversion, Lambda transformation,
+      and VPC delivery. Dynamic Partitioning adds ~$0.020/GB.
+  pricing_model: per_gb_ingested
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 64       # max characters for delivery stream name
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_.-"
+  rules:
+    - "1-64 characters"
+    - "Letters, digits, underscores, hyphens, and periods"
+    - "Must be unique within an AWS account and region"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  buffering_size: 5              # minimum buffer (MB); range 1-128 for S3
+  buffering_interval: 60         # minimum interval (seconds); range 0-900
+  compression_format: "GZIP"     # UNCOMPRESSED, GZIP, ZIP, Snappy, HADOOP_SNAPPY
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_delivery_streams_per_account: 50  # per region, adjustable
+  max_record_size: "1 MB"        # single record max (before base64)
+  max_records_per_put_batch: 500 # PutRecordBatch limit
+  max_put_batch_size: "4 MB"     # total PutRecordBatch payload
+  max_throughput_per_stream: "varies by destination"
+  s3_destination:
+    max_buffering_size_mb: 128
+    min_buffering_size_mb: 1
+    max_buffering_interval_sec: 900
+    min_buffering_interval_sec: 0   # 0 means no buffering (zero-buffer delivery)
+  redshift_destination:
+    max_buffering_size_mb: 128
+    max_buffering_interval_sec: 900
+  opensearch_destination:
+    max_buffering_size_mb: 100
+    max_buffering_interval_sec: 900
+  http_endpoint_destination:
+    max_buffering_size_mb: 64
+    max_buffering_interval_sec: 900
+  lambda_transformation:
+    max_invocation_payload: "6 MB"
+    timeout: "60-900 seconds (default 60)"
+    max_buffering_before_transform: "3 MB or 1 minute"
+
+# -- 5. Delivery Streams -----------------------------------------------------
+delivery_streams:
+  source_types:
+    direct_put:
+      description: >
+        Applications write directly to Firehose via PutRecord/PutRecordBatch.
+        This is the default source type. Compatible with Kinesis Agent, CloudWatch
+        Logs, CloudWatch Metrics, AWS IoT, and Pinpoint.
+      terraform_attribute: "no explicit source block (default)"
+    kinesis_stream:
+      description: >
+        Firehose reads from an existing Kinesis Data Stream. The stream must be
+        in the same account and region. Firehose manages shard iteration internally.
+      terraform_block: "kinesis_source_configuration"
+      terraform_attributes:
+        kinesis_stream_arn: "ARN of the source Kinesis stream"
+        role_arn: "IAM role with kinesis:Get* permissions"
+      constraint: >
+        Cannot change source type after creation. A delivery stream with a
+        Kinesis stream source cannot also receive direct PutRecord calls.
+    msk:
+      description: >
+        Firehose reads from an MSK topic. Available since 2023.
+      terraform_block: "msk_source_configuration"
+      terraform_attributes:
+        msk_cluster_arn: "ARN of the MSK cluster"
+        topic_name: "Kafka topic name"
+        authentication_configuration: "{RoleArn: IAM role ARN}"
+
+  states:
+    CREATING: "Stream is being created"
+    DELETING: "Stream is being deleted"
+    ACTIVE: "Stream is ready for use"
+    CREATING_FAILED: "Stream creation failed"
+    DELETING_FAILED: "Stream deletion failed"
+
+# -- 6. Destinations ---------------------------------------------------------
+destinations:
+  extended_s3:
+    description: "Amazon S3 with full feature support (buffering, compression, encryption, format conversion, dynamic partitioning)"
+    terraform_block: "extended_s3_configuration"
+    key_attributes:
+      role_arn: "IAM role ARN for S3 access"
+      bucket_arn: "Destination S3 bucket ARN"
+      prefix: "S3 key prefix (supports dynamic partitioning expressions)"
+      error_output_prefix: "Prefix for failed records"
+      buffering_size: "Buffer size in MB (1-128)"
+      buffering_interval: "Buffer interval in seconds (0-900)"
+      compression_format: "UNCOMPRESSED | GZIP | ZIP | Snappy | HADOOP_SNAPPY"
+      kms_key_arn: "KMS key for S3 encryption"
+    dynamic_partitioning:
+      description: >
+        Automatically partition data into S3 prefixes based on record content.
+        Uses JQ expressions or Lambda transformation to extract partition keys.
+      terraform_block: "dynamic_partitioning_configuration"
+      attributes:
+        enabled: true
+        retry_duration: "0-7200 seconds"
+      prefix_expressions:
+        - "!{partitionKeyFromQuery:year}/!{partitionKeyFromQuery:month}/"
+        - "!{partitionKeyFromLambda:customKey}/"
+      cost: "$0.020/GB (additional to base delivery cost)"
+    format_conversion:
+      description: "Convert JSON to columnar formats (Parquet, ORC) for analytics"
+      terraform_block: "data_format_conversion_configuration"
+      input_format: "OpenXJsonSerDe or HiveJsonSerDe"
+      output_formats:
+        parquet: "ParquetSerDe"
+        orc: "OrcSerDe"
+      schema_source: "AWS Glue Data Catalog (database + table)"
+
+  redshift:
+    description: "Amazon Redshift via COPY from intermediate S3 bucket"
+    terraform_block: "redshift_configuration"
+    key_attributes:
+      role_arn: "IAM role ARN"
+      cluster_jdbcurl: "jdbc:redshift://ENDPOINT:5439/DATABASE"
+      username: "Redshift user"
+      password: "Redshift password"
+      data_table_name: "Target table"
+      copy_options: "COPY command options (e.g., 'JSON auto')"
+      s3_configuration: "Intermediate S3 bucket config (required)"
+    note: "Firehose first delivers to S3, then issues a COPY command to Redshift"
+
+  opensearch:
+    description: "Amazon OpenSearch Service (formerly Elasticsearch)"
+    terraform_block: "opensearch_configuration"
+    key_attributes:
+      role_arn: "IAM role ARN"
+      domain_arn: "OpenSearch domain ARN"
+      index_name: "Target index name"
+      type_name: "Document type (empty for OpenSearch 2.x+)"
+      buffering_size: "1-100 MB"
+      buffering_interval: "0-900 seconds"
+      s3_configuration: "Backup S3 bucket (required)"
+    vpc_delivery: "Requires VPC configuration if OpenSearch is in VPC"
+
+  http_endpoint:
+    description: "Custom HTTP endpoint (Datadog, New Relic, Sumo Logic, Splunk, etc.)"
+    terraform_block: "http_endpoint_configuration"
+    key_attributes:
+      url: "HTTPS endpoint URL"
+      name: "Endpoint name"
+      access_key: "API key/token"
+      buffering_size: "1-64 MB"
+      buffering_interval: "0-900 seconds"
+      s3_configuration: "Backup S3 bucket (required)"
+    retry: "Firehose retries for up to 24 hours with exponential backoff"
+
+  splunk:
+    description: "Splunk via HEC (HTTP Event Collector)"
+    terraform_block: "splunk_configuration"
+    key_attributes:
+      hec_endpoint: "Splunk HEC URL"
+      hec_token: "HEC token"
+      hec_endpoint_type: "Raw | Event"
+      s3_configuration: "Backup S3 bucket (required)"
+
+# -- 7. Buffering ------------------------------------------------------------
+buffering:
+  description: >
+    Firehose buffers incoming data before delivering to the destination.
+    Delivery happens when EITHER the buffer size OR buffer interval is reached
+    (whichever comes first). Smaller buffers = lower latency, higher cost.
+  s3:
+    size_range: "1-128 MB"
+    interval_range: "0-900 seconds"
+    zero_buffering: "Available since 2023 — near real-time delivery to S3"
+  redshift:
+    size_range: "1-128 MB"
+    interval_range: "0-900 seconds"
+  opensearch:
+    size_range: "1-100 MB"
+    interval_range: "0-900 seconds"
+  http_endpoint:
+    size_range: "1-64 MB"
+    interval_range: "0-900 seconds"
+  note: >
+    Buffer size is measured BEFORE compression. Actual S3 objects may be smaller
+    due to compression. When Lambda transformation is enabled, buffering applies
+    to transformed records.
+
+# -- 8. Transformation -------------------------------------------------------
+transformation:
+  lambda:
+    description: >
+      Firehose can invoke a Lambda function to transform each record before
+      delivery. Common use cases: JSON parsing, data enrichment, filtering,
+      format conversion.
+    terraform_block: "processing_configuration"
+    terraform_attributes:
+      enabled: true
+      processors:
+        type: "Lambda"
+        parameters:
+          LambdaArn: "Lambda function ARN (with version/alias qualifier)"
+          BufferSizeInMBs: "1-3 MB"
+          BufferIntervalInSeconds: "60-900 seconds"
+          NumberOfRetries: "0-3 (default 3)"
+    input_record_format:
+      description: "Records arrive as base64-encoded data in the event"
+      event_structure:
+        invocationId: "Unique ID for this invocation"
+        deliveryStreamArn: "ARN of the delivery stream"
+        region: "AWS region"
+        records:
+          - recordId: "Unique record ID"
+            data: "base64-encoded record data"
+            approximateArrivalTimestamp: "epoch milliseconds"
+    output_record_format:
+      description: "Lambda must return records with result status"
+      required_fields:
+        recordId: "Must match input recordId"
+        result: "Ok | Dropped | ProcessingFailed"
+        data: "base64-encoded transformed data"
+    constraints:
+      - "Lambda invocation payload max 6 MB"
+      - "Lambda must return within timeout (default 60s, max 900s)"
+      - "Records marked 'Dropped' are not delivered"
+      - "Records marked 'ProcessingFailed' go to error output prefix"
+      - "Lambda must be in the same region as the delivery stream"
+
+  data_format_conversion:
+    description: >
+      Convert input JSON to Apache Parquet or Apache ORC columnar format.
+      Requires a Glue Data Catalog table for schema definition.
+    terraform_block: "data_format_conversion_configuration"
+    requirements:
+      - "Input must be JSON"
+      - "AWS Glue Data Catalog table defines the schema"
+      - "Destination must be S3 (extended_s3)"
+    output_formats:
+      - "Parquet (recommended for analytics)"
+      - "ORC"
+
+# -- 9. Compression ----------------------------------------------------------
+compression:
+  formats:
+    UNCOMPRESSED:
+      description: "No compression"
+      terraform_value: "UNCOMPRESSED"
+    GZIP:
+      description: "GNU zip — best compression ratio, moderate CPU"
+      terraform_value: "GZIP"
+      note: "Default in our engine. Good balance of size and compatibility."
+    ZIP:
+      description: "ZIP archive format"
+      terraform_value: "ZIP"
+    Snappy:
+      description: "Fast compression, lower ratio. Used by Hadoop ecosystem."
+      terraform_value: "Snappy"
+    HADOOP_SNAPPY:
+      description: "Snappy with Hadoop-compatible framing"
+      terraform_value: "HADOOP_SNAPPY"
+  constraints:
+    - "Compression applies BEFORE delivery to destination"
+    - "Cannot use compression with data format conversion (Parquet/ORC have built-in compression)"
+    - "GZIP is best for Athena/Redshift Spectrum queries on S3"
+
+# -- 10. Encryption -----------------------------------------------------------
+encryption:
+  server_side:
+    description: "Encrypt data at rest in the Firehose buffer"
+    terraform_attribute: "server_side_encryption"
+    terraform_block: "server_side_encryption { enabled = true, key_type = 'AWS_OWNED_CMK' | 'CUSTOMER_MANAGED_CMK' }"
+    key_types:
+      AWS_OWNED_CMK: "AWS-owned key (default, free)"
+      CUSTOMER_MANAGED_CMK: "Customer-managed KMS key"
+    kms_permissions:
+      - "kms:GenerateDataKey"
+      - "kms:Decrypt"
+  destination_encryption:
+    s3: "Uses S3 bucket encryption settings (SSE-S3 or SSE-KMS)"
+    redshift: "Uses Redshift cluster encryption"
+  in_transit:
+    description: "All Firehose API calls use HTTPS. Delivery to S3/Redshift uses AWS internal network."
+
+# -- 11. Error Handling -------------------------------------------------------
+error_handling:
+  backup_s3:
+    description: >
+      When delivery fails, records are sent to a backup S3 prefix. This is
+      mandatory for all destinations. For S3 destinations, failed records go
+      to the error_output_prefix.
+    terraform_attribute: "error_output_prefix"
+    s3_backup_mode:
+      Disabled: "No backup (S3 destination only; delivery failures retry indefinitely)"
+      Enabled: "All records copied to backup S3 bucket (for non-S3 destinations)"
+      FailedOnly: "Only failed records go to backup (default for non-S3)"
+  retry:
+    s3: "Retries indefinitely (no retry duration concept)"
+    redshift: "0-7200 seconds (default 3600)"
+    opensearch: "0-7200 seconds (default 300)"
+    http_endpoint: "0-7200 seconds (default 300)"
+    splunk: "0-7200 seconds (default 300)"
+  cloudwatch_error_logging:
+    description: "Delivery errors are logged to CloudWatch Logs"
+    log_group_pattern: "/aws/kinesisfirehose/{delivery_stream_name}"
+    log_stream: "DestinationDelivery"
+    error_types:
+      - "S3 permission errors"
+      - "Redshift COPY failures"
+      - "Lambda transformation errors"
+      - "Format conversion errors"
+
+# -- 12. IAM -----------------------------------------------------------------
+iam:
+  # ARN format
+  arn_formats:
+    delivery_stream: "arn:aws:firehose:REGION:ACCOUNT:deliverystream/STREAM-NAME"
+
+  # Firehose IS a principal — it has its own execution role
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+
+  # Complete action catalog
+  actions:
+    data_plane:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    management:
+      - "firehose:CreateDeliveryStream"
+      - "firehose:DeleteDeliveryStream"
+      - "firehose:DescribeDeliveryStream"
+      - "firehose:ListDeliveryStreams"
+      - "firehose:UpdateDestination"
+      - "firehose:StartDeliveryStreamEncryption"
+      - "firehose:StopDeliveryStreamEncryption"
+      - "firehose:TagDeliveryStream"
+      - "firehose:UntagDeliveryStream"
+      - "firehose:ListTagsForDeliveryStream"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    kinesis_streams:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+    lambda:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    ec2:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    msk:
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:ReadData"
+    eventbridge:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  as_source_to:
+    s3:
+      - "s3:AbortMultipartUpload"
+      - "s3:GetBucketLocation"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:ListBucketMultipartUploads"
+      - "s3:PutObject"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift:CopyFromS3"
+    lambda:
+      - "lambda:InvokeFunction"
+      - "lambda:GetFunctionConfiguration"
+    glue:
+      - "glue:GetTable"
+      - "glue:GetTableVersion"
+      - "glue:GetTableVersions"
+
+  # Trust policy
+  trust_policy_principal: "firehose.amazonaws.com"
+
+  # Condition keys
+  condition_keys:
+    - "firehose:ResourceTag/${TagKey}"
+
+# -- 13. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+# -- 14. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - redshift
+  - aurora
+
+# -- 15. Integration Wiring Ownership ----------------------------------------
+integrations:
+  kinesis_stream_to_firehose:
+    description: "Firehose reads from Kinesis stream as source"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "kinesis_source_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+    constraint: "Cannot change source type after creation"
+
+  firehose_to_s3:
+    description: "Firehose delivers records to S3 (Extended S3 configuration)"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "extended_s3_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "s3:AbortMultipartUpload"
+      - "s3:GetBucketLocation"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:ListBucketMultipartUploads"
+      - "s3:PutObject"
+
+  firehose_to_redshift:
+    description: "Firehose delivers to Redshift via intermediate S3 COPY"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "redshift_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  firehose_lambda_transform:
+    description: "Firehose invokes Lambda to transform records before delivery"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "processing_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "lambda:InvokeFunction"
+      - "lambda:GetFunctionConfiguration"
+
+  firehose_glue_format_conversion:
+    description: "Firehose reads Glue Data Catalog schema for format conversion"
+    owned_by: "kinesis_firehose"
+    iam_on_firehose:
+      - "glue:GetTable"
+      - "glue:GetTableVersion"
+      - "glue:GetTableVersions"
+
+  lambda_writes_firehose:
+    description: "Lambda writes records to Firehose delivery stream"
+    owned_by: "lambda"
+    iam_on_lambda:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  ec2_writes_firehose:
+    description: "EC2 writes records to Firehose via SDK or Kinesis Agent"
+    owned_by: "ec2"
+    iam_on_ec2:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  eventbridge_to_firehose:
+    description: "EventBridge rule targets Firehose delivery stream"
+    owned_by: "eventbridge"
+    iam_on_eventbridge:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  analytics_writes_firehose:
+    description: "Kinesis Analytics writes output to Firehose delivery stream"
+    owned_by: "kinesis_analytics"
+    iam_on_analytics:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  msk_to_firehose:
+    description: "Firehose reads from MSK topic as source"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "msk_source_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+
+  step_functions_writes_firehose:
+    description: "Step Functions SDK integration puts records to Firehose"
+    owned_by: "step_functions"
+    iam_on_step_functions:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  cloudwatch_logs_to_firehose:
+    description: "CloudWatch Logs subscription filter delivers to Firehose"
+    owned_by: "cloudwatch"
+    note: "CloudWatch Logs can stream log events to Firehose via subscription filters"
+
+  dms_to_firehose:
+    description: "DMS can use Firehose as a target for CDC streams"
+    owned_by: "dms"
+    iam_on_dms:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+      - "firehose:DescribeDeliveryStream"
+
+# -- 16. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_kinesis_firehose_delivery_stream"
+      description: "The Firehose delivery stream"
+      always_created: true
+      key_attributes:
+        - "name"
+        - "destination"
+        - "extended_s3_configuration / redshift_configuration / etc."
+        - "kinesis_source_configuration (if sourcing from Kinesis)"
+        - "server_side_encryption"
+        - "tags"
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for delivery error logs"
+      always_created: true
+    - resource: "aws_cloudwatch_log_stream"
+      description: "Log stream for destination delivery errors"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Execution role for Firehose (firehose.amazonaws.com)"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline policy with destination permissions"
+      always_created: true
+
+  conditional:
+    - resource: "processing_configuration block"
+      condition: "When Lambda transformation is configured"
+    - resource: "dynamic_partitioning_configuration block"
+      condition: "When dynamic partitioning is enabled for S3"
+    - resource: "data_format_conversion_configuration block"
+      condition: "When format conversion (JSON to Parquet/ORC) is enabled"
+
+# -- 17. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  client: "firehose"
+
+  data_plane:
+    put_record:
+      description: "Write a single record to a delivery stream"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        Record: {type: object, required: true, description: "{'Data': b'base64 bytes'} — max 1 MB"}
+      returns: ["RecordId", "Encrypted"]
+
+    put_record_batch:
+      description: "Write multiple records in a single request (up to 500 records or 4 MB)"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        Records: {type: list, required: true, description: "List of {'Data': b'...'} — max 500 records or 4 MB total"}
+      returns: ["FailedPutCount", "Encrypted", "RequestResponses[].RecordId", "RequestResponses[].ErrorCode", "RequestResponses[].ErrorMessage"]
+
+  management:
+    create_delivery_stream:
+      description: "Create a new delivery stream"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        DeliveryStreamType: {type: string, description: "DirectPut | KinesisStreamAsSource | MSKAsSource"}
+        ExtendedS3DestinationConfiguration: {type: object}
+        RedshiftDestinationConfiguration: {type: object}
+        ElasticsearchDestinationConfiguration: {type: object}
+        AmazonopensearchserviceDestinationConfiguration: {type: object}
+        SplunkDestinationConfiguration: {type: object}
+        HttpEndpointDestinationConfiguration: {type: object}
+        KinesisStreamSourceConfiguration: {type: object}
+        MSKSourceConfiguration: {type: object}
+        Tags: {type: list}
+      note: "Usually managed via Terraform"
+
+    delete_delivery_stream:
+      description: "Delete a delivery stream (allows delivery of in-flight data first)"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        AllowForceDelete: {type: boolean, description: "Force delete even with in-flight data"}
+
+    describe_delivery_stream:
+      description: "Get delivery stream details, status, and destination configuration"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        Limit: {type: integer, description: "Max destinations to return"}
+        ExclusiveStartDestinationId: {type: string}
+      returns: ["DeliveryStreamDescription.DeliveryStreamStatus", "DeliveryStreamDescription.DeliveryStreamType", "DeliveryStreamDescription.Destinations[]", "DeliveryStreamDescription.VersionId", "DeliveryStreamDescription.Source"]
+
+    update_destination:
+      description: "Update the destination configuration (S3 prefix, buffer, compression, etc.)"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        CurrentDeliveryStreamVersionId: {type: string, required: true, description: "From describe_delivery_stream"}
+        DestinationId: {type: string, required: true}
+        ExtendedS3DestinationUpdate: {type: object}
+        RedshiftDestinationUpdate: {type: object}
+        ElasticsearchDestinationUpdate: {type: object}
+        HttpEndpointDestinationUpdate: {type: object}
+      note: "Cannot change destination TYPE after creation (e.g., cannot switch S3 to Redshift)"
+
+    list_delivery_streams:
+      description: "List delivery streams in the account"
+      parameters:
+        Limit: {type: integer}
+        DeliveryStreamType: {type: string, description: "DirectPut | KinesisStreamAsSource | MSKAsSource"}
+        ExclusiveStartDeliveryStreamName: {type: string}
+      returns: ["DeliveryStreamNames[]", "HasMoreDeliveryStreams"]
+
+  tagging:
+    tag_delivery_stream:
+      description: "Add or update tags on a delivery stream"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        Tags: {type: list, required: true, description: "[{'Key': 'k', 'Value': 'v'}]"}
+
+    untag_delivery_stream:
+      description: "Remove tags from a delivery stream"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+
+    list_tags_for_delivery_stream:
+      description: "List tags for a delivery stream"
+      parameters:
+        DeliveryStreamName: {type: string, required: true}
+      returns: ["Tags[].Key", "Tags[].Value"]
+
+# -- 18. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AccessDenied.*s3|s3.*AccessDenied"
+    category: PERMISSION
+    cause: "Firehose cannot write to S3 destination — missing s3:PutObject"
+    fix_type: update_iam
+    resolution: "Add s3:PutObject, s3:GetBucketLocation, s3:ListBucket, s3:AbortMultipartUpload to Firehose role."
+
+  - pattern: "ResourceNotFoundException.*firehose|delivery.*stream.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Firehose delivery stream does not exist"
+    fix_type: manual
+    resolution: "Verify delivery stream name. Check terraform apply completed."
+
+  - pattern: "ServiceUnavailableException.*firehose"
+    category: SERVICE_ERROR
+    cause: "Firehose service temporarily unavailable"
+    fix_type: retry
+    resolution: "Retry with exponential backoff. Firehose is eventually consistent."
+
+  - pattern: "InvalidArgumentException.*BufferingHints"
+    category: VALIDATION
+    cause: "Buffer size or interval out of range"
+    fix_type: update_config
+    resolution: "S3: size 1-128 MB, interval 0-900s. HTTP: size 1-64 MB."
+
+  - pattern: "ConcurrentModificationException.*firehose"
+    category: CONCURRENT_MODIFICATION
+    cause: "Another update_destination in progress"
+    fix_type: retry
+    resolution: "Wait for current update to complete, then retry with latest VersionId."
+
+  - pattern: "LimitExceededException.*delivery"
+    category: QUOTA
+    cause: "Exceeded max delivery streams per region (default 50)"
+    fix_type: manual
+    resolution: "Request limit increase via AWS Service Quotas."
+
+  - pattern: "InvalidKMSResourceException"
+    category: ENCRYPTION
+    cause: "KMS key for Firehose encryption is invalid or inaccessible"
+    fix_type: update_iam
+    resolution: "Verify KMS key exists, is enabled, and Firehose role has kms:GenerateDataKey + kms:Decrypt."
+
+  - pattern: "Lambda.*Timeout|Lambda.*invocation.*failed"
+    category: TRANSFORMATION
+    cause: "Lambda transformation function timed out or returned error"
+    fix_type: code_change
+    resolution: "Increase Lambda timeout (max 900s). Check Lambda logs. Ensure records return Ok/Dropped/ProcessingFailed status."
+
+# -- 19. Tags ----------------------------------------------------------------
+tags:
+  max_per_stream: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 20. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: firehose
+  description: >
+    Firehose delivery stream config updated via update_destination(). You can change:
+    - Buffer size and interval
+    - Compression format
+    - S3 prefix and error output prefix
+    - Lambda transformation function
+    - Format conversion settings
+    Cannot change destination type after creation.
+    Write data via put_record (single) or put_record_batch (up to 500 records).
+  config_update:
+    client: firehose
+    operation: update_destination
+    id_param: DeliveryStreamName
+    note: "Also requires CurrentDeliveryStreamVersionId from describe_delivery_stream()"
+  discovery_ops:
+    - op: describe_delivery_stream
+      id_param: DeliveryStreamName
+      returns: ["DeliveryStreamDescription.DeliveryStreamStatus", "DeliveryStreamDescription.Destinations", "DeliveryStreamDescription.VersionId", "DeliveryStreamDescription.Source"]
+    - op: list_delivery_streams
+      returns: ["DeliveryStreamNames[]", "HasMoreDeliveryStreams"]
+    - op: list_tags_for_delivery_stream
+      id_param: DeliveryStreamName
+      returns: ["Tags[].Key", "Tags[].Value"]

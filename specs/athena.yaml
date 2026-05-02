@@ -1,0 +1,59 @@
+service_type: athena
+is_principal: false
+terraform_resource: aws_athena_workgroup
+description: "Athena workgroup for interactive SQL queries over Glue catalog"
+
+defaults:
+  enforce_workgroup_configuration: true
+  publish_cloudwatch_metrics_enabled: false
+  selected_engine_version: "AUTO"
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+# Athena fragment creates:
+#   1. aws_athena_workgroup with result_configuration pointing to query-results S3 bucket
+#   Engine version MUST be "AUTO" — only value AWS provider accepts without error
+
+code_update:
+  method: sql
+  boto3_client: athena
+  description: >
+    Athena has no persistent code — queries are submitted ad-hoc via start_query_execution().
+    Workgroup config (result location, engine version) via update_work_group().
+  config_update:
+    client: athena
+    operation: update_work_group
+    id_param: WorkGroup
+    id_value: "{resource_name}"
+  code_update_steps:
+    - "athena = boto3.client('athena', region_name=region)"
+    - "resp = athena.start_query_execution(QueryString='SELECT 1', WorkGroup=resource_name, QueryExecutionContext={'Database': database_name}, ResultConfiguration={'OutputLocation': 's3://bucket/prefix/'})"
+    - "Poll athena.get_query_execution(QueryExecutionId=resp['QueryExecutionId'])['QueryExecution']['Status']['State'] until 'SUCCEEDED'/'FAILED'"
+    - "athena.get_query_results(QueryExecutionId=resp['QueryExecutionId'])"
+  discovery_ops:
+    - op: get_work_group
+      id_param: WorkGroup
+      returns: ["WorkGroup.Configuration.ResultConfiguration.OutputLocation", "WorkGroup.State", "WorkGroup.Configuration.EngineVersion"]
+    - op: list_query_executions
+      id_param: WorkGroup
+      returns: ["QueryExecutionIds"]
+runtime_diagnostics:
+  - pattern: "FAILED.*Athena|Athena.*FAILED"
+    category: CONFIG
+    cause: "Athena query failed — check query syntax and table/column existence"
+    fix_type: check_query
+    resolution: "athena.get_query_execution(QueryExecutionId=id)['QueryExecution']['Status']['StateChangeReason'] for error details"
+  - pattern: "AccessDenied.*s3.*athena|Athena.*output.*AccessDenied"
+    category: PERMISSION
+    cause: "Athena cannot write query results to S3 output location"
+    fix_type: update_iam
+    resolution: "Add s3:PutObject to Athena workgroup result bucket IAM policy"

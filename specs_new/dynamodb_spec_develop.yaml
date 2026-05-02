@@ -1,0 +1,905 @@
+# ============================================================================
+# DynamoDB Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL DynamoDB knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/dynamodb.yaml with exhaustive
+# coverage of DynamoDB capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1.  identity            - service metadata & Terraform mapping
+#   2.  naming              - table naming rules & constraints
+#   3.  defaults            - Terraform attribute defaults (free-tier safe)
+#   4.  quotas              - AWS service limits
+#   5.  capacity_modes      - provisioned vs on-demand
+#   6.  primary_keys        - partition key, composite key
+#   7.  secondary_indexes   - GSI and LSI
+#   8.  streams             - DynamoDB Streams and Kinesis integration
+#   9.  ttl                 - Time to Live
+#  10.  global_tables       - multi-region replication
+#  11.  backups             - on-demand, PITR, AWS Backup
+#  12.  transactions        - ACID transactions
+#  13.  dax                 - DynamoDB Accelerator (caching)
+#  14.  encryption          - encryption at rest options
+#  15.  iam                 - complete action catalog & integration graph rules
+#  16.  env_vars            - auto-wired environment variables
+#  17.  vpc_triggers        - VPC placement rules
+#  18.  integrations        - wiring ownership with all connected services
+#  19.  terraform_resources - all TF resource types
+#  20.  boto3_operations    - complete API operation reference
+#  21.  runtime_diagnostics - error patterns & auto-fix rules
+#  22.  tags                - tagging constraints
+#  23.  code_update         - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: dynamodb
+  aws_service_name: "Amazon DynamoDB"
+  is_principal: false          # DynamoDB has no execution role of its own
+  terraform_resource: aws_dynamodb_table
+  description: >
+    Serverless, fully managed NoSQL key-value and document database with
+    single-digit millisecond performance at any scale. Data automatically
+    replicated across 3 Availability Zones.
+  free_tier:
+    status: always_free
+    details: "25 GB storage, 25 provisioned WCU, 25 provisioned RCU (~200M requests/month)"
+    note: "PAY_PER_REQUEST (on-demand) mode is NOT included in free tier"
+  pricing_model: pay_per_use   # RCU/WCU or per-request + storage GB/month
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 255     # max characters for table name
+  resource_name_min: 3         # min characters
+  valid_characters: "a-zA-Z0-9_.-"  # letters, digits, underscores, dots, hyphens
+  rules:
+    - "Must be between 3 and 255 characters"
+    - "Allowed characters: a-z, A-Z, 0-9, underscore (_), hyphen (-), dot (.)"
+    - "Table names are case-sensitive"
+    - "Must be unique within an AWS account and region"
+  index_name_limit: 255
+  index_name_rules:
+    - "Same character restrictions as table names"
+    - "Must be unique within a table"
+
+# -- 3. Defaults (free-tier safe) --------------------------------------------
+defaults:
+  billing_mode: "PROVISIONED"  # free tier: 25 WCU + 25 RCU forever; PAY_PER_REQUEST is NOT free tier
+  read_capacity: 5             # well within 25 RCU free tier limit
+  write_capacity: 5            # well within 25 WCU free tier limit
+  hash_key: "id"
+  hash_key_type: "S"
+  # Optional features (disabled by default):
+  stream_enabled: false
+  point_in_time_recovery: false
+  ttl_enabled: false
+  server_side_encryption: true  # always on since 2018, uses AWS-owned key by default
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  tables:
+    initial_per_region: 2500
+    max_per_region: 10000       # requires AWS support approval
+    table_size: "unlimited"     # no practical limit on items/bytes
+  item:
+    max_size: "400 KB"          # single item (all attributes combined)
+    max_collection_size: "10 GB"  # per partition key value (LSI tables only)
+  primary_key:
+    partition_key_max: "2048 bytes"
+    sort_key_max: "1024 bytes"
+    allowed_types: ["S", "N", "B"]  # String, Number, Binary only
+  attributes:
+    max_nested_depth: 32
+    max_attribute_name_length: "64 KB"  # UTF-8 encoded
+    max_attributes_per_item: "unlimited"  # limited only by 400 KB item size
+  secondary_indexes:
+    max_gsi_per_table: 20       # default, adjustable
+    max_lsi_per_table: 5        # hard limit, cannot be increased
+    max_projected_attributes: 100  # across all indexes, INCLUDE type only
+  throughput:
+    provisioned:
+      max_rcu_per_table: 40000  # adjustable
+      max_wcu_per_table: 40000  # adjustable
+      max_rcu_per_account: 80000  # adjustable
+      max_wcu_per_account: 80000  # adjustable
+      min_per_table: 1
+    on_demand:
+      max_rru_per_table: 40000  # adjustable
+      max_wru_per_table: 40000  # adjustable
+    decrease_limits:
+      max_per_day: 27           # 4 at start + 1 per hour
+      initial_available: 4
+  batch_operations:
+    batch_write_max_items: 25
+    batch_get_max_items: 100
+    batch_write_max_size: "16 MB"
+    batch_get_max_size: "16 MB"
+  transactions:
+    max_items_per_transaction: 100
+    max_size_per_transaction: "4 MB"
+  streams:
+    max_readers_per_shard: 2     # single-region
+    max_readers_global_table: 1  # recommended for global tables
+    record_retention: "24 hours"
+  global_tables:
+    max_per_account: 400
+    max_backfill_per_day: "10 TB"  # per account per region
+  import_export:
+    max_concurrent_imports: 50
+    max_concurrent_exports: 300
+    max_inflight_export_size: "100 TB"
+    max_s3_objects_per_import: 50000
+  tags:
+    max_per_resource: 50
+    key_max_length: 128
+    value_max_length: 256
+
+# -- 5. Capacity Modes -------------------------------------------------------
+capacity_modes:
+  PROVISIONED:
+    description: "Pre-allocate read/write capacity units. Best for predictable workloads."
+    terraform_value: "PROVISIONED"
+    units:
+      rcu: "Read Capacity Unit — 1 strongly consistent read/s for items up to 4 KB"
+      wcu: "Write Capacity Unit — 1 write/s for items up to 1 KB"
+    auto_scaling:
+      description: "Application Auto Scaling adjusts RCU/WCU based on utilization"
+      terraform_resource: "aws_appautoscaling_target + aws_appautoscaling_policy"
+    free_tier: true
+  PAY_PER_REQUEST:
+    description: "On-demand — pay per read/write request. Best for unpredictable workloads."
+    terraform_value: "PAY_PER_REQUEST"
+    units:
+      rru: "Read Request Unit — same as RCU but billed per-request"
+      wru: "Write Request Unit — same as WCU but billed per-request"
+    auto_scaling: "Not needed — scales automatically"
+    free_tier: false
+    note: "Instantly scales up/down with no cold starts. Scales to zero."
+
+# -- 6. Primary Keys ---------------------------------------------------------
+primary_keys:
+  types:
+    partition_key:
+      description: "Simple primary key — single attribute"
+      terraform_attribute: "hash_key"
+      uniqueness: "Each item must have a unique partition key value"
+    composite_key:
+      description: "Partition key + sort key — two attributes"
+      terraform_attributes: ["hash_key", "range_key"]
+      uniqueness: "Items can share partition key but must have unique sort key"
+      benefits:
+        - "Query by partition key returns all matching items sorted by sort key"
+        - "Range queries on sort key (begins_with, between, >, <)"
+  allowed_types:
+    S: "String"
+    N: "Number"
+    B: "Binary"
+  terraform_block: |
+    attribute {
+      name = "id"
+      type = "S"
+    }
+
+# -- 7. Secondary Indexes ----------------------------------------------------
+secondary_indexes:
+  gsi:
+    full_name: "Global Secondary Index"
+    description: "Index with partition key and optional sort key different from base table"
+    max_per_table: 20
+    terraform_block: "global_secondary_index"
+    characteristics:
+      - "Spans entire table (all partitions)"
+      - "Has own provisioned throughput (separate from table)"
+      - "Eventually consistent reads only"
+      - "Can be created/deleted after table creation"
+      - "Supports sparse indexes (items without index key are excluded)"
+    throughput: "Separate RCU/WCU from base table"
+    consistency: "Eventually consistent only"
+  lsi:
+    full_name: "Local Secondary Index"
+    description: "Index with same partition key as table but different sort key"
+    max_per_table: 5
+    terraform_block: "local_secondary_index"
+    characteristics:
+      - "Scoped to items with same partition key"
+      - "Shares throughput with base table"
+      - "Supports strongly consistent reads"
+      - "Must be created at table creation time (cannot add later)"
+      - "10 GB item collection size limit per partition key"
+    throughput: "Shares with base table"
+    consistency: "Strongly consistent or eventually consistent"
+  projections:
+    types:
+      ALL: "All attributes from base table"
+      KEYS_ONLY: "Only key attributes"
+      INCLUDE: "Specific attributes (max 100 across all indexes)"
+    terraform_attribute: "projection_type"
+
+# -- 8. DynamoDB Streams -----------------------------------------------------
+streams:
+  dynamodb_streams:
+    description: "Ordered, near-real-time stream of item-level changes"
+    terraform_attributes:
+      enabled: "stream_enabled"
+      view_type: "stream_view_type"
+    view_types:
+      KEYS_ONLY: "Only key attributes of the modified item"
+      NEW_IMAGE: "Entire item as it appears after modification"
+      OLD_IMAGE: "Entire item as it appeared before modification"
+      NEW_AND_OLD_IMAGES: "Both before and after images"
+    record_retention: "24 hours"
+    max_readers_per_shard: 2
+    use_cases:
+      - "Lambda triggers for event-driven processing"
+      - "Cross-region replication (global tables)"
+      - "Materialized views"
+      - "Change data capture (CDC)"
+  kinesis_data_streams:
+    description: "Route change data to Amazon Kinesis Data Streams for advanced processing"
+    terraform_resource: "aws_dynamodb_kinesis_streaming_destination"
+    advantages:
+      - "Longer retention (up to 365 days vs 24 hours)"
+      - "Multiple consumers per shard"
+      - "Integration with Kinesis Data Analytics, Firehose"
+
+# -- 9. TTL (Time to Live) ---------------------------------------------------
+ttl:
+  description: "Automatically delete items after a specified timestamp"
+  terraform_resource: "aws_dynamodb_table (ttl block)"
+  terraform_block: |
+    ttl {
+      attribute_name = "expire_at"
+      enabled        = true
+    }
+  behavior:
+    - "Attribute must contain a Unix epoch timestamp (Number type)"
+    - "Items deleted within 48 hours after expiration (background process)"
+    - "Deletions appear in DynamoDB Streams (if enabled)"
+    - "Deleted items do not consume write capacity"
+    - "Can only have one TTL attribute per table"
+  use_cases:
+    - "Session management"
+    - "Temporary data expiration"
+    - "Regulatory compliance (data retention)"
+
+# -- 10. Global Tables -------------------------------------------------------
+global_tables:
+  description: "Multi-region, multi-active database with 99.999% availability SLA"
+  terraform_resource: "aws_dynamodb_table_replica"
+  characteristics:
+    - "No primary table — truly multi-active across all regions"
+    - "Single-digit millisecond read/write in each region"
+    - "Automatic conflict resolution (last writer wins)"
+    - "Requires DynamoDB Streams enabled (NEW_AND_OLD_IMAGES)"
+    - "Requires PAY_PER_REQUEST or auto-scaling provisioned"
+  max_replicas: "unlimited regions (within account quota of 400 global tables)"
+  requirements:
+    - "Table must be empty when adding first replica"
+    - "Same table name in all regions"
+    - "Streams enabled with NEW_AND_OLD_IMAGES view type"
+
+# -- 11. Backups --------------------------------------------------------------
+backups:
+  on_demand:
+    description: "Full table backups for long-term retention/archival"
+    terraform_managed: false  # typically managed via AWS Backup or SDK
+    characteristics:
+      - "No impact on table performance"
+      - "Any table size supported"
+      - "Retained until explicitly deleted"
+  pitr:
+    full_name: "Point-in-Time Recovery"
+    description: "Continuous backups with per-second granularity, up to 35 days"
+    terraform_attribute: "point_in_time_recovery { enabled = true }"
+    retention: "1-35 days (configurable)"
+    granularity: "per-second"
+    characteristics:
+      - "No impact on performance or availability"
+      - "Restore to any point within retention window"
+  aws_backup:
+    description: "Centralized backup management with scheduled backups, lifecycle, cross-account/region"
+    integration: "AWS Backup service"
+    features:
+      - "Scheduled backups"
+      - "Cross-account and cross-region copying"
+      - "Cold storage transition for cost optimization"
+      - "Lifecycle management"
+
+# -- 12. Transactions ---------------------------------------------------------
+transactions:
+  description: "ACID transactions across multiple items and tables"
+  operations:
+    transact_write_items:
+      description: "Atomic write of up to 100 items"
+      max_items: 100
+      max_size: "4 MB"
+      actions: ["Put", "Update", "Delete", "ConditionCheck"]
+    transact_get_items:
+      description: "Atomic read of up to 100 items"
+      max_items: 100
+      max_size: "4 MB"
+  capacity_cost: "2x normal — reads/writes consume double capacity"
+  idempotency: "Client token support for idempotent retries"
+
+# -- 13. DAX (DynamoDB Accelerator) ------------------------------------------
+dax:
+  description: "Fully managed, in-memory caching service for DynamoDB"
+  performance: "Microsecond response times (10x improvement over DynamoDB)"
+  terraform_resources:
+    cluster: "aws_dax_cluster"
+    parameter_group: "aws_dax_parameter_group"
+    subnet_group: "aws_dax_subnet_group"
+  characteristics:
+    - "API-compatible with DynamoDB (drop-in replacement)"
+    - "Handles cache invalidation, data population, cluster management"
+    - "Millions of requests per second"
+    - "Requires VPC placement"
+    - "NOT free tier — charges per node-hour"
+  node_types:
+    - "dax.t3.small"
+    - "dax.t3.medium"
+    - "dax.r5.large"
+    - "dax.r5.xlarge"
+    - "dax.r5.2xlarge"
+    - "dax.r5.4xlarge"
+
+# -- 14. Encryption -----------------------------------------------------------
+encryption:
+  at_rest:
+    description: "All DynamoDB data encrypted at rest by default (since 2018)"
+    terraform_block: "server_side_encryption"
+    key_options:
+      aws_owned:
+        description: "AWS-owned KMS key (default). No additional charge."
+        terraform_value: null  # default, no sse block needed
+      aws_managed:
+        description: "AWS-managed KMS key (aws/dynamodb). Additional KMS charges."
+        terraform_sse_enabled: true
+      customer_managed:
+        description: "Customer-managed CMK. Full control over key rotation, policies."
+        terraform_sse_enabled: true
+        terraform_kms_key_arn: "kms_key_arn attribute"
+    note: "Transparent encryption — no code changes, same millisecond latency"
+  in_transit:
+    description: "All DynamoDB API calls use HTTPS/TLS"
+    note: "Enforced automatically — no configuration needed"
+  client_side:
+    description: "AWS Database Encryption SDK for client-side encryption"
+    note: "Optional — for applications requiring end-to-end encryption"
+
+# -- 15. IAM -----------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    table: "arn:aws:dynamodb:REGION:ACCOUNT:table/TABLE-NAME"
+    index: "arn:aws:dynamodb:REGION:ACCOUNT:table/TABLE-NAME/index/INDEX-NAME"
+    stream: "arn:aws:dynamodb:REGION:ACCOUNT:table/TABLE-NAME/stream/STREAM-LABEL"
+    backup: "arn:aws:dynamodb:REGION:ACCOUNT:table/TABLE-NAME/backup/BACKUP-NAME"
+    export: "arn:aws:dynamodb:REGION:ACCOUNT:table/TABLE-NAME/export/EXPORT-NAME"
+    import: "arn:aws:dynamodb:REGION:ACCOUNT:table/TABLE-NAME/import/IMPORT-NAME"
+    global_table: "arn:aws:dynamodb::ACCOUNT:global-table/GLOBAL-TABLE-NAME"
+
+  # DynamoDB is not a principal (no execution role), so "always" is empty
+  always: []
+
+  # Complete action catalog organized by category
+  actions:
+    item_read:
+      - "dynamodb:GetItem"
+      - "dynamodb:BatchGetItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:ConditionCheckItem"
+      - "dynamodb:PartiQLSelect"
+    item_write:
+      - "dynamodb:PutItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:PartiQLInsert"
+      - "dynamodb:PartiQLUpdate"
+      - "dynamodb:PartiQLDelete"
+    table_management:
+      - "dynamodb:CreateTable"
+      - "dynamodb:DeleteTable"
+      - "dynamodb:UpdateTable"
+      - "dynamodb:DescribeTable"
+      - "dynamodb:ListTables"
+      - "dynamodb:DescribeLimits"
+      - "dynamodb:DescribeEndpoints"
+    index_management:
+      - "dynamodb:UpdateTable"  # GSI CRUD is via UpdateTable
+      - "dynamodb:DescribeTable"
+    streams:
+      - "dynamodb:DescribeStream"
+      - "dynamodb:GetRecords"
+      - "dynamodb:GetShardIterator"
+      - "dynamodb:ListStreams"
+    backup_restore:
+      - "dynamodb:CreateBackup"
+      - "dynamodb:DeleteBackup"
+      - "dynamodb:DescribeBackup"
+      - "dynamodb:ListBackups"
+      - "dynamodb:RestoreTableFromBackup"
+      - "dynamodb:RestoreTableToPointInTime"
+      - "dynamodb:DescribeContinuousBackups"
+      - "dynamodb:UpdateContinuousBackups"
+    global_tables:
+      - "dynamodb:CreateGlobalTable"
+      - "dynamodb:UpdateGlobalTable"
+      - "dynamodb:UpdateGlobalTableSettings"
+      - "dynamodb:DescribeGlobalTable"
+      - "dynamodb:DescribeGlobalTableSettings"
+      - "dynamodb:ListGlobalTables"
+      - "dynamodb:CreateTableReplica"
+      - "dynamodb:DeleteTableReplica"
+    export_import:
+      - "dynamodb:ExportTableToPointInTime"
+      - "dynamodb:DescribeExport"
+      - "dynamodb:ListExports"
+      - "dynamodb:ImportTable"
+      - "dynamodb:DescribeImport"
+      - "dynamodb:ListImports"
+    kinesis_integration:
+      - "dynamodb:EnableKinesisStreamingDestination"
+      - "dynamodb:DisableKinesisStreamingDestination"
+      - "dynamodb:DescribeKinesisStreamingDestination"
+      - "dynamodb:UpdateKinesisStreamingDestination"
+    tagging:
+      - "dynamodb:TagResource"
+      - "dynamodb:UntagResource"
+      - "dynamodb:ListTagsOfResource"
+    contributor_insights:
+      - "dynamodb:UpdateContributorInsights"
+      - "dynamodb:DescribeContributorInsights"
+      - "dynamodb:ListContributorInsights"
+    ttl:
+      - "dynamodb:UpdateTimeToLive"
+      - "dynamodb:DescribeTimeToLive"
+    resource_policy:
+      - "dynamodb:PutResourcePolicy"
+      - "dynamodb:GetResourcePolicy"
+      - "dynamodb:DeleteResourcePolicy"
+    replication:
+      - "dynamodb:WriteDataForReplication"
+      - "dynamodb:ReadDataForReplication"
+      - "dynamodb:ReplicateSettings"
+    reserved_capacity:
+      - "dynamodb:PurchaseReservedCapacityOfferings"
+      - "dynamodb:DescribeReservedCapacity"
+      - "dynamodb:DescribeReservedCapacityOfferings"
+    auto_scaling:
+      - "dynamodb:UpdateTableReplicaAutoScaling"
+      - "dynamodb:DescribeTableReplicaAutoScaling"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}   # DynamoDB is passive — it does not need IAM actions from source services
+
+  as_source_to: {}   # DynamoDB is passive — callers need their own permissions
+
+  # Common IAM permission sets for services that READ from DynamoDB
+  common_reader_permissions:
+    - "dynamodb:GetItem"
+    - "dynamodb:BatchGetItem"
+    - "dynamodb:Query"
+    - "dynamodb:Scan"
+
+  # Common IAM permission sets for services that WRITE to DynamoDB
+  common_writer_permissions:
+    - "dynamodb:PutItem"
+    - "dynamodb:UpdateItem"
+    - "dynamodb:DeleteItem"
+    - "dynamodb:BatchWriteItem"
+
+  # Common stream consumer permissions
+  common_stream_permissions:
+    - "dynamodb:DescribeStream"
+    - "dynamodb:GetRecords"
+    - "dynamodb:GetShardIterator"
+    - "dynamodb:ListStreams"
+
+  # DynamoDB condition keys
+  condition_keys:
+    - "dynamodb:Attributes"              # filter by attribute names
+    - "dynamodb:EnclosingOperation"      # block/allow transaction APIs
+    - "dynamodb:FullTableScan"           # block full table scans (Bool)
+    - "dynamodb:LeadingKeys"             # filter by partition key values
+    - "dynamodb:ReturnConsumedCapacity"
+    - "dynamodb:ReturnValues"
+    - "dynamodb:Select"                  # filter Query/Scan select parameter
+
+# -- 16. Environment Variables -----------------------------------------------
+env_vars:
+  as_target_of: {}  # DynamoDB is passive; no env vars auto-wired for sources
+  as_source_to: {}  # DynamoDB is passive; no env vars auto-wired for targets
+
+# -- 17. VPC Triggers -------------------------------------------------------
+vpc_triggers: []     # DynamoDB does not need VPC placement (uses VPC endpoints)
+
+# -- 18. Integration Wiring Ownership ---------------------------------------
+integrations:
+  lambda_reads_dynamodb:
+    description: "Lambda reads items from DynamoDB table"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "dynamodb:GetItem"
+      - "dynamodb:BatchGetItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+
+  lambda_writes_dynamodb:
+    description: "Lambda writes items to DynamoDB table"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "dynamodb:PutItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:BatchWriteItem"
+
+  dynamodb_streams_to_lambda:
+    description: "DynamoDB Streams triggers Lambda function (event source mapping)"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping"
+    iam_permissions_on_caller:
+      - "dynamodb:DescribeStream"
+      - "dynamodb:GetRecords"
+      - "dynamodb:GetShardIterator"
+      - "dynamodb:ListStreams"
+    note: "DynamoDB renderer enables streams when Lambda is a target"
+
+  dynamodb_to_kinesis:
+    description: "DynamoDB change data capture to Kinesis Data Streams"
+    owned_by: "dynamodb"
+    terraform_resources:
+      - "aws_dynamodb_kinesis_streaming_destination"
+
+  stepfunctions_reads_dynamodb:
+    description: "Step Functions reads/writes DynamoDB via SDK integration"
+    owned_by: "stepfunctions"
+    iam_permissions_on_caller:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+
+  glue_reads_dynamodb:
+    description: "Glue ETL job reads from DynamoDB table"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "dynamodb:DescribeTable"
+      - "dynamodb:Scan"
+      - "dynamodb:GetItem"
+      - "dynamodb:BatchGetItem"
+
+  emr_reads_dynamodb:
+    description: "EMR reads/writes DynamoDB via Hive connector"
+    owned_by: "emr"
+    iam_permissions_on_caller:
+      - "dynamodb:DescribeTable"
+      - "dynamodb:Scan"
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:BatchGetItem"
+
+  dms_replicates_dynamodb:
+    description: "DMS uses DynamoDB as source or target endpoint"
+    owned_by: "dms"
+    iam_permissions_on_caller:
+      - "dynamodb:DescribeTable"
+      - "dynamodb:Scan"
+      - "dynamodb:PutItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:BatchWriteItem"
+
+  dynamodb_export_to_s3:
+    description: "DynamoDB export to S3 (full or incremental)"
+    owned_by: "dynamodb"
+    iam_permissions_needed:
+      - "dynamodb:ExportTableToPointInTime"
+      - "s3:PutObject"
+      - "s3:AbortMultipartUpload"
+
+  s3_import_to_dynamodb:
+    description: "Import data from S3 into DynamoDB table"
+    owned_by: "dynamodb"
+    iam_permissions_needed:
+      - "dynamodb:ImportTable"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+  redshift_zero_etl:
+    description: "Redshift zero-ETL integration for analytics on DynamoDB data"
+    owned_by: "redshift"
+    note: "No impact on production DynamoDB workloads"
+
+  opensearch_zero_etl:
+    description: "OpenSearch zero-ETL for full-text/vector search on DynamoDB data"
+    owned_by: "opensearch"
+
+# -- 19. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_dynamodb_table"
+      description: "The DynamoDB table"
+      always_created: true
+  conditional:
+    - resource: "aws_dynamodb_table_replica"
+      condition: "When global table replicas are needed"
+    - resource: "aws_dynamodb_kinesis_streaming_destination"
+      condition: "When streaming to Kinesis Data Streams"
+    - resource: "aws_dynamodb_table_item"
+      condition: "When seeding initial data (rare in production)"
+    - resource: "aws_dynamodb_contributor_insights"
+      condition: "When Contributor Insights is enabled"
+    - resource: "aws_dynamodb_table_export"
+      condition: "When exporting to S3"
+    - resource: "aws_dynamodb_resource_policy"
+      condition: "When resource-based policy is needed"
+  related:
+    - resource: "aws_appautoscaling_target"
+      description: "Auto-scaling target for RCU/WCU"
+    - resource: "aws_appautoscaling_policy"
+      description: "Auto-scaling policy (target tracking)"
+    - resource: "aws_dax_cluster"
+      description: "DAX caching cluster"
+    - resource: "aws_dax_parameter_group"
+      description: "DAX parameter group"
+    - resource: "aws_dax_subnet_group"
+      description: "DAX subnet group"
+    - resource: "aws_lambda_event_source_mapping"
+      description: "Lambda event source for DynamoDB Streams (created by Lambda renderer)"
+
+# -- 20. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  client: "dynamodb"
+  item_operations:
+    put_item:
+      description: "Insert or replace an item in a table"
+      parameters:
+        TableName: {type: string, required: true}
+        Item: {type: object, required: true, description: "DynamoDB-typed attribute map, e.g. {'id': {'S': 'abc'}}"}
+        ConditionExpression: {type: string}
+        ReturnValues: {type: string, description: "NONE | ALL_OLD | UPDATED_OLD | ALL_NEW | UPDATED_NEW"}
+    get_item:
+      description: "Get a single item by primary key"
+      parameters:
+        TableName: {type: string, required: true}
+        Key: {type: object, required: true}
+        ConsistentRead: {type: boolean, description: "true for strongly consistent read"}
+        ProjectionExpression: {type: string}
+      returns: ["Item"]
+    update_item:
+      description: "Update specific attributes of an item"
+      parameters:
+        TableName: {type: string, required: true}
+        Key: {type: object, required: true}
+        UpdateExpression: {type: string, required: true}
+        ExpressionAttributeValues: {type: object}
+        ExpressionAttributeNames: {type: object}
+        ConditionExpression: {type: string}
+        ReturnValues: {type: string}
+    delete_item:
+      description: "Delete a single item by primary key"
+      parameters:
+        TableName: {type: string, required: true}
+        Key: {type: object, required: true}
+        ConditionExpression: {type: string}
+    query:
+      description: "Query items by partition key with optional sort key condition"
+      parameters:
+        TableName: {type: string, required: true}
+        KeyConditionExpression: {type: string, required: true}
+        ExpressionAttributeValues: {type: object}
+        FilterExpression: {type: string}
+        ProjectionExpression: {type: string}
+        Limit: {type: integer}
+        ScanIndexForward: {type: boolean, description: "false for descending sort order"}
+        IndexName: {type: string, description: "GSI or LSI name"}
+        ConsistentRead: {type: boolean}
+        ExclusiveStartKey: {type: object, description: "For pagination"}
+      returns: ["Items", "Count", "ScannedCount", "LastEvaluatedKey"]
+    scan:
+      description: "Scan all items in a table (expensive -- use query when possible)"
+      parameters:
+        TableName: {type: string, required: true}
+        FilterExpression: {type: string}
+        ProjectionExpression: {type: string}
+        Limit: {type: integer}
+        ExclusiveStartKey: {type: object}
+        IndexName: {type: string}
+      returns: ["Items", "Count", "ScannedCount", "LastEvaluatedKey"]
+    batch_write_item:
+      description: "Write up to 25 items across one or more tables"
+      parameters:
+        RequestItems: {type: object, required: true, description: "{'TableName': [{'PutRequest': {'Item': ...}} | {'DeleteRequest': {'Key': ...}}]}"}
+      returns: ["UnprocessedItems"]
+    batch_get_item:
+      description: "Get up to 100 items across one or more tables"
+      parameters:
+        RequestItems: {type: object, required: true}
+      returns: ["Responses", "UnprocessedKeys"]
+  transaction_operations:
+    transact_write_items:
+      description: "Atomic write of up to 100 items across tables"
+      parameters:
+        TransactItems: {type: list, required: true, description: "List of Put/Update/Delete/ConditionCheck actions"}
+        ClientRequestToken: {type: string, description: "Idempotency token"}
+    transact_get_items:
+      description: "Atomic read of up to 100 items across tables"
+      parameters:
+        TransactItems: {type: list, required: true}
+      returns: ["Responses"]
+  table_operations:
+    create_table:
+      description: "Create a new DynamoDB table"
+      parameters:
+        TableName: {type: string, required: true}
+        KeySchema: {type: list, required: true}
+        AttributeDefinitions: {type: list, required: true}
+        BillingMode: {type: string, description: "PAY_PER_REQUEST or PROVISIONED"}
+        ProvisionedThroughput: {type: object}
+        GlobalSecondaryIndexes: {type: list}
+        LocalSecondaryIndexes: {type: list}
+        StreamSpecification: {type: object}
+        Tags: {type: list}
+    update_table:
+      description: "Update table settings (capacity, GSI, streams, TTL)"
+      parameters:
+        TableName: {type: string, required: true}
+        ProvisionedThroughput: {type: object}
+        BillingMode: {type: string}
+        GlobalSecondaryIndexUpdates: {type: list}
+        StreamSpecification: {type: object}
+    delete_table:
+      description: "Delete a DynamoDB table"
+      parameters:
+        TableName: {type: string, required: true}
+    describe_table:
+      description: "Get table metadata"
+      parameters:
+        TableName: {type: string, required: true}
+      returns: ["Table.TableArn", "Table.TableStatus", "Table.ProvisionedThroughput", "Table.KeySchema", "Table.GlobalSecondaryIndexes", "Table.LocalSecondaryIndexes", "Table.ItemCount", "Table.TableSizeBytes", "Table.StreamSpecification"]
+    list_tables:
+      description: "List all table names in account/region"
+      parameters:
+        Limit: {type: integer}
+        ExclusiveStartTableName: {type: string}
+      returns: ["TableNames", "LastEvaluatedTableName"]
+  backup_operations:
+    create_backup:
+      description: "Create an on-demand backup of a table"
+      parameters:
+        TableName: {type: string, required: true}
+        BackupName: {type: string, required: true}
+    describe_backup:
+      description: "Get backup details"
+      parameters:
+        BackupArn: {type: string, required: true}
+    list_backups:
+      description: "List all backups"
+      parameters:
+        TableName: {type: string}
+    restore_table_from_backup:
+      description: "Restore a table from backup"
+      parameters:
+        TargetTableName: {type: string, required: true}
+        BackupArn: {type: string, required: true}
+    update_continuous_backups:
+      description: "Enable/disable point-in-time recovery"
+      parameters:
+        TableName: {type: string, required: true}
+        PointInTimeRecoverySpecification: {type: object, required: true}
+  tagging_operations:
+    tag_resource:
+      description: "Add tags to a DynamoDB resource"
+      parameters:
+        ResourceArn: {type: string, required: true}
+        Tags: {type: list, required: true}
+    untag_resource:
+      description: "Remove tags from a DynamoDB resource"
+      parameters:
+        ResourceArn: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+    list_tags_of_resource:
+      description: "List tags on a resource"
+      parameters:
+        ResourceArn: {type: string, required: true}
+
+# -- 21. Runtime Diagnostics -------------------------------------------------
+runtime_diagnostics:
+  - pattern: "ResourceNotFoundException.*dynamodb|Table.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "DynamoDB table does not exist or is in wrong region"
+    fix_type: manual
+    resolution: "Verify table name and region. Check terraform apply output."
+
+  - pattern: "ProvisionedThroughputExceededException"
+    category: QUOTA
+    cause: "DynamoDB read/write capacity exhausted"
+    fix_type: update_config
+    resolution: "dynamodb.update_table(TableName=name, ProvisionedThroughput={'ReadCapacityUnits':25,'WriteCapacityUnits':25}) or switch to PAY_PER_REQUEST"
+
+  - pattern: "ValidationException.*KeySchema"
+    category: VALIDATION
+    cause: "Invalid key schema — cannot change primary key after table creation"
+    fix_type: manual
+    resolution: "Primary key is immutable. Create a new table with the desired schema and migrate data."
+
+  - pattern: "ConditionalCheckFailedException"
+    category: CONDITIONAL_WRITE
+    cause: "Condition expression evaluated to false"
+    fix_type: retry
+    resolution: "Item state does not match condition. Re-read item and retry with updated condition."
+
+  - pattern: "ItemCollectionSizeLimitExceededException"
+    category: SIZE_LIMIT
+    cause: "Item collection (all items with same partition key) exceeds 10 GB (LSI tables)"
+    fix_type: manual
+    resolution: "Redistribute data across partition keys or remove LSI."
+
+  - pattern: "TransactionConflictException"
+    category: CONFLICT
+    cause: "Transaction conflict with another transaction on the same items"
+    fix_type: retry
+    resolution: "Retry the transaction. Consider reducing contention on hot items."
+
+  - pattern: "AccessDeniedException.*dynamodb"
+    category: PERMISSION
+    cause: "Caller IAM role lacks required DynamoDB permissions"
+    fix_type: update_iam
+    resolution: "Add missing dynamodb:* actions to the caller's IAM role."
+
+  - pattern: "ResourceInUseException"
+    category: ALREADY_EXISTS
+    cause: "Table or resource already exists or is being created/deleted"
+    fix_type: wait
+    resolution: "Wait for ongoing operation to complete, then retry."
+
+  - pattern: "LimitExceededException"
+    category: QUOTA
+    cause: "AWS account limit exceeded (e.g., max tables, max GSIs)"
+    fix_type: manual
+    resolution: "Request a service quota increase via AWS Support."
+
+# -- 22. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"  # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 23. Code Update (Developer Agent) --------------------------------------
+code_update:
+  method: api_config
+  boto3_client: dynamodb
+  description: >
+    DynamoDB has no code. Update table capacity via update_table(). Cannot change
+    primary key schema after creation. Can add/remove GSIs. Data via put_item()/batch_write_item().
+  config_update:
+    client: dynamodb
+    operation: update_table
+    id_param: TableName
+    id_value: "{resource_name}"
+    note: "Cannot change KeySchema after table creation. Can change BillingMode and ProvisionedThroughput."
+  discovery_ops:
+    - op: describe_table
+      id_param: TableName
+      returns: ["Table.TableArn", "Table.TableStatus", "Table.ProvisionedThroughput", "Table.KeySchema", "Table.GlobalSecondaryIndexes", "Table.ItemCount"]
+    - op: list_tables
+      returns: ["TableNames"]
+    - op: describe_time_to_live
+      id_param: TableName
+      returns: ["TimeToLiveDescription.TimeToLiveStatus", "TimeToLiveDescription.AttributeName"]
+    - op: describe_continuous_backups
+      id_param: TableName
+      returns: ["ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus"]

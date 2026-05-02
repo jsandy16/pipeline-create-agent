@@ -1,0 +1,1095 @@
+# ============================================================================
+# CloudWatch Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL CloudWatch knowledge needed
+# by the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/cloudwatch.yaml with exhaustive
+# coverage of CloudWatch capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# NOTE: In our pipeline engine, "cloudwatch" is a service type that represents
+# CloudWatch Event Rules (schedule or event pattern triggers). This is the
+# legacy CloudWatch Events, which is now part of EventBridge. The Terraform
+# resources are identical (aws_cloudwatch_event_rule, aws_cloudwatch_event_target).
+# This spec also covers the broader CloudWatch ecosystem: metrics, alarms,
+# dashboards, logs, anomaly detection, and Synthetics.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - resource naming constraints
+#   3. defaults          - Terraform attribute defaults (free-tier safe)
+#   4. quotas            - AWS service limits
+#   5. metrics           - CloudWatch Metrics concepts and namespaces
+#   6. alarms            - metric alarms, composite alarms, anomaly detection
+#   7. dashboards        - CloudWatch Dashboards
+#   8. log_groups        - CloudWatch Logs (groups, streams, insights)
+#   9. events            - CloudWatch Events / EventBridge rules (the pipeline type)
+#  10. synthetics        - CloudWatch Synthetics canaries
+#  11. contributor_insights - Contributor Insights rules
+#  12. encryption        - encryption for logs and metrics
+#  13. iam               - complete action catalog, ARN formats
+#  14. env_vars          - auto-wired environment variables
+#  15. vpc_triggers      - VPC placement rules
+#  16. integrations      - wiring ownership with all connected services
+#  17. terraform_resources - all TF resource types
+#  18. boto3_operations  - complete API operation reference
+#  19. runtime_diagnostics - error patterns & auto-fix rules
+#  20. tags              - tagging constraints
+#  21. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: cloudwatch
+  aws_service_name: "Amazon CloudWatch"
+  is_principal: false         # CloudWatch Events has no execution role of its own
+  terraform_resource: aws_cloudwatch_event_rule
+  description: >
+    CloudWatch Event Rule for scheduled triggers or event pattern matching.
+    In the pipeline engine, the cloudwatch service type creates
+    aws_cloudwatch_event_rule + aws_cloudwatch_event_target resources, identical
+    to EventBridge rules. The broader CloudWatch service also encompasses
+    metrics, alarms, dashboards, logs, and monitoring.
+  free_tier:
+    status: always_free
+    details: >
+      10 custom metrics, 10 alarms, 1M API requests, 5 GB log data ingestion,
+      5 GB log data storage (archived), 3 dashboards with up to 50 metrics each,
+      basic monitoring (5-minute intervals) for EC2, EBS, ELB. Detailed monitoring
+      (1-minute) has additional charges. High-resolution custom metrics
+      (1-second) are charged per metric per month.
+  pricing_model: pay_per_use
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  event_rule_name:
+    max_length: 64
+    valid_characters: "a-zA-Z0-9._-"
+    rules:
+      - "Must contain at least one character"
+      - "Letters, digits, periods, hyphens, underscores only"
+  alarm_name:
+    max_length: 255
+    valid_characters: "Any UTF-8 characters"
+    rules:
+      - "Must be unique within the AWS account"
+  dashboard_name:
+    max_length: 255
+    valid_characters: "a-zA-Z0-9-_"
+  log_group_name:
+    max_length: 512
+    valid_characters: "a-zA-Z0-9._/-#"
+    rules:
+      - "Must start with a letter, digit, or slash"
+      - "Convention: /aws/SERVICE/RESOURCE_NAME"
+  log_stream_name:
+    max_length: 512
+    valid_characters: "Any characters except : and *"
+  metric_name:
+    max_length: 256
+    valid_characters: "Any valid XML characters"
+  namespace:
+    max_length: 256
+    valid_characters: "a-zA-Z0-9._/#:-"
+    rules:
+      - "Custom namespaces must NOT start with 'AWS/'"
+      - "AWS service namespaces start with 'AWS/' (e.g., AWS/EC2, AWS/Lambda)"
+
+# -- 3. Defaults (free-tier / minimum-cost safe) -----------------------------
+defaults:
+  schedule_expression: "rate(5 minutes)"
+  state: "ENABLED"
+  # CloudWatch Logs defaults (used by all service renderers)
+  log_retention_days: 7        # minimum useful retention; 0 = never expire
+  # Alarms defaults
+  alarm_evaluation_periods: 1
+  alarm_period: 300            # 5 minutes
+  alarm_statistic: "Average"
+  alarm_treat_missing_data: "missing"
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  # CloudWatch Events / EventBridge (same limits)
+  rules_per_event_bus: 300
+  targets_per_rule: 5
+  invocations_per_second: 10000
+
+  # CloudWatch Metrics
+  custom_metrics_per_account: 10     # free tier; unlimited with charges
+  dimensions_per_metric: 30
+  max_dimension_name_length: 256
+  max_dimension_value_length: 1024
+  metric_data_points_per_put: 1000   # PutMetricData batch limit
+  max_metric_resolution: 1           # 1-second (high resolution)
+  standard_resolution: 60            # 1-minute
+  basic_monitoring_resolution: 300   # 5-minute (EC2 basic)
+  metric_retention:
+    high_resolution: "3 hours"       # 1-second data
+    standard: "15 days"              # 1-minute data (60-second period)
+    aggregated_5min: "63 days"       # 5-minute data (300-second period)
+    aggregated_1hour: "455 days"     # 1-hour data (3600-second period)
+
+  # CloudWatch Alarms
+  alarms_per_account: 5000            # adjustable
+  composite_alarms_per_account: 500
+  metric_math_metrics_per_alarm: 10
+
+  # CloudWatch Dashboards
+  dashboards_per_account: 500         # adjustable
+  max_widgets_per_dashboard: 500
+  max_metrics_per_dashboard_widget: 500
+  free_dashboards: 3                  # up to 50 metrics each
+
+  # CloudWatch Logs
+  log_groups_per_account: 1000000     # 1 million
+  log_streams_per_group: null         # unlimited
+  max_log_event_size: "256 KB"
+  max_log_events_per_put: 10000
+  max_batch_size: "1 MB"             # PutLogEvents batch
+  log_event_timestamp_range: "14 days past to 2 hours future"
+  subscription_filters_per_group: 2
+  metric_filters_per_group: 100
+  retention_options_days:
+    - 1
+    - 3
+    - 5
+    - 7
+    - 14
+    - 30
+    - 60
+    - 90
+    - 120
+    - 150
+    - 180
+    - 365
+    - 400
+    - 545
+    - 731
+    - 1096    # 3 years
+    - 1827    # 5 years
+    - 2192    # 6 years
+    - 2557    # 7 years
+    - 2922    # 8 years
+    - 3288    # 9 years
+    - 3653    # 10 years
+    - 0       # never expire
+
+  # CloudWatch Synthetics
+  canaries_per_account: 200
+
+  # Contributor Insights
+  rules_per_account: 100
+
+# -- 5. Metrics ---------------------------------------------------------------
+metrics:
+  description: >
+    CloudWatch Metrics are time-series data points published by AWS services
+    or custom applications. Each metric is identified by namespace, metric name,
+    and optional dimensions.
+  concepts:
+    namespace: "Grouping container (e.g., AWS/EC2, AWS/Lambda, Custom/MyApp)"
+    metric_name: "Name of the metric (e.g., CPUUtilization, Invocations)"
+    dimensions: "Key-value pairs that further identify the metric (e.g., InstanceId, FunctionName)"
+    statistic: "Aggregation function: Sum, Average, Minimum, Maximum, SampleCount"
+    extended_statistics: "Percentiles: p50, p90, p95, p99, etc."
+    period: "Aggregation window in seconds (1, 5, 10, 30, 60, 300, 3600, etc.)"
+    unit: "Measurement unit (Seconds, Bytes, Count, Percent, etc.)"
+
+  aws_namespaces:
+    compute:
+      - namespace: "AWS/EC2"
+        key_metrics: ["CPUUtilization", "NetworkIn", "NetworkOut", "DiskReadOps", "StatusCheckFailed"]
+      - namespace: "AWS/Lambda"
+        key_metrics: ["Invocations", "Duration", "Errors", "Throttles", "ConcurrentExecutions", "IteratorAge"]
+      - namespace: "AWS/ECS"
+        key_metrics: ["CPUUtilization", "MemoryUtilization"]
+    storage:
+      - namespace: "AWS/S3"
+        key_metrics: ["BucketSizeBytes", "NumberOfObjects", "AllRequests", "4xxErrors", "5xxErrors"]
+      - namespace: "AWS/EBS"
+        key_metrics: ["VolumeReadOps", "VolumeWriteOps", "VolumeTotalReadTime"]
+    database:
+      - namespace: "AWS/RDS"
+        key_metrics: ["CPUUtilization", "FreeableMemory", "DatabaseConnections", "ReadLatency"]
+      - namespace: "AWS/DynamoDB"
+        key_metrics: ["ConsumedReadCapacityUnits", "ConsumedWriteCapacityUnits", "ThrottledRequests"]
+      - namespace: "AWS/Redshift"
+        key_metrics: ["CPUUtilization", "DatabaseConnections", "PercentageDiskSpaceUsed"]
+    messaging:
+      - namespace: "AWS/SQS"
+        key_metrics: ["NumberOfMessagesSent", "NumberOfMessagesReceived", "ApproximateNumberOfMessagesVisible"]
+      - namespace: "AWS/SNS"
+        key_metrics: ["NumberOfMessagesPublished", "NumberOfNotificationsDelivered"]
+      - namespace: "AWS/Kinesis"
+        key_metrics: ["IncomingRecords", "IncomingBytes", "GetRecords.IteratorAgeMilliseconds"]
+    events:
+      - namespace: "AWS/Events"
+        key_metrics: ["Invocations", "FailedInvocations", "MatchedEvents", "TriggeredRules", "ThrottledRules"]
+    analytics:
+      - namespace: "AWS/Glue"
+        key_metrics: ["glue.ALL.jvm.heap.used", "glue.driver.aggregate.bytesRead"]
+      - namespace: "AWS/SageMaker"
+        key_metrics: ["Invocations", "ModelLatency", "Invocation4XXErrors", "Invocation5XXErrors"]
+      - namespace: "AWS/EMR"
+        key_metrics: ["AppsRunning", "AppsPending", "CoreNodesRunning", "HDFSUtilization"]
+
+  custom_metrics:
+    description: "Publish your own metrics via PutMetricData API"
+    terraform_resource: null  # no TF resource; API-only
+    high_resolution:
+      description: "1-second resolution metrics"
+      storage_resolution: 1
+      cost: "Higher than standard resolution"
+    standard_resolution:
+      description: "60-second resolution (default)"
+      storage_resolution: 60
+    embedded_metric_format:
+      description: "Publish metrics via structured JSON log messages"
+      advantages:
+        - "No PutMetricData API calls needed"
+        - "Metrics extracted automatically from logs"
+        - "Detailed log data alongside metrics"
+
+  metric_math:
+    description: "Combine metrics using mathematical expressions"
+    functions:
+      - "METRICS(expression) -- reference other metrics"
+      - "PERIOD(metric) -- get the period"
+      - "IF(condition, true, false) -- conditional"
+      - "FILL(metric, value) -- fill missing data"
+      - "SEARCH(expression) -- dynamic metric discovery"
+    use_cases:
+      - "Error rate = Errors / Invocations * 100"
+      - "Cost per request = EstimatedCharges / Invocations"
+      - "Aggregate across dimensions"
+
+# -- 6. Alarms ---------------------------------------------------------------
+alarms:
+  metric_alarm:
+    description: "Watch a single metric and trigger actions when threshold is breached"
+    terraform_resource: "aws_cloudwatch_metric_alarm"
+    states:
+      OK: "Metric is within threshold"
+      ALARM: "Metric has breached threshold"
+      INSUFFICIENT_DATA: "Not enough data to determine state"
+    comparison_operators:
+      - "GreaterThanOrEqualToThreshold"
+      - "GreaterThanThreshold"
+      - "LessThanOrEqualToThreshold"
+      - "LessThanThreshold"
+      - "LessThanLowerOrGreaterThanUpperThreshold"  # anomaly detection
+      - "LessThanLowerThreshold"
+      - "GreaterThanUpperThreshold"
+    actions:
+      alarm_actions: "Actions when alarm triggers (SNS, Auto Scaling, EC2, Lambda)"
+      ok_actions: "Actions when alarm returns to OK"
+      insufficient_data_actions: "Actions when data is insufficient"
+    treat_missing_data:
+      missing: "Alarm stays in current state (default)"
+      notBreaching: "Treat as within threshold"
+      breaching: "Treat as threshold breached"
+      ignore: "Maintain current alarm state"
+
+  composite_alarm:
+    description: "Combine multiple alarms with AND/OR/NOT logic"
+    terraform_resource: "aws_cloudwatch_composite_alarm"
+    max_per_account: 500
+    rule_expression: "ALARM('alarm-name') AND NOT ALARM('other-alarm')"
+
+  anomaly_detection:
+    description: "ML-based dynamic thresholds that adapt to metric patterns"
+    terraform_resource: "aws_cloudwatch_metric_alarm"
+    terraform_attribute: "threshold_metric_id"
+    model: "Uses up to 2 weeks of metric history to build expected value band"
+    note: "Uses ANOMALY_DETECTION_BAND function in metric math"
+
+  common_alarm_patterns:
+    lambda_errors:
+      metric_name: "Errors"
+      namespace: "AWS/Lambda"
+      statistic: "Sum"
+      threshold: 1
+      comparison_operator: "GreaterThanOrEqualToThreshold"
+    lambda_duration:
+      metric_name: "Duration"
+      namespace: "AWS/Lambda"
+      statistic: "Average"
+      threshold: 5000  # ms
+      comparison_operator: "GreaterThanThreshold"
+    sqs_age:
+      metric_name: "ApproximateAgeOfOldestMessage"
+      namespace: "AWS/SQS"
+      statistic: "Maximum"
+      threshold: 300  # seconds
+      comparison_operator: "GreaterThanThreshold"
+    ec2_cpu:
+      metric_name: "CPUUtilization"
+      namespace: "AWS/EC2"
+      statistic: "Average"
+      threshold: 80
+      comparison_operator: "GreaterThanThreshold"
+
+# -- 7. Dashboards -----------------------------------------------------------
+dashboards:
+  description: "Customizable home pages for CloudWatch metrics visualization"
+  terraform_resource: "aws_cloudwatch_dashboard"
+  widget_types:
+    metric:
+      description: "Line, stacked area, number, or bar chart for metrics"
+      types: ["line", "stacked", "bar", "pie"]
+    text:
+      description: "Free-form text with Markdown support"
+    log:
+      description: "Log query results from CloudWatch Logs Insights"
+    alarm:
+      description: "Alarm status overview grid"
+    explorer:
+      description: "Dynamic widgets based on tag-based metric groups"
+  body_format: "JSON string defining widgets, layout, and data sources"
+  cross_account:
+    description: "Dashboards can display metrics from other AWS accounts"
+    requirement: "CloudWatch cross-account observability must be enabled"
+  automatic_dashboards:
+    description: "AWS creates automatic dashboards for services in use"
+    examples: ["Lambda", "EC2", "S3", "DynamoDB"]
+
+# -- 8. Log Groups (CloudWatch Logs) -----------------------------------------
+log_groups:
+  description: >
+    CloudWatch Logs collects, stores, and analyzes log data from AWS services
+    and applications. Logs are organized into log groups (containers) and log
+    streams (sequences of log events from a single source).
+  terraform_resource: "aws_cloudwatch_log_group"
+
+  key_concepts:
+    log_group: "Container for log streams with shared retention, permissions, and encryption"
+    log_stream: "Sequence of log events from a single source (e.g., one Lambda invocation)"
+    log_event: "A single log message with timestamp (max 256 KB)"
+    retention: "How long logs are kept (1 day to 10 years, or forever)"
+
+  log_group_classes:
+    standard:
+      description: "Full-featured log group (default)"
+      capabilities: ["Logs Insights", "Metric Filters", "Subscription Filters", "Live Tail"]
+    infrequent_access:
+      description: "Lower cost, reduced feature set"
+      terraform_attribute: "log_group_class = 'INFREQUENT_ACCESS'"
+      limitations:
+        - "No Logs Insights queries"
+        - "No metric filters"
+        - "No subscription filters"
+        - "No Live Tail"
+      cost: "50% lower ingestion cost vs standard"
+
+  aws_service_log_patterns:
+    description: "Standard log group naming conventions used by AWS services"
+    patterns:
+      lambda: "/aws/lambda/FUNCTION_NAME"
+      api_gateway: "/aws/apigateway/API_NAME"
+      ecs: "/ecs/TASK_DEFINITION"
+      step_functions: "/aws/vendedlogs/states/STATE_MACHINE_NAME"
+      glue: "/aws/glue/jobs/JOB_NAME"
+      emr: "/aws/emr/EMR_CLUSTER_NAME"
+      sagemaker: "/aws/sagemaker/Endpoints/ENDPOINT_NAME"
+      rds: "/aws/rds/cluster/CLUSTER_NAME/TYPE"
+      codebuild: "/aws/codebuild/PROJECT_NAME"
+      eks: "/aws/eks/CLUSTER_NAME/TYPE"
+      athena: "/aws/athena/WORKGROUP_NAME"
+      kinesis_firehose: "/aws/kinesisfirehose/STREAM_NAME"
+      kinesis_analytics: "/aws/kinesis-analytics/APPLICATION_NAME"
+      msk: "/aws/msk/CLUSTER_NAME"
+      redshift: "/aws/redshift/cluster/CLUSTER_ID"
+      dms: "/aws/dms/tasks/TASK_ID"
+      aurora: "/aws/rds/cluster/CLUSTER_NAME/TYPE"
+
+  logs_insights:
+    description: "Interactive query language for searching and analyzing log data"
+    syntax_examples:
+      basic_filter: "fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20"
+      stats: "stats count(*) as errorCount by bin(5m) | filter @message like /ERROR/"
+      parse: "parse @message 'User * performed * on *' as user, action, resource"
+    max_query_time_range: "Last 6 hours (recommended for performance)"
+    max_log_groups_per_query: 50
+
+  subscription_filters:
+    description: "Real-time stream of log data to destinations"
+    max_per_group: 2
+    destinations:
+      - "Kinesis Data Streams"
+      - "Kinesis Data Firehose"
+      - "Lambda"
+      - "OpenSearch Service"
+    terraform_resources:
+      - "aws_cloudwatch_log_subscription_filter"
+      - "aws_cloudwatch_log_destination" # for cross-account
+
+  metric_filters:
+    description: "Extract metric data from log events using filter patterns"
+    terraform_resource: "aws_cloudwatch_log_metric_filter"
+    max_per_group: 100
+    filter_pattern_types:
+      term_match: '{ $.statusCode = 500 }'
+      space_delimited: '[ip, identity, user, timestamp, request, status_code, size]'
+      json_match: '{ $.errorCode = "AccessDenied" }'
+
+  export:
+    to_s3:
+      description: "Export log data to S3 for long-term storage"
+      terraform_resource: null  # API only (CreateExportTask)
+      note: "One-time export, not continuous. Use subscription filters for continuous."
+    cross_account:
+      description: "Share logs across AWS accounts"
+      terraform_resource: "aws_cloudwatch_log_destination"
+
+# -- 9. Events (CloudWatch Events / Pipeline Service Type) --------------------
+events:
+  description: >
+    In our pipeline engine, the 'cloudwatch' service type creates CloudWatch
+    Event Rules that trigger downstream services on a schedule or event pattern.
+    This is functionally identical to the 'eventbridge' service type.
+  terraform_resource: "aws_cloudwatch_event_rule"
+
+  schedule_expression:
+    rate:
+      format: "rate(VALUE UNIT)"
+      units: ["minute", "minutes", "hour", "hours", "day", "days"]
+      examples:
+        - "rate(5 minutes)"
+        - "rate(1 hour)"
+        - "rate(7 days)"
+    cron:
+      format: "cron(MIN HOUR DOM MON DOW YEAR)"
+      examples:
+        - "cron(0 12 * * ? *)"        # daily noon UTC
+        - "cron(0/15 * * * ? *)"       # every 15 minutes
+        - "cron(0 8 ? * MON-FRI *)"    # weekdays at 8 AM UTC
+
+  targets:
+    description: "Same as EventBridge targets (Lambda, SQS, SNS, Step Functions, etc.)"
+    max_per_rule: 5
+
+  difference_from_eventbridge:
+    description: >
+      In the pipeline engine, 'cloudwatch' uses schedule_expression by default
+      (rate(5 minutes)) while 'eventbridge' can use schedule_expression or
+      event_pattern. Both produce the same Terraform resources. Use 'cloudwatch'
+      for time-based triggers and 'eventbridge' for event-driven triggers.
+
+# -- 10. Synthetics ----------------------------------------------------------
+synthetics:
+  description: "Automated canary scripts that monitor endpoints and APIs"
+  terraform_resource: "aws_synthetics_canary"
+  runtime: "syn-nodejs-puppeteer-*"
+  capabilities:
+    - "Monitor HTTP endpoints for availability and latency"
+    - "Visual monitoring (screenshot comparison)"
+    - "API monitoring with custom scripts"
+    - "Heartbeat monitoring (simple availability)"
+  schedule: "rate(N minutes) or cron expression"
+  artifacts_bucket: "Canary stores screenshots and logs in S3"
+  iam_role: "Canary needs IAM role with s3:PutObject and logs:CreateLogGroup"
+  pricing: "Not free tier. Charged per canary run."
+
+# -- 11. Contributor Insights ------------------------------------------------
+contributor_insights:
+  description: "Analyze log data to find top contributors (e.g., top talkers, error sources)"
+  terraform_resource: "aws_cloudwatch_log_group"  # applied to log groups
+  max_rules: 100
+  built_in_rules: "Available for DynamoDB and VPC Flow Logs"
+  custom_rules: "Define rules with JSON syntax targeting specific log fields"
+
+# -- 12. Encryption ----------------------------------------------------------
+encryption:
+  cloudwatch_logs:
+    description: "Log groups can be encrypted with KMS customer-managed keys"
+    terraform_attribute: "kms_key_id"
+    default: "AWS-owned key (free)"
+    kms_permissions:
+      - "kms:Encrypt"
+      - "kms:Decrypt"
+      - "kms:GenerateDataKey*"
+      - "kms:DescribeKey"
+    kms_condition: "kms:EncryptionContext:aws:logs:arn = arn:aws:logs:REGION:ACCOUNT:log-group:GROUP_NAME"
+  cloudwatch_metrics:
+    description: "Metrics data encrypted at rest by default with AWS-owned keys"
+    note: "Cannot use customer-managed keys for metrics"
+
+# -- 13. IAM ----------------------------------------------------------------
+iam:
+  arn_formats:
+    event_rule: "arn:aws:events:REGION:ACCOUNT:rule/RULE_NAME"
+    alarm: "arn:aws:cloudwatch:REGION:ACCOUNT:alarm:ALARM_NAME"
+    dashboard: "arn:aws:cloudwatch::ACCOUNT:dashboard/DASHBOARD_NAME"
+    log_group: "arn:aws:logs:REGION:ACCOUNT:log-group:GROUP_NAME"
+    log_group_wildcard: "arn:aws:logs:REGION:ACCOUNT:log-group:GROUP_NAME:*"
+    canary: "arn:aws:synthetics:REGION:ACCOUNT:canary:CANARY_NAME"
+    metric_stream: "arn:aws:cloudwatch:REGION:ACCOUNT:metric-stream/STREAM_NAME"
+
+  # CloudWatch Events is not a principal; always is empty
+  always: []
+
+  actions:
+    # CloudWatch Events (same as EventBridge)
+    events:
+      - "events:PutRule"
+      - "events:DeleteRule"
+      - "events:DescribeRule"
+      - "events:EnableRule"
+      - "events:DisableRule"
+      - "events:ListRules"
+      - "events:PutTargets"
+      - "events:RemoveTargets"
+      - "events:ListTargetsByRule"
+      - "events:PutEvents"
+      - "events:TestEventPattern"
+
+    # CloudWatch Metrics
+    metrics:
+      - "cloudwatch:PutMetricData"
+      - "cloudwatch:GetMetricData"
+      - "cloudwatch:GetMetricStatistics"
+      - "cloudwatch:ListMetrics"
+      - "cloudwatch:DescribeAnomalyDetectors"
+      - "cloudwatch:PutAnomalyDetector"
+      - "cloudwatch:DeleteAnomalyDetector"
+      - "cloudwatch:GetInsightRuleReport"
+      - "cloudwatch:PutInsightRule"
+      - "cloudwatch:DeleteInsightRule"
+      - "cloudwatch:DescribeInsightRules"
+      - "cloudwatch:PutMetricStream"
+      - "cloudwatch:DeleteMetricStream"
+      - "cloudwatch:GetMetricStream"
+      - "cloudwatch:ListMetricStreams"
+      - "cloudwatch:StartMetricStreams"
+      - "cloudwatch:StopMetricStreams"
+
+    # CloudWatch Alarms
+    alarms:
+      - "cloudwatch:PutMetricAlarm"
+      - "cloudwatch:DeleteAlarms"
+      - "cloudwatch:DescribeAlarms"
+      - "cloudwatch:DescribeAlarmsForMetric"
+      - "cloudwatch:DescribeAlarmHistory"
+      - "cloudwatch:SetAlarmState"
+      - "cloudwatch:EnableAlarmActions"
+      - "cloudwatch:DisableAlarmActions"
+      - "cloudwatch:PutCompositeAlarm"
+
+    # CloudWatch Dashboards
+    dashboards:
+      - "cloudwatch:PutDashboard"
+      - "cloudwatch:DeleteDashboards"
+      - "cloudwatch:GetDashboard"
+      - "cloudwatch:ListDashboards"
+
+    # CloudWatch Logs
+    logs:
+      - "logs:CreateLogGroup"
+      - "logs:DeleteLogGroup"
+      - "logs:DescribeLogGroups"
+      - "logs:CreateLogStream"
+      - "logs:DeleteLogStream"
+      - "logs:DescribeLogStreams"
+      - "logs:PutLogEvents"
+      - "logs:GetLogEvents"
+      - "logs:FilterLogEvents"
+      - "logs:GetLogGroupFields"
+      - "logs:GetLogRecord"
+      - "logs:StartQuery"          # Logs Insights
+      - "logs:StopQuery"
+      - "logs:GetQueryResults"
+      - "logs:DescribeQueries"
+      - "logs:PutRetentionPolicy"
+      - "logs:DeleteRetentionPolicy"
+      - "logs:PutSubscriptionFilter"
+      - "logs:DeleteSubscriptionFilter"
+      - "logs:DescribeSubscriptionFilters"
+      - "logs:PutMetricFilter"
+      - "logs:DeleteMetricFilter"
+      - "logs:DescribeMetricFilters"
+      - "logs:PutDestination"
+      - "logs:PutDestinationPolicy"
+      - "logs:PutResourcePolicy"
+      - "logs:DescribeResourcePolicies"
+      - "logs:CreateExportTask"
+      - "logs:DescribeExportTasks"
+      - "logs:TagLogGroup"
+      - "logs:UntagLogGroup"
+      - "logs:ListTagsLogGroup"
+      - "logs:AssociateKmsKey"
+      - "logs:DisassociateKmsKey"
+      - "logs:StartLiveTail"
+      - "logs:StopLiveTail"
+
+    # CloudWatch Synthetics
+    synthetics:
+      - "synthetics:CreateCanary"
+      - "synthetics:DeleteCanary"
+      - "synthetics:DescribeCanaries"
+      - "synthetics:DescribeCanariesLastRun"
+      - "synthetics:GetCanary"
+      - "synthetics:GetCanaryRuns"
+      - "synthetics:StartCanary"
+      - "synthetics:StopCanary"
+      - "synthetics:UpdateCanary"
+      - "synthetics:TagResource"
+
+    # Tagging
+    tagging:
+      - "cloudwatch:TagResource"
+      - "cloudwatch:UntagResource"
+      - "cloudwatch:ListTagsForResource"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}   # CloudWatch events is passive
+  as_source_to: {}   # CloudWatch events is passive
+
+  # Common IAM patterns for services writing to CloudWatch Logs
+  log_writer_permissions:
+    description: "Permissions needed by services that write to CloudWatch Logs"
+    actions:
+      - "logs:CreateLogGroup"
+      - "logs:CreateLogStream"
+      - "logs:PutLogEvents"
+      - "logs:DescribeLogGroups"
+      - "logs:DescribeLogStreams"
+    note: "Most compute services (Lambda, ECS, Glue, etc.) need these in their IAM role"
+
+  # Pipeline run monitor permissions
+  log_reader_permissions:
+    description: "Permissions needed by log_aggregator.py for pipeline run monitoring"
+    actions:
+      - "logs:FilterLogEvents"
+      - "logs:DescribeLogGroups"
+      - "logs:GetLogEvents"
+
+  condition_keys:
+    - "cloudwatch:namespace"
+    - "logs:ResourceTag/${TagKey}"
+
+# -- 14. Environment Variables ------------------------------------------------
+env_vars:
+  as_target_of: {}  # CloudWatch events is passive
+  as_source_to: {}  # CloudWatch events is passive
+
+# -- 15. VPC Triggers --------------------------------------------------------
+vpc_triggers: []     # CloudWatch does not need VPC placement
+
+# -- 16. Integration Wiring Ownership ----------------------------------------
+integrations:
+  cloudwatch_to_lambda:
+    description: "CloudWatch Event Rule triggers Lambda function on schedule"
+    owned_by: "cloudwatch"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule (schedule_expression)"
+      - "aws_cloudwatch_event_target (Lambda function ARN)"
+      - "aws_lambda_permission (principal: events.amazonaws.com, source_arn: rule ARN)"
+    notes:
+      - "statement_id includes source rule label to avoid collisions"
+      - "Two different CW rules invoking the same Lambda need distinct statement_ids"
+
+  cloudwatch_to_sqs:
+    description: "CloudWatch Event Rule sends message to SQS queue on schedule"
+    owned_by: "cloudwatch"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target (SQS queue ARN)"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows events.amazonaws.com SendMessage)"
+
+  all_services_to_cloudwatch_logs:
+    description: "Nearly every compute service writes logs to CloudWatch Logs"
+    owned_by: "each service renderer"
+    mechanism: >
+      Each service renderer creates an aws_cloudwatch_log_group with the
+      service-specific naming pattern (e.g., /aws/lambda/NAME) and configures
+      the service's native logging attribute to point at it.
+    services_with_native_cw_logs:
+      - "lambda"
+      - "step_functions"
+      - "glue"
+      - "glue_databrew"
+      - "emr"
+      - "emr_serverless"
+      - "sagemaker"
+      - "kinesis_firehose"
+      - "kinesis_analytics"
+      - "msk"
+      - "aurora"
+      - "redshift"
+      - "dms"
+      - "athena"
+
+  cloudwatch_alarm_to_sns:
+    description: "CloudWatch alarm triggers SNS notification"
+    owned_by: "cloudwatch alarm"
+    terraform_resources:
+      - "aws_cloudwatch_metric_alarm (alarm_actions = [sns_topic_arn])"
+    note: "Alarm actions can also target Auto Scaling, EC2 actions, or Lambda"
+
+# -- 17. Terraform Resources --------------------------------------------------
+terraform_resources:
+  # Resources created by the cloudwatch renderer (pipeline service type)
+  primary:
+    - resource: "aws_cloudwatch_event_rule"
+      description: "Schedule-based event rule"
+      always_created: true
+    - resource: "aws_cloudwatch_event_target"
+      description: "Target for the event rule (one per target)"
+      always_created: true
+
+  conditional:
+    - resource: "aws_lambda_permission"
+      condition: "When target is Lambda (principal: events.amazonaws.com)"
+
+  # CloudWatch Logs resources (created by other service renderers)
+  log_resources:
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for service logs"
+      created_by: "Each service renderer"
+    - resource: "aws_cloudwatch_log_subscription_filter"
+      description: "Stream logs to Kinesis, Lambda, or OpenSearch"
+    - resource: "aws_cloudwatch_log_metric_filter"
+      description: "Extract metrics from log events"
+    - resource: "aws_cloudwatch_log_resource_policy"
+      description: "Resource policy for cross-service log delivery"
+    - resource: "aws_cloudwatch_log_destination"
+      description: "Cross-account log destination"
+
+  # CloudWatch Monitoring resources
+  monitoring_resources:
+    - resource: "aws_cloudwatch_metric_alarm"
+      description: "Metric alarm with threshold or anomaly detection"
+    - resource: "aws_cloudwatch_composite_alarm"
+      description: "Alarm combining multiple alarms with logic"
+    - resource: "aws_cloudwatch_dashboard"
+      description: "Visualization dashboard"
+    - resource: "aws_cloudwatch_metric_stream"
+      description: "Stream metrics to Kinesis Firehose (for third-party monitoring)"
+
+  # CloudWatch Synthetics
+  synthetics_resources:
+    - resource: "aws_synthetics_canary"
+      description: "Automated endpoint monitoring canary"
+
+  # Created by other renderers
+  created_by_others:
+    - resource: "aws_sqs_queue_policy"
+      created_by: "sqs renderer"
+      condition: "When CloudWatch event targets SQS"
+
+# -- 18. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  events_client: "events"
+  cloudwatch_client: "cloudwatch"
+  logs_client: "logs"
+  synthetics_client: "synthetics"
+
+  # CloudWatch Events operations (same API as EventBridge)
+  event_operations:
+    put_rule:
+      description: "Create or update a CloudWatch Events rule (upsert)"
+      client: events
+      parameters:
+        Name: {type: string, required: true}
+        ScheduleExpression: {type: string, description: "cron() or rate()"}
+        EventPattern: {type: string, description: "JSON event pattern"}
+        State: {type: string, description: "ENABLED or DISABLED"}
+      returns: ["RuleArn"]
+    put_targets:
+      description: "Add targets (Lambda, SQS, etc.) to a rule"
+      client: events
+      parameters:
+        Rule: {type: string, required: true}
+        Targets: {type: list, required: true, description: "List of target dicts with Id, Arn"}
+    remove_targets:
+      description: "Remove targets from a rule"
+      client: events
+      parameters:
+        Rule: {type: string, required: true}
+        Ids: {type: list, required: true}
+    enable_rule:
+      description: "Enable a disabled rule"
+      client: events
+      parameters:
+        Name: {type: string, required: true}
+    disable_rule:
+      description: "Disable an active rule"
+      client: events
+      parameters:
+        Name: {type: string, required: true}
+    describe_rule:
+      description: "Get rule details"
+      client: events
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["Arn", "ScheduleExpression", "EventPattern", "State", "RoleArn"]
+    list_targets_by_rule:
+      description: "List targets for a rule"
+      client: events
+      parameters:
+        Rule: {type: string, required: true}
+      returns: ["Targets[].Id", "Targets[].Arn", "Targets[].Input", "Targets[].InputPath"]
+
+  # CloudWatch Metrics operations
+  metric_operations:
+    put_metric_data:
+      description: "Publish custom metric data points"
+      client: cloudwatch
+      parameters:
+        Namespace: {type: string, required: true}
+        MetricData:
+          type: list
+          required: true
+          description: >
+            List of dicts with MetricName, Value (or Values+Counts for batch),
+            Dimensions (list of Name/Value dicts), Unit, Timestamp,
+            StorageResolution (1 for high-res, 60 for standard).
+    get_metric_data:
+      description: "Retrieve metric data for one or more metrics"
+      client: cloudwatch
+      parameters:
+        MetricDataQueries: {type: list, required: true, description: "List of metric queries with Id, MetricStat or Expression"}
+        StartTime: {type: datetime, required: true}
+        EndTime: {type: datetime, required: true}
+        ScanBy: {type: string, description: "TimestampDescending or TimestampAscending"}
+      returns: ["MetricDataResults[].Id", "MetricDataResults[].Values", "MetricDataResults[].Timestamps"]
+    get_metric_statistics:
+      description: "Get statistics for a single metric"
+      client: cloudwatch
+      parameters:
+        Namespace: {type: string, required: true}
+        MetricName: {type: string, required: true}
+        StartTime: {type: datetime, required: true}
+        EndTime: {type: datetime, required: true}
+        Period: {type: integer, required: true}
+        Statistics: {type: list, description: "Sum, Average, Minimum, Maximum, SampleCount"}
+        Dimensions: {type: list}
+        Unit: {type: string}
+      returns: ["Datapoints[].Timestamp", "Datapoints[].Sum", "Datapoints[].Average"]
+    list_metrics:
+      description: "List available metrics"
+      client: cloudwatch
+      parameters:
+        Namespace: {type: string}
+        MetricName: {type: string}
+        Dimensions: {type: list}
+      returns: ["Metrics[].Namespace", "Metrics[].MetricName", "Metrics[].Dimensions"]
+
+  # CloudWatch Alarms operations
+  alarm_operations:
+    put_metric_alarm:
+      description: "Create or update a metric alarm"
+      client: cloudwatch
+      parameters:
+        AlarmName: {type: string, required: true}
+        MetricName: {type: string, required: true}
+        Namespace: {type: string, required: true}
+        Statistic: {type: string}
+        Period: {type: integer, required: true}
+        Threshold: {type: number}
+        ComparisonOperator: {type: string, required: true}
+        EvaluationPeriods: {type: integer, required: true}
+        AlarmActions: {type: list, description: "SNS topic ARNs, Auto Scaling ARNs, etc."}
+        OKActions: {type: list}
+        TreatMissingData: {type: string}
+        Dimensions: {type: list}
+        DatapointsToAlarm: {type: integer, description: "M of N datapoints to trigger"}
+      returns: []
+    describe_alarms:
+      description: "List CloudWatch alarms"
+      client: cloudwatch
+      parameters:
+        AlarmNames: {type: list}
+        StateValue: {type: string, description: "OK, ALARM, INSUFFICIENT_DATA"}
+        AlarmNamePrefix: {type: string}
+      returns: ["MetricAlarms[].AlarmName", "MetricAlarms[].StateValue", "MetricAlarms[].MetricName"]
+    set_alarm_state:
+      description: "Temporarily set alarm state (for testing)"
+      client: cloudwatch
+      parameters:
+        AlarmName: {type: string, required: true}
+        StateValue: {type: string, required: true}
+        StateReason: {type: string, required: true}
+
+  # CloudWatch Logs operations
+  log_operations:
+    create_log_group:
+      description: "Create a log group"
+      client: logs
+      parameters:
+        logGroupName: {type: string, required: true}
+        kmsKeyId: {type: string, description: "KMS key ARN for encryption"}
+        retentionInDays: {type: integer}
+        logGroupClass: {type: string, description: "STANDARD or INFREQUENT_ACCESS"}
+        tags: {type: object}
+    put_log_events:
+      description: "Upload log events to a log stream"
+      client: logs
+      parameters:
+        logGroupName: {type: string, required: true}
+        logStreamName: {type: string, required: true}
+        logEvents: {type: list, required: true, description: "List of {timestamp, message} dicts"}
+    filter_log_events:
+      description: "Search log events across streams (used by log_aggregator.py)"
+      client: logs
+      parameters:
+        logGroupName: {type: string, required: true}
+        logStreamNames: {type: list}
+        startTime: {type: integer, description: "Epoch milliseconds"}
+        endTime: {type: integer, description: "Epoch milliseconds"}
+        filterPattern: {type: string}
+        nextToken: {type: string}
+        limit: {type: integer}
+      returns: ["events[].timestamp", "events[].message", "events[].logStreamName", "nextToken"]
+    describe_log_groups:
+      description: "List log groups"
+      client: logs
+      parameters:
+        logGroupNamePrefix: {type: string}
+        logGroupNamePattern: {type: string}
+      returns: ["logGroups[].logGroupName", "logGroups[].retentionInDays", "logGroups[].storedBytes"]
+    put_retention_policy:
+      description: "Set log group retention period"
+      client: logs
+      parameters:
+        logGroupName: {type: string, required: true}
+        retentionInDays: {type: integer, required: true}
+    start_query:
+      description: "Start a CloudWatch Logs Insights query"
+      client: logs
+      parameters:
+        logGroupNames: {type: list, required: true}
+        startTime: {type: integer, required: true}
+        endTime: {type: integer, required: true}
+        queryString: {type: string, required: true}
+      returns: ["queryId"]
+    get_query_results:
+      description: "Get results of a Logs Insights query"
+      client: logs
+      parameters:
+        queryId: {type: string, required: true}
+      returns: ["results", "status"]
+
+  # Dashboard operations
+  dashboard_operations:
+    put_dashboard:
+      description: "Create or update a dashboard"
+      client: cloudwatch
+      parameters:
+        DashboardName: {type: string, required: true}
+        DashboardBody: {type: string, required: true, description: "JSON string defining widgets"}
+    get_dashboard:
+      description: "Get dashboard body"
+      client: cloudwatch
+      parameters:
+        DashboardName: {type: string, required: true}
+      returns: ["DashboardName", "DashboardBody", "DashboardArn"]
+    list_dashboards:
+      description: "List dashboards"
+      client: cloudwatch
+      parameters:
+        DashboardNamePrefix: {type: string}
+      returns: ["DashboardEntries[].DashboardName", "DashboardEntries[].DashboardArn"]
+
+# -- 19. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "InvalidEventPatternException|invalid.*event.*pattern"
+    category: CONFIG
+    cause: "EventBridge event pattern JSON is invalid"
+    fix_type: update_config
+    resolution: "Fix event pattern JSON and re-call put_rule(). Validate with test_event_pattern()."
+
+  - pattern: "ResourceNotFoundException.*events|rule.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "CloudWatch Event Rule not found"
+    fix_type: manual
+    resolution: "Verify rule name. Run put_rule() to recreate if deleted."
+
+  - pattern: "ResourceAlreadyExistsException.*log.group"
+    category: ALREADY_EXISTS
+    cause: "Log group already exists"
+    fix_type: none
+    resolution: "Log group already created. No action needed."
+
+  - pattern: "ResourceNotFoundException.*log.group"
+    category: RESOURCE_NOT_FOUND
+    cause: "Log group does not exist"
+    fix_type: manual
+    resolution: "Create log group with create_log_group() or verify terraform apply."
+
+  - pattern: "LimitExceededException.*alarm"
+    category: QUOTA
+    cause: "Exceeding alarm limit (5000 per account)"
+    fix_type: manual
+    resolution: "Delete unused alarms or request quota increase."
+
+  - pattern: "InvalidParameterValueException.*retention"
+    category: VALIDATION
+    cause: "Invalid retention period for log group"
+    fix_type: update_config
+    resolution: "Use valid retention: 1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,2557,2922,3288,3653, or 0 (never)."
+
+  - pattern: "AccessDeniedException.*logs|logs.*AccessDenied"
+    category: PERMISSION
+    cause: "Missing CloudWatch Logs permissions"
+    fix_type: update_iam
+    resolution: "Add logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents to IAM role."
+
+  - pattern: "ThrottlingException.*cloudwatch"
+    category: THROTTLE
+    cause: "CloudWatch API rate limit exceeded"
+    fix_type: retry
+    resolution: "Implement exponential backoff. Consider reducing metric resolution."
+
+  - pattern: "InvalidParameterCombinationException"
+    category: VALIDATION
+    cause: "Invalid combination of alarm parameters"
+    fix_type: update_config
+    resolution: "Check that statistic, period, and threshold are compatible."
+
+# -- 20. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  supported_resources:
+    - "aws_cloudwatch_event_rule"
+    - "aws_cloudwatch_metric_alarm"
+    - "aws_cloudwatch_log_group"
+    - "aws_cloudwatch_dashboard"
+    - "aws_synthetics_canary"
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 21. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: events
+  description: >
+    CloudWatch/EventBridge rules updated via put_rule() (upsert semantics --
+    safe to call on existing rules). Targets updated via put_targets().
+    Disable/enable via disable_rule()/enable_rule(). CloudWatch Logs managed
+    via logs client. Metrics via cloudwatch client. Alarms via put_metric_alarm().
+  config_update:
+    client: events
+    operation: put_rule
+    id_param: Name
+    id_value: "{resource_name}"
+    note: "put_rule() acts as upsert -- updates schedule/pattern if rule already exists"
+  discovery_ops:
+    - op: describe_rule
+      id_param: Name
+      returns: ["Arn", "ScheduleExpression", "EventPattern", "State", "RoleArn"]
+    - op: list_targets_by_rule
+      id_param: Rule
+      returns: ["Targets[].Id", "Targets[].Arn", "Targets[].Input", "Targets[].InputPath"]
+    - op: describe_alarms
+      id_param: AlarmNames
+      returns: ["MetricAlarms[].AlarmName", "MetricAlarms[].StateValue"]
+    - op: describe_log_groups
+      id_param: logGroupNamePrefix
+      returns: ["logGroups[].logGroupName", "logGroups[].retentionInDays", "logGroups[].storedBytes"]
+    - op: list_metrics
+      id_param: Namespace
+      returns: ["Metrics[].MetricName", "Metrics[].Dimensions"]

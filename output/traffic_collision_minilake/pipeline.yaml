@@ -1,0 +1,228 @@
+business_unit: ANALYTICS
+cost_center: D0012
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: collision_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: collision_processor
+- event: s3:ObjectCreated:*
+  prefix: party_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: party_processor
+- event: s3:ObjectCreated:*
+  prefix: victim_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: victim_processor
+- event: s3:ObjectCreated:*
+  prefix: case_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: case_processor
+- event: put_object
+  prefix: null
+  source: collision_processor
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: null
+  source: party_processor
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: null
+  source: victim_processor
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: null
+  source: case_processor
+  suffix: null
+  target: staging_bucket
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: staging_bucket
+  suffix: null
+  target: refine_data
+- event: put_object
+  prefix: null
+  source: refine_data
+  suffix: null
+  target: minilake
+- event: read
+  prefix: null
+  source: minilake_database
+  suffix: null
+  target: athena_workgroup
+pipeline_name: traffic_collision_minilake
+region: us-east-1
+services:
+- config:
+    prefixes:
+    - collision_raw/
+    - party_raw/
+    - victim_raw/
+    - case_raw/
+  name: raw_data_bucket
+  type: s3
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3 = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        obj = s3.get_object(Bucket=source_bucket, Key=source_key)\n       \
+      \ data = obj['Body'].read().decode('utf-8')\n        \n        target_key =\
+      \ f\"collision/{source_key.split('/')[-1]}\"\n        s3.put_object(\n     \
+      \       Bucket=staging_bucket,\n            Key=target_key,\n            Body=data\n\
+      \        )\n    \n    return {'statusCode': 200, 'body': json.dumps('Collision\
+      \ data processed')}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 60
+  name: collision_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3 = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        obj = s3.get_object(Bucket=source_bucket, Key=source_key)\n       \
+      \ data = obj['Body'].read().decode('utf-8')\n        \n        target_key =\
+      \ f\"party/{source_key.split('/')[-1]}\"\n        s3.put_object(\n         \
+      \   Bucket=staging_bucket,\n            Key=target_key,\n            Body=data\n\
+      \        )\n    \n    return {'statusCode': 200, 'body': json.dumps('Party data\
+      \ processed')}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 60
+  name: party_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3 = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        obj = s3.get_object(Bucket=source_bucket, Key=source_key)\n       \
+      \ data = obj['Body'].read().decode('utf-8')\n        \n        target_key =\
+      \ f\"victim/{source_key.split('/')[-1]}\"\n        s3.put_object(\n        \
+      \    Bucket=staging_bucket,\n            Key=target_key,\n            Body=data\n\
+      \        )\n    \n    return {'statusCode': 200, 'body': json.dumps('Victim\
+      \ data processed')}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 60
+  name: victim_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3 = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        obj = s3.get_object(Bucket=source_bucket, Key=source_key)\n       \
+      \ data = obj['Body'].read().decode('utf-8')\n        \n        target_key =\
+      \ f\"case/{source_key.split('/')[-1]}\"\n        s3.put_object(\n          \
+      \  Bucket=staging_bucket,\n            Key=target_key,\n            Body=data\n\
+      \        )\n    \n    return {'statusCode': 200, 'body': json.dumps('Case data\
+      \ processed')}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 60
+  name: case_processor
+  type: lambda
+- config:
+    prefixes:
+    - collision/
+    - party/
+    - victim/
+    - case/
+  name: staging_bucket
+  type: s3
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3 = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    minilake_bucket\
+      \ = os.environ['MINILAKE_BUCKET']\n    \n    prefixes = ['collision/', 'party/',\
+      \ 'victim/', 'case/']\n    \n    for prefix in prefixes:\n        response =\
+      \ s3.list_objects_v2(Bucket=staging_bucket, Prefix=prefix)\n        \n     \
+      \   if 'Contents' not in response:\n            continue\n        \n       \
+      \ for obj in response['Contents']:\n            source_key = obj['Key']\n  \
+      \          \n            data = s3.get_object(Bucket=staging_bucket, Key=source_key)\n\
+      \            body = data['Body'].read()\n            \n            target_key\
+      \ = source_key\n            s3.put_object(\n                Bucket=minilake_bucket,\n\
+      \                Key=target_key,\n                Body=body\n            )\n\
+      \    \n    return {'statusCode': 200, 'body': json.dumps('Data refined to minilake')}\n"
+    memory_size: 1024
+    runtime: python3.12
+    timeout: 300
+  name: refine_data
+  type: lambda
+- config:
+    prefixes:
+    - collision/
+    - party/
+    - victim/
+    - case/
+  name: minilake
+  type: s3
+- config:
+    tables:
+    - columns:
+      - name: collision_id
+        type: string
+      - name: timestamp
+        type: timestamp
+      - name: location
+        type: string
+      - name: severity
+        type: string
+      location: s3://minilake/collision/
+      name: collision
+    - columns:
+      - name: party_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: party_type
+        type: string
+      - name: name
+        type: string
+      location: s3://minilake/party/
+      name: party
+    - columns:
+      - name: victim_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: injury_severity
+        type: string
+      - name: age
+        type: int
+      location: s3://minilake/victim/
+      name: victim
+    - columns:
+      - name: case_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: case_status
+        type: string
+      - name: filed_date
+        type: date
+      location: s3://minilake/case/
+      name: case
+  name: minilake_database
+  type: glue_data_catalog
+- config: {}
+  name: athena_workgroup
+  type: athena

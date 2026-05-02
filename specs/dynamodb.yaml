@@ -1,0 +1,50 @@
+service_type: dynamodb
+is_principal: false
+terraform_resource: aws_dynamodb_table
+description: "NoSQL key-value table with on-demand billing"
+
+defaults:
+  billing_mode: "PROVISIONED"  # free tier: 25 WCU + 25 RCU forever; PAY_PER_REQUEST is NOT free tier
+  read_capacity: 5             # well within 25 RCU free tier limit
+  write_capacity: 5            # well within 25 WCU free tier limit
+  hash_key: "id"
+  hash_key_type: "S"
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+code_update:
+  method: api_config
+  boto3_client: dynamodb
+  description: >
+    DynamoDB has no code. Update table capacity via update_table(). Cannot change
+    primary key schema after creation. Can add/remove GSIs. Data via put_item()/batch_write_item().
+  config_update:
+    client: dynamodb
+    operation: update_table
+    id_param: TableName
+    id_value: "{resource_name}"
+    note: "Cannot change KeySchema after table creation. Can change BillingMode and ProvisionedThroughput."
+  discovery_ops:
+    - op: describe_table
+      id_param: TableName
+      returns: ["Table.TableArn", "Table.TableStatus", "Table.ProvisionedThroughput", "Table.KeySchema", "Table.GlobalSecondaryIndexes", "Table.ItemCount"]
+runtime_diagnostics:
+  - pattern: "ResourceNotFoundException.*dynamodb|Table.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "DynamoDB table does not exist or is in wrong region"
+    fix_type: manual
+    resolution: "Verify table name and region. Check terraform apply output."
+  - pattern: "ProvisionedThroughputExceededException"
+    category: QUOTA
+    cause: "DynamoDB read/write capacity exhausted"
+    fix_type: update_config
+    resolution: "dynamodb.update_table(TableName=name, ProvisionedThroughput={'ReadCapacityUnits':25,'WriteCapacityUnits':25}) or switch to PAY_PER_REQUEST"

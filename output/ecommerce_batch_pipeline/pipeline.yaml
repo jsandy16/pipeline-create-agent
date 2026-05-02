@@ -1,0 +1,250 @@
+business_unit: rd
+cost_center: c001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: orders/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_orders_preprocess
+- event: s3:ObjectCreated:*
+  prefix: order_items/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_order_items_preprocess
+- event: s3:ObjectCreated:*
+  prefix: customers/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_customers_preprocess
+- event: s3:ObjectCreated:*
+  prefix: inventory/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_inventory_preprocess
+- event: s3:ObjectCreated:*
+  prefix: warehouses/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_warehouses_preprocess
+- event: s3:ObjectCreated:*
+  prefix: stock_movements/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_stock_movements_preprocess
+- event: s3:ObjectCreated:*
+  prefix: procurements/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_procurements_preprocess
+- event: s3:ObjectCreated:*
+  prefix: suppliers/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_suppliers_preprocess
+- event: s3:ObjectCreated:*
+  prefix: products/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_products_preprocess
+- event: s3:ObjectCreated:*
+  prefix: categories/
+  source: ecom_landing_bucket
+  suffix: null
+  target: lambda_categories_preprocess
+- event: put_object
+  prefix: orders/
+  source: lambda_orders_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: order_items/
+  source: lambda_order_items_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: customers/
+  source: lambda_customers_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: inventory/
+  source: lambda_inventory_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: warehouses/
+  source: lambda_warehouses_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: stock_movements/
+  source: lambda_stock_movements_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: procurements/
+  source: lambda_procurements_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: suppliers/
+  source: lambda_suppliers_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: products/
+  source: lambda_products_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: put_object
+  prefix: categories/
+  source: lambda_categories_preprocess
+  suffix: null
+  target: ecom_raw_bucket
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: ecom_raw_bucket
+  suffix: null
+  target: ecom_orchestrator
+- event: start_execution
+  prefix: null
+  source: ecom_orchestrator
+  suffix: null
+  target: lambda_enrich_transform
+- event: put_object
+  prefix: null
+  source: lambda_enrich_transform
+  suffix: null
+  target: ecom_curated_bucket
+- event: crawl
+  prefix: null
+  source: ecom_curated_crawler
+  suffix: null
+  target: ecom_curated_bucket
+- event: write
+  prefix: null
+  source: ecom_curated_crawler
+  suffix: null
+  target: ecom_curated_database
+- event: read
+  prefix: null
+  source: athena_query_engine
+  suffix: null
+  target: ecom_curated_database
+pipeline_name: ecommerce_batch_pipeline
+region: us-east-1
+services:
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: ecom_landing_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_orders_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_order_items_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_customers_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_inventory_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_warehouses_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_stock_movements_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_procurements_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_suppliers_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_products_preprocess
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: lambda_categories_preprocess
+  type: lambda
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: ecom_raw_bucket
+  type: s3
+- config:
+    type: STANDARD
+  name: ecom_orchestrator
+  type: stepfunctions
+- config:
+    handler: index.handler
+    memory_size: 2048
+    runtime: python3.12
+    timeout: 900
+  name: lambda_enrich_transform
+  type: lambda
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: ecom_curated_bucket
+  type: s3
+- config:
+    database_name: ecom_curated_db
+    job_type: crawler
+  name: ecom_curated_crawler
+  type: glue
+- config:
+    database_name: ecom_curated_db
+  name: ecom_curated_database
+  type: glue_data_catalog
+- config:
+    workgroup: primary
+  name: athena_query_engine
+  type: athena
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: ecom_error_bucket
+  type: s3

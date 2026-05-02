@@ -1,0 +1,76 @@
+service_type: kinesis_firehose
+is_principal: true
+terraform_resource: aws_kinesis_firehose_delivery_stream
+description: "Kinesis Data Firehose delivery stream — buffers and delivers data to S3, Redshift, or other destinations"
+
+defaults:
+  buffering_size: 5           # minimum buffer (MB); NOT free tier (~$0.035/GB ingested)
+  buffering_interval: 60      # minimum interval (seconds)
+  compression_format: "GZIP"
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+  as_target_of:
+    kinesis_streams:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+  as_target_of:
+    lambda:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    ec2:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+  as_source_to:
+    s3:
+      - "s3:AbortMultipartUpload"
+      - "s3:GetBucketLocation"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:ListBucketMultipartUploads"
+      - "s3:PutObject"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift:CopyFromS3"
+    lambda:
+      - "lambda:InvokeFunction"
+      - "lambda:GetFunctionConfiguration"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+vpc_triggers:
+  - redshift
+  - aurora
+
+code_update:
+  method: api_config
+  boto3_client: firehose
+  description: >
+    Firehose delivery stream config updated via update_destination(). Change buffer
+    size, compression, S3 prefix, and error output. Cannot change destination type
+    after creation.
+  config_update:
+    client: firehose
+    operation: update_destination
+    id_param: DeliveryStreamName
+    note: "Also requires CurrentDeliveryStreamVersionId from describe_delivery_stream()"
+  discovery_ops:
+    - op: describe_delivery_stream
+      id_param: DeliveryStreamName
+      returns: ["DeliveryStreamDescription.DeliveryStreamStatus", "DeliveryStreamDescription.Destinations", "DeliveryStreamDescription.VersionId"]
+runtime_diagnostics:
+  - pattern: "AccessDenied.*s3|s3.*AccessDenied"
+    category: PERMISSION
+    cause: "Firehose cannot write to S3 destination — missing s3:PutObject"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={s3 write permissions})"

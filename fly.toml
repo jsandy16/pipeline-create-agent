@@ -1,0 +1,33 @@
+# fly.toml — Fly.io deployment config for AWS Pipeline Engine
+# Deploy with: fly deploy
+
+app = "aws-pipeline-engine"
+primary_region = "iad"   # US East (closest to AWS us-east-1)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # keep always-on (free tier allows this)
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# Persistent volume — stores output/, input dirs, terraform cache
+[[mounts]]
+  source = "pipeline_data"
+  destination = "/data"
+  initial_size = "3gb"

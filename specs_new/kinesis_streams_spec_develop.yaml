@@ -1,0 +1,709 @@
+# ============================================================================
+# Kinesis Data Streams Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Kinesis Streams knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/kinesis_streams.yaml with
+# exhaustive coverage of capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity          — service metadata & Terraform mapping
+#   2. naming            — stream naming rules & constraints
+#   3. defaults          — Terraform attribute defaults (minimum-cost)
+#   4. quotas            — AWS service limits
+#   5. capacity_modes    — ON_DEMAND vs PROVISIONED
+#   6. shards            — shard model, throughput, splitting/merging
+#   7. consumers         — shared vs enhanced fan-out consumers
+#   8. retention         — data retention policies
+#   9. encryption        — at-rest and in-transit encryption
+#  10. enhanced_fan_out  — dedicated throughput consumers
+#  11. iam               — complete IAM action catalog & integration graph rules
+#  12. env_vars          — auto-wired environment variables
+#  13. vpc_triggers      — VPC placement rules
+#  14. integrations      — wiring ownership with all supported service types
+#  15. terraform_resources — all TF resource types this service uses
+#  16. boto3_operations  — complete API operation reference
+#  17. runtime_diagnostics — error patterns & auto-fix rules
+#  18. tags              — tagging constraints
+#  19. code_update       — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: kinesis_streams
+  aws_service_name: "Amazon Kinesis Data Streams"
+  is_principal: false          # Kinesis Streams has no execution role of its own
+  terraform_resource: aws_kinesis_stream
+  description: >
+    Real-time data streaming service for ingesting large volumes of data records
+    per second. Data is stored in shards with configurable retention (24h-8760h).
+    Producers write via PutRecord/PutRecords, consumers read via GetRecords or
+    Enhanced Fan-Out (SubscribeToShard). Commonly used as the front door for
+    real-time analytics pipelines.
+  free_tier:
+    status: never_free
+    details: >
+      Kinesis Streams is NOT free tier eligible.
+      ON_DEMAND: ~$0.08/GB ingested + $0.04/shard-hour (auto-scaled).
+      PROVISIONED: ~$0.015/shard-hour + $0.014/1M PUT payload units.
+      Data retrieval via GetRecords is free; Enhanced Fan-Out adds $0.013/shard-hour/consumer + $0.013/GB retrieved.
+  pricing_model: per_shard_hour_plus_put_units
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 128     # max characters for stream name
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_.-"
+  rules:
+    - "1-128 characters"
+    - "Letters, digits, underscores, hyphens, and periods"
+    - "Must be unique within an AWS account and region"
+    - "Case-sensitive (MyStream and mystream are different)"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  stream_mode: "ON_DEMAND"       # auto-scales, no shard management needed
+  shard_count: 1                 # only used in PROVISIONED mode
+  retention_period: 24           # minimum retention (hours); max 8760 (365 days)
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_streams_per_account: 500   # default soft limit per region; adjustable
+  max_shards_per_account: 500    # default soft limit per region; adjustable (ON_DEMAND accounts may have higher)
+  max_record_size: "1 MB"        # single record max payload
+  max_records_per_put: 500       # PutRecords batch limit
+  max_put_payload: "5 MB"        # total PutRecords batch payload
+  max_retention_hours: 8760      # 365 days
+  min_retention_hours: 24        # 1 day
+  max_consumers_per_stream: 20   # enhanced fan-out consumers
+  max_registered_consumers: 20   # per stream
+  shard_throughput:
+    write: "1 MB/s or 1000 records/s per shard"
+    read_shared: "2 MB/s per shard (shared across all consumers)"
+    read_enhanced: "2 MB/s per shard per consumer (dedicated)"
+  on_demand_limits:
+    default_write_capacity: "4 MB/s (4 shards equivalent)"
+    max_write_capacity: "200 MB/s (200 shards equivalent)"
+
+# -- 5. Capacity Modes -------------------------------------------------------
+capacity_modes:
+  ON_DEMAND:
+    description: >
+      Auto-scales shard count based on throughput. No capacity planning needed.
+      Recommended for unpredictable or new workloads. Starts at 4 MB/s write,
+      can scale to 200 MB/s. AWS manages shard splits/merges automatically.
+    terraform_value: "ON_DEMAND"
+    cost_model: "Per-GB ingested (~$0.08/GB) + shard-hour for active shards"
+    shard_count_behavior: "Ignored in Terraform (AWS manages shard count)"
+    scaling:
+      doubles_every: "~15 minutes when sustained throughput exceeds capacity"
+      scale_down: "Gradual, over hours, when throughput decreases"
+    best_for:
+      - "New streams with unknown traffic patterns"
+      - "Bursty or variable workloads"
+      - "Workloads where simplicity > cost optimization"
+
+  PROVISIONED:
+    description: >
+      Fixed shard count managed by the user. Must manually call UpdateShardCount
+      to scale. Lower per-GB cost for predictable, steady workloads.
+    terraform_value: "PROVISIONED"
+    cost_model: "Per-shard-hour (~$0.015) + per-PUT-payload-unit (~$0.014/1M units)"
+    shard_count_behavior: "Terraform shard_count is enforced"
+    scaling:
+      method: "update_shard_count API or Terraform shard_count change"
+      limits: "Cannot more than double or halve shard count in a single operation"
+      cooldown: "Must wait for stream to become ACTIVE between scaling operations"
+    best_for:
+      - "Predictable, steady throughput"
+      - "Cost-sensitive workloads"
+      - "When you need precise control over parallelism"
+
+  switching:
+    on_demand_to_provisioned: "Allowed, takes effect immediately"
+    provisioned_to_on_demand: "Allowed, takes effect immediately"
+    cooldown: "Can only switch twice in 24 hours"
+
+# -- 6. Shards ---------------------------------------------------------------
+shards:
+  description: >
+    A shard is the base throughput unit of a Kinesis stream. Each shard provides
+    1 MB/s write and 2 MB/s read capacity. Records are distributed across shards
+    by partition key hash.
+  throughput:
+    write_per_shard: "1 MB/s or 1000 records/s (whichever is hit first)"
+    read_per_shard: "2 MB/s shared across all GetRecords consumers"
+    read_enhanced_per_consumer: "2 MB/s dedicated per Enhanced Fan-Out consumer"
+  partition_key:
+    description: >
+      Each record has a partition key (string). Kinesis computes an MD5 hash of
+      the partition key to determine which shard receives the record. Good
+      partition key design ensures even distribution across shards.
+    best_practices:
+      - "Use high-cardinality keys (e.g., UUID, device ID) for even distribution"
+      - "Avoid low-cardinality keys (e.g., date, region) that create hot shards"
+      - "Consider explicit hash key for precise shard targeting"
+  splitting:
+    description: "Divide a shard into two child shards to increase capacity"
+    api: "split_shard"
+    constraint: "Stream must be ACTIVE. Cannot split while another split/merge in progress."
+  merging:
+    description: "Combine two adjacent shards into one to reduce capacity"
+    api: "merge_shards"
+    constraint: "Shards must be adjacent in hash key range. Stream must be ACTIVE."
+  resharding:
+    description: "Change the total shard count"
+    api: "update_shard_count"
+    constraint: >
+      Cannot more than double or halve shard count in one operation.
+      To go from 10 to 100 shards: 10 -> 20 -> 40 -> 80 -> 100 (4 operations).
+      Each operation requires waiting for ACTIVE status (~30-60 seconds per operation).
+
+# -- 7. Consumers -------------------------------------------------------------
+consumers:
+  shared_throughput:
+    description: >
+      Default consumer mode. All consumers sharing GetRecords API calls on a
+      shard share the 2 MB/s read throughput. Up to 5 GetRecords calls per
+      shard per second.
+    api: "get_shard_iterator + get_records"
+    iterator_types:
+      TRIM_HORIZON: "Start reading from the oldest record in the shard"
+      LATEST: "Start reading from the most recent record"
+      AT_TIMESTAMP: "Start reading from a specific timestamp"
+      AT_SEQUENCE_NUMBER: "Start reading at a specific sequence number"
+      AFTER_SEQUENCE_NUMBER: "Start reading after a specific sequence number"
+    limitations:
+      - "5 GetRecords calls per shard per second"
+      - "2 MB/s read throughput shared across all consumers"
+      - "Each GetRecords call returns up to 10 MB or 10000 records"
+      - "Polling-based (consumer must continuously call GetRecords)"
+
+  enhanced_fan_out:
+    description: >
+      Dedicated 2 MB/s read throughput per consumer per shard. Uses HTTP/2
+      push via SubscribeToShard — data is pushed to the consumer without
+      polling. Each stream supports up to 20 enhanced fan-out consumers.
+    api: "register_stream_consumer + subscribe_to_shard"
+    terraform_resource: "aws_kinesis_stream_consumer"
+    throughput: "2 MB/s per shard per consumer (dedicated, not shared)"
+    latency: "~70ms average (vs ~200ms for GetRecords)"
+    cost: "$0.013/shard-hour/consumer + $0.013/GB retrieved"
+    best_for:
+      - "Multiple consumers reading the same stream"
+      - "Low-latency requirements"
+      - "More than 2 consumers per stream"
+
+# -- 8. Retention -------------------------------------------------------------
+retention:
+  min_hours: 24
+  max_hours: 8760              # 365 days
+  default_hours: 24
+  extended_retention:
+    description: "Retention beyond 24 hours incurs additional charges"
+    cost_7_days: "$0.023/shard-hour"
+    cost_long_term: "$0.012/GB stored (beyond 7 days)"
+  terraform_attribute: "retention_period"
+  note: >
+    Records in Kinesis are immutable. They cannot be deleted individually.
+    They are automatically purged after the retention period expires. If you
+    need to reprocess data, replay from a specific point using TRIM_HORIZON
+    or AT_TIMESTAMP iterator types.
+
+# -- 9. Encryption ------------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Server-side encryption using AWS KMS"
+    terraform_attribute: "encryption_type"
+    values:
+      NONE: "No encryption (default for older streams)"
+      KMS: "Encrypted with KMS key"
+    kms_key:
+      terraform_attribute: "kms_key_id"
+      aws_managed: "alias/aws/kinesis (default when encryption_type = KMS)"
+      customer_managed: "arn:aws:kms:REGION:ACCOUNT:key/KEY-ID"
+    required_kms_permissions:
+      producer: ["kms:GenerateDataKey"]
+      consumer: ["kms:Decrypt"]
+  in_transit:
+    description: "TLS encryption for API calls (always enabled, no configuration needed)"
+    note: "All Kinesis API calls use HTTPS. No option to disable."
+
+# -- 10. Enhanced Fan-Out Details ---------------------------------------------
+enhanced_fan_out:
+  terraform_resource: "aws_kinesis_stream_consumer"
+  registration:
+    api: "register_stream_consumer"
+    max_per_stream: 20
+    name_constraint: "1-128 characters, unique within stream"
+  subscription:
+    api: "subscribe_to_shard"
+    protocol: "HTTP/2 push"
+    duration: "5 minutes per subscription (must re-subscribe)"
+  deregistration:
+    api: "deregister_stream_consumer"
+    note: "Consumer must be ACTIVE to deregister"
+  iam_actions:
+    - "kinesis:RegisterStreamConsumer"
+    - "kinesis:DeregisterStreamConsumer"
+    - "kinesis:SubscribeToShard"
+    - "kinesis:DescribeStreamConsumer"
+    - "kinesis:ListStreamConsumers"
+
+# -- 11. IAM -----------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    stream: "arn:aws:kinesis:REGION:ACCOUNT:stream/STREAM-NAME"
+    consumer: "arn:aws:kinesis:REGION:ACCOUNT:stream/STREAM-NAME/consumer/CONSUMER-NAME:TIMESTAMP"
+
+  # Kinesis Streams is not a principal (no execution role)
+  always: []
+
+  # Complete action catalog
+  actions:
+    data_plane_write:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    data_plane_read:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:SubscribeToShard"        # Enhanced Fan-Out
+    stream_management:
+      - "kinesis:CreateStream"
+      - "kinesis:DeleteStream"
+      - "kinesis:DescribeStream"
+      - "kinesis:DescribeStreamSummary"
+      - "kinesis:DescribeStreamConsumer"
+      - "kinesis:ListStreams"
+      - "kinesis:ListShards"
+      - "kinesis:ListTagsForStream"
+      - "kinesis:AddTagsToStream"
+      - "kinesis:RemoveTagsFromStream"
+    stream_scaling:
+      - "kinesis:UpdateShardCount"
+      - "kinesis:UpdateStreamMode"
+      - "kinesis:SplitShard"
+      - "kinesis:MergeShards"
+    consumer_management:
+      - "kinesis:RegisterStreamConsumer"
+      - "kinesis:DeregisterStreamConsumer"
+      - "kinesis:ListStreamConsumers"
+    encryption:
+      - "kinesis:StartStreamEncryption"
+      - "kinesis:StopStreamEncryption"
+
+  # Integration graph IAM rules (used by spec_builder)
+  # Kinesis Streams is passive — sources write to it, targets read from it.
+  # The CALLER needs these permissions, not Kinesis itself.
+  as_target_of: {}
+  as_source_to: {}
+
+  # Common permission sets for services that WRITE to Kinesis
+  common_producer_permissions:
+    - "kinesis:PutRecord"
+    - "kinesis:PutRecords"
+    - "kinesis:DescribeStream"
+
+  # Common permission sets for services that READ from Kinesis
+  common_consumer_permissions:
+    - "kinesis:GetRecords"
+    - "kinesis:GetShardIterator"
+    - "kinesis:DescribeStream"
+    - "kinesis:ListShards"
+
+  # Condition keys
+  condition_keys:
+    - "kinesis:ResourceTag/${TagKey}"
+
+# -- 12. Environment Variables ------------------------------------------------
+env_vars:
+  as_target_of: {}    # Kinesis Streams is passive
+  as_source_to: {}    # Kinesis Streams is passive
+
+# -- 13. VPC Triggers --------------------------------------------------------
+vpc_triggers: []       # Kinesis Streams is a regional service, no VPC placement
+
+# -- 14. Integration Wiring Ownership ----------------------------------------
+integrations:
+  lambda_reads_kinesis:
+    description: "Lambda event source mapping reads records from Kinesis stream"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping (event_source_arn = kinesis stream ARN)"
+    iam_on_lambda:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+      - "kinesis:ListStreams"
+    event_source_mapping_config:
+      batch_size: "100 (default, max 10000)"
+      starting_position: "TRIM_HORIZON or LATEST"
+      parallelization_factor: "1-10 (concurrent Lambda invocations per shard)"
+      bisect_batch_on_error: true
+      maximum_retry_attempts: 10000
+      maximum_record_age: "604800 seconds (7 days)"
+
+  lambda_writes_kinesis:
+    description: "Lambda writes records to Kinesis stream via PutRecord/PutRecords"
+    owned_by: "lambda"
+    iam_on_lambda:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  kinesis_to_firehose:
+    description: "Kinesis Firehose reads from Kinesis stream as source"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "kinesis_source_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  kinesis_to_analytics:
+    description: "Kinesis Analytics reads from Kinesis stream as input"
+    owned_by: "kinesis_analytics"
+    terraform_resources:
+      - "inputs block with kinesis_streams_input in aws_kinesisanalyticsv2_application"
+    iam_on_analytics:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  analytics_writes_kinesis:
+    description: "Kinesis Analytics writes output to Kinesis stream"
+    owned_by: "kinesis_analytics"
+    iam_on_analytics:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  ec2_reads_kinesis:
+    description: "EC2 reads from Kinesis stream via KCL or SDK"
+    owned_by: "ec2"
+    iam_on_ec2:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  ec2_writes_kinesis:
+    description: "EC2 writes to Kinesis stream via SDK"
+    owned_by: "ec2"
+    iam_on_ec2:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  emr_reads_kinesis:
+    description: "EMR reads from Kinesis stream using Spark Streaming or Flink connector"
+    owned_by: "emr"
+    iam_on_emr:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  step_functions_uses_kinesis:
+    description: "Step Functions SDK integration to put records to Kinesis"
+    owned_by: "step_functions"
+    iam_on_step_functions:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  eventbridge_pipe_from_kinesis:
+    description: "EventBridge Pipes can use Kinesis as a source"
+    owned_by: "eventbridge"
+    iam_on_eventbridge:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  cloudwatch_puts_kinesis:
+    description: "CloudWatch subscription filter sends logs to Kinesis"
+    owned_by: "cloudwatch"
+    note: "CloudWatch Logs can stream to Kinesis Streams via subscription filters"
+
+  dms_writes_kinesis:
+    description: "DMS can use Kinesis stream as a target endpoint for CDC"
+    owned_by: "dms"
+    iam_on_dms:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:DescribeStream"
+
+  sagemaker_reads_kinesis:
+    description: "SageMaker can read from Kinesis for real-time inference input"
+    owned_by: "sagemaker"
+    iam_on_sagemaker:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+# -- 15. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_kinesis_stream"
+      description: "The Kinesis data stream"
+      always_created: true
+      key_attributes:
+        - "name"
+        - "shard_count"
+        - "retention_period"
+        - "stream_mode_details { stream_mode }"
+        - "encryption_type"
+        - "kms_key_id"
+        - "enforce_consumer_deletion"
+        - "tags"
+
+  conditional:
+    - resource: "aws_kinesis_stream_consumer"
+      condition: "When Enhanced Fan-Out consumers are needed"
+      key_attributes:
+        - "name"
+        - "stream_arn"
+
+  created_by_others:
+    - resource: "aws_lambda_event_source_mapping"
+      created_by: "lambda renderer"
+      condition: "When Lambda reads from Kinesis stream"
+    - resource: "aws_kinesis_firehose_delivery_stream"
+      created_by: "kinesis_firehose renderer"
+      condition: "When Firehose sources from Kinesis stream"
+    - resource: "aws_kinesisanalyticsv2_application"
+      created_by: "kinesis_analytics renderer"
+      condition: "When Kinesis Analytics reads from stream"
+
+# -- 16. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  client: "kinesis"
+
+  data_plane:
+    put_record:
+      description: "Write a single data record to the stream"
+      parameters:
+        StreamName: {type: string, required: true}
+        Data: {type: bytes, required: true, description: "Up to 1 MB base64-encoded"}
+        PartitionKey: {type: string, required: true, description: "Determines shard placement via MD5 hash"}
+        ExplicitHashKey: {type: string, description: "Override partition key hash for precise shard targeting"}
+        SequenceNumberForOrdering: {type: string, description: "For strict ordering within a shard"}
+      returns: ["ShardId", "SequenceNumber"]
+
+    put_records:
+      description: "Write multiple records in a single request (batch)"
+      parameters:
+        StreamName: {type: string, required: true}
+        Records: {type: list, required: true, description: "List of {Data, PartitionKey, ExplicitHashKey}; max 500 records or 5 MB total"}
+      returns: ["FailedRecordCount", "Records[].ShardId", "Records[].SequenceNumber", "Records[].ErrorCode"]
+
+    get_shard_iterator:
+      description: "Get an iterator for reading from a specific shard"
+      parameters:
+        StreamName: {type: string, required: true}
+        ShardId: {type: string, required: true, description: "e.g. shardId-000000000000"}
+        ShardIteratorType: {type: string, required: true, description: "TRIM_HORIZON | LATEST | AT_TIMESTAMP | AT_SEQUENCE_NUMBER | AFTER_SEQUENCE_NUMBER"}
+        Timestamp: {type: datetime, description: "Required when ShardIteratorType = AT_TIMESTAMP"}
+        StartingSequenceNumber: {type: string, description: "Required for AT_SEQUENCE_NUMBER / AFTER_SEQUENCE_NUMBER"}
+      returns: ["ShardIterator"]
+
+    get_records:
+      description: "Read data records from a shard using an iterator"
+      parameters:
+        ShardIterator: {type: string, required: true}
+        Limit: {type: integer, description: "Max records to return (1-10000, default 10000)"}
+      returns: ["Records[].Data", "Records[].PartitionKey", "Records[].SequenceNumber", "Records[].ApproximateArrivalTimestamp", "NextShardIterator", "MillisBehindLatest"]
+
+    subscribe_to_shard:
+      description: "Subscribe to receive data from a shard via HTTP/2 push (Enhanced Fan-Out)"
+      parameters:
+        ConsumerARN: {type: string, required: true}
+        ShardId: {type: string, required: true}
+        StartingPosition: {type: object, required: true, description: "{Type: TRIM_HORIZON|LATEST|AT_TIMESTAMP|AT_SEQUENCE_NUMBER, ...}"}
+      returns: ["EventStream (SubscribeToShardEvent records)"]
+
+  stream_management:
+    create_stream:
+      description: "Create a new Kinesis stream"
+      parameters:
+        StreamName: {type: string, required: true}
+        ShardCount: {type: integer, description: "Required for PROVISIONED mode"}
+        StreamModeDetails: {type: object, description: "{StreamMode: ON_DEMAND|PROVISIONED}"}
+      note: "Usually managed via Terraform, not boto3"
+
+    delete_stream:
+      description: "Delete a stream and all its shards and data"
+      parameters:
+        StreamName: {type: string, required: true}
+        EnforceConsumerDeletion: {type: boolean, description: "Force delete even with registered consumers"}
+
+    describe_stream:
+      description: "Get detailed stream description including shard list"
+      parameters:
+        StreamName: {type: string, required: true}
+      returns: ["StreamDescription.StreamName", "StreamDescription.StreamARN", "StreamDescription.StreamStatus", "StreamDescription.Shards[]", "StreamDescription.RetentionPeriodHours", "StreamDescription.StreamModeDetails"]
+
+    describe_stream_summary:
+      description: "Get stream summary without shard details (faster)"
+      parameters:
+        StreamName: {type: string, required: true}
+      returns: ["StreamDescriptionSummary.StreamStatus", "StreamDescriptionSummary.OpenShardCount", "StreamDescriptionSummary.RetentionPeriodHours", "StreamDescriptionSummary.StreamModeDetails"]
+
+    list_streams:
+      description: "List all streams in the account"
+      parameters:
+        Limit: {type: integer}
+        ExclusiveStartStreamName: {type: string}
+      returns: ["StreamNames[]", "HasMoreStreams"]
+
+    list_shards:
+      description: "List shards in a stream with pagination"
+      parameters:
+        StreamName: {type: string, required: true}
+        NextToken: {type: string}
+        MaxResults: {type: integer}
+      returns: ["Shards[].ShardId", "Shards[].HashKeyRange", "Shards[].SequenceNumberRange", "NextToken"]
+
+  scaling:
+    update_shard_count:
+      description: "Change the number of shards (PROVISIONED mode)"
+      parameters:
+        StreamName: {type: string, required: true}
+        TargetShardCount: {type: integer, required: true}
+        ScalingType: {type: string, required: true, description: "UNIFORM_SCALING"}
+      returns: ["CurrentShardCount", "TargetShardCount", "StreamName"]
+
+    update_stream_mode:
+      description: "Switch between ON_DEMAND and PROVISIONED capacity modes"
+      parameters:
+        StreamARN: {type: string, required: true}
+        StreamModeDetails: {type: object, required: true, description: "{StreamMode: ON_DEMAND|PROVISIONED}"}
+
+  consumer_management:
+    register_stream_consumer:
+      description: "Register an Enhanced Fan-Out consumer"
+      parameters:
+        StreamARN: {type: string, required: true}
+        ConsumerName: {type: string, required: true}
+      returns: ["Consumer.ConsumerName", "Consumer.ConsumerARN", "Consumer.ConsumerStatus"]
+
+    deregister_stream_consumer:
+      description: "Deregister an Enhanced Fan-Out consumer"
+      parameters:
+        StreamARN: {type: string}
+        ConsumerName: {type: string}
+        ConsumerARN: {type: string}
+
+    list_stream_consumers:
+      description: "List Enhanced Fan-Out consumers for a stream"
+      parameters:
+        StreamARN: {type: string, required: true}
+      returns: ["Consumers[].ConsumerName", "Consumers[].ConsumerARN", "Consumers[].ConsumerStatus"]
+
+  tagging:
+    add_tags_to_stream:
+      description: "Add or update tags on a stream"
+      parameters:
+        StreamName: {type: string, required: true}
+        Tags: {type: object, required: true, description: "Key-value pairs"}
+
+    remove_tags_from_stream:
+      description: "Remove tags from a stream"
+      parameters:
+        StreamName: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+
+    list_tags_for_stream:
+      description: "List tags for a stream"
+      parameters:
+        StreamName: {type: string, required: true}
+      returns: ["Tags[].Key", "Tags[].Value"]
+
+# -- 17. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "ResourceNotFoundException.*kinesis|stream.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Kinesis stream does not exist"
+    fix_type: manual
+    resolution: "Verify stream name matches resource_name. Check terraform apply completed."
+
+  - pattern: "ProvisionedThroughputExceededException.*kinesis"
+    category: QUOTA
+    cause: "Kinesis shard throughput limit exceeded (1 MB/s write or 2 MB/s read per shard)"
+    fix_type: update_config
+    resolution: "kinesis.update_shard_count(StreamName=name, TargetShardCount=current*2, ScalingType='UNIFORM_SCALING')"
+
+  - pattern: "ExpiredIteratorException"
+    category: ITERATOR_EXPIRED
+    cause: "Shard iterator expired after 5 minutes of inactivity"
+    fix_type: retry
+    resolution: "Call get_shard_iterator again to obtain a fresh iterator. Ensure consumer processes records frequently enough."
+
+  - pattern: "KMSAccessDeniedException|KMSDisabledException|KMSNotFoundException"
+    category: ENCRYPTION
+    cause: "KMS key issue for encrypted stream"
+    fix_type: update_iam
+    resolution: "Check kms:Decrypt and kms:GenerateDataKey permissions on the KMS key for the caller role."
+
+  - pattern: "ResourceInUseException.*kinesis"
+    category: RESOURCE_IN_USE
+    cause: "Stream is being created, deleted, or updated — cannot modify now"
+    fix_type: retry
+    resolution: "Wait for stream status to become ACTIVE, then retry the operation."
+
+  - pattern: "InvalidArgumentException.*ShardCount"
+    category: VALIDATION
+    cause: "Invalid shard count — cannot more than double or halve in one operation"
+    fix_type: code_change
+    resolution: "Scale incrementally: if going from 10 to 100, do 10->20->40->80->100."
+
+  - pattern: "LimitExceededException.*streams"
+    category: QUOTA
+    cause: "Account limit for Kinesis streams or shards exceeded"
+    fix_type: manual
+    resolution: "Request a limit increase via AWS Service Quotas console."
+
+  - pattern: "AccessDeniedException.*kinesis"
+    category: PERMISSION
+    cause: "Caller IAM role lacks required Kinesis permissions"
+    fix_type: update_iam
+    resolution: "Add missing kinesis:* actions to the caller's IAM role."
+
+# -- 18. Tags ----------------------------------------------------------------
+tags:
+  max_per_stream: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 19. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: kinesis
+  description: >
+    Kinesis Streams has no code. Interact via boto3 API:
+    - Write data: put_record (single), put_records (batch up to 500)
+    - Read data: get_shard_iterator + get_records (polling), or subscribe_to_shard (EFO push)
+    - Scale: update_shard_count (PROVISIONED) or update_stream_mode (switch ON_DEMAND/PROVISIONED)
+    - Monitor: describe_stream_summary for status and shard count
+    - Enhanced Fan-Out: register_stream_consumer then subscribe_to_shard
+  config_update:
+    client: kinesis
+    operation: update_stream_mode
+    id_param: StreamARN
+    id_value: "{resource_arn}"
+  discovery_ops:
+    - op: describe_stream_summary
+      id_param: StreamName
+      returns: ["StreamDescriptionSummary.StreamStatus", "StreamDescriptionSummary.OpenShardCount", "StreamDescriptionSummary.RetentionPeriodHours", "StreamDescriptionSummary.StreamModeDetails"]
+    - op: list_shards
+      id_param: StreamName
+      returns: ["Shards[].ShardId", "Shards[].HashKeyRange", "Shards[].SequenceNumberRange"]
+    - op: list_stream_consumers
+      id_param: StreamARN
+      returns: ["Consumers[].ConsumerName", "Consumers[].ConsumerARN", "Consumers[].ConsumerStatus"]

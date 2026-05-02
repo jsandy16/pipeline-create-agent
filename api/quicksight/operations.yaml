@@ -1,0 +1,145 @@
+service: quicksight
+boto3_client: quicksight
+description: "Amazon QuickSight — serverless BI and data visualization service"
+
+operations:
+  create_data_source:
+    description: "Create a data source connection (Athena, S3, Redshift, Aurora, etc.)"
+    parameters:
+      AwsAccountId: {type: string, required: true, description: "AWS account ID"}
+      DataSourceId: {type: string, required: true, description: "Unique ID for this data source"}
+      Name: {type: string, required: true}
+      Type: {type: string, required: true, description: "ATHENA, S3, REDSHIFT, AURORA_POSTGRESQL, etc."}
+      DataSourceParameters: {type: object, required: true, description: "Type-specific connection params"}
+      Credentials: {type: object, description: "Credentials for database sources"}
+      Permissions: {type: list, description: "List of resource permission objects"}
+      SslProperties: {type: object, description: "DisableSsl: true/false"}
+      Tags: {type: list}
+
+  update_data_source:
+    description: "Update an existing data source connection"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSourceId: {type: string, required: true}
+      Name: {type: string, required: true}
+      DataSourceParameters: {type: object, required: true}
+      Credentials: {type: object}
+      SslProperties: {type: object}
+
+  describe_data_source:
+    description: "Get details and status of a data source"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSourceId: {type: string, required: true}
+
+  delete_data_source:
+    description: "Delete a data source"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSourceId: {type: string, required: true}
+
+  list_data_sources:
+    description: "List all data sources in the account"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      NextToken: {type: string}
+      MaxResults: {type: integer}
+
+  create_data_set:
+    description: "Create a dataset from one or more data sources with optional transforms"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSetId: {type: string, required: true}
+      Name: {type: string, required: true}
+      PhysicalTableMap: {type: object, required: true, description: "Source tables keyed by ID"}
+      LogicalTableMap: {type: object, description: "Joins, renames, calculated fields"}
+      ImportMode: {type: string, required: true, description: "SPICE or DIRECT_QUERY"}
+      Permissions: {type: list}
+      Tags: {type: list}
+
+  update_data_set:
+    description: "Update an existing dataset definition"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSetId: {type: string, required: true}
+      Name: {type: string, required: true}
+      PhysicalTableMap: {type: object, required: true}
+      LogicalTableMap: {type: object}
+      ImportMode: {type: string, required: true}
+
+  describe_data_set:
+    description: "Get the definition of a dataset"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSetId: {type: string, required: true}
+
+  delete_data_set:
+    description: "Delete a dataset"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSetId: {type: string, required: true}
+
+  list_data_sets:
+    description: "List all datasets in the account"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      NextToken: {type: string}
+      MaxResults: {type: integer}
+
+  create_ingestion:
+    description: "Refresh a SPICE dataset by triggering a new ingestion"
+    parameters:
+      DataSetId: {type: string, required: true}
+      IngestionId: {type: string, required: true, description: "Unique ID for this refresh"}
+      AwsAccountId: {type: string, required: true}
+      IngestionType: {type: string, description: "INCREMENTAL_REFRESH or FULL_REFRESH"}
+
+  describe_ingestion:
+    description: "Get the status of a SPICE ingestion"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DataSetId: {type: string, required: true}
+      IngestionId: {type: string, required: true}
+
+  create_dashboard:
+    description: "Create a QuickSight dashboard from an analysis or template"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DashboardId: {type: string, required: true}
+      Name: {type: string, required: true}
+      SourceEntity: {type: object, required: true, description: "SourceAnalysis or SourceTemplate"}
+      Permissions: {type: list}
+      Tags: {type: list}
+      VersionDescription: {type: string}
+
+  describe_dashboard:
+    description: "Get details of a dashboard including its status"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DashboardId: {type: string, required: true}
+
+  list_dashboards:
+    description: "List all dashboards in the account"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      NextToken: {type: string}
+      MaxResults: {type: integer}
+
+  get_dashboard_embed_url:
+    description: "Generate a one-time embed URL for an authenticated user"
+    parameters:
+      AwsAccountId: {type: string, required: true}
+      DashboardId: {type: string, required: true}
+      IdentityType: {type: string, required: true, description: "IAM, QUICKSIGHT, or ANONYMOUS"}
+      SessionLifetimeInMinutes: {type: integer}
+      UndoRedoDisabled: {type: boolean}
+      ResetDisabled: {type: boolean}
+
+  create_account_subscription:
+    description: "Subscribe to QuickSight (sets up the account for first use)"
+    parameters:
+      Edition: {type: string, required: true, description: "STANDARD or ENTERPRISE"}
+      AuthenticationMethod: {type: string, required: true}
+      AwsAccountId: {type: string, required: true}
+      AccountName: {type: string, required: true}
+      NotificationEmail: {type: string, required: true}

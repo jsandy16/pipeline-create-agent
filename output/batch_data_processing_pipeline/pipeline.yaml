@@ -1,0 +1,195 @@
+business_unit: SJANALYTICS
+cost_center: test01
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: collision_raw/
+  source: raw_collision_bucket
+  suffix: null
+  target: process_collision_lambda
+- event: s3:ObjectCreated:*
+  prefix: party_raw/
+  source: raw_party_bucket
+  suffix: null
+  target: process_party_lambda
+- event: s3:ObjectCreated:*
+  prefix: victim_raw/
+  source: raw_victim_bucket
+  suffix: null
+  target: process_victim_lambda
+- event: s3:ObjectCreated:*
+  prefix: case_raw/
+  source: raw_case_bucket
+  suffix: null
+  target: process_case_lambda
+- event: put_object
+  prefix: collision_staging/
+  source: process_collision_lambda
+  suffix: null
+  target: collision_staging_bucket
+- event: put_object
+  prefix: party_staging/
+  source: process_party_lambda
+  suffix: null
+  target: party_staging_bucket
+- event: put_object
+  prefix: victim_staging/
+  source: process_victim_lambda
+  suffix: null
+  target: victim_staging_bucket
+- event: put_object
+  prefix: case_staging/
+  source: process_case_lambda
+  suffix: null
+  target: case_staging_bucket
+- event: s3:ObjectCreated:*
+  prefix: collision_staging/
+  source: collision_staging_bucket
+  suffix: null
+  target: refine_data_lambda
+- event: s3:ObjectCreated:*
+  prefix: party_staging/
+  source: party_staging_bucket
+  suffix: null
+  target: refine_data_lambda
+- event: s3:ObjectCreated:*
+  prefix: victim_staging/
+  source: victim_staging_bucket
+  suffix: null
+  target: refine_data_lambda
+- event: s3:ObjectCreated:*
+  prefix: case_staging/
+  source: case_staging_bucket
+  suffix: null
+  target: refine_data_lambda
+- event: put_object
+  prefix: null
+  source: refine_data_lambda
+  suffix: null
+  target: minilake_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: collision_staging_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: party_staging_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: victim_staging_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: case_staging_bucket
+- event: create_tables
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: minilake_database
+- event: query
+  prefix: null
+  source: query_minilake_athena
+  suffix: null
+  target: minilake_database
+pipeline_name: batch_data_processing_pipeline
+region: us-east-1
+services:
+- config:
+    bucket_name: collision
+    versioning: false
+  name: raw_collision_bucket
+  type: s3
+- config:
+    bucket_name: party
+    versioning: false
+  name: raw_party_bucket
+  type: s3
+- config:
+    bucket_name: victim
+    versioning: false
+  name: raw_victim_bucket
+  type: s3
+- config:
+    bucket_name: case
+    versioning: false
+  name: raw_case_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: process_collision_lambda
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: process_party_lambda
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: process_victim_lambda
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: process_case_lambda
+  type: lambda
+- config:
+    bucket_name: collision_staging
+    versioning: false
+  name: collision_staging_bucket
+  type: s3
+- config:
+    bucket_name: party_staging
+    versioning: false
+  name: party_staging_bucket
+  type: s3
+- config:
+    bucket_name: victim_staging
+    versioning: false
+  name: victim_staging_bucket
+  type: s3
+- config:
+    bucket_name: case_staging
+    versioning: false
+  name: case_staging_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 1024
+    runtime: python3.12
+    timeout: 600
+  name: refine_data_lambda
+  type: lambda
+- config:
+    bucket_name: minilake
+    versioning: false
+  name: minilake_bucket
+  type: s3
+- config:
+    crawler_name: minilake_crawler
+    database_name: minilake
+  name: minilake_crawler
+  type: glue
+- config:
+    database_name: minilake
+  name: minilake_database
+  type: glue_data_catalog
+- config:
+    database: minilake
+    workgroup: primary
+  name: query_minilake_athena
+  type: athena

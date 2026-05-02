@@ -1,0 +1,73 @@
+service_type: kinesis_analytics
+is_principal: true
+terraform_resource: aws_kinesisanalyticsv2_application
+description: "Kinesis Data Analytics (v2) application for real-time SQL or Apache Flink processing"
+
+defaults:
+  runtime_environment: "SQL-1_0"
+  application_code: "-- placeholder SQL\nSELECT * FROM \"SOURCE_SQL_STREAM_001\";\n"
+  parallelism: 1              # minimum KPUs; NOT free tier (~$0.11/KPU-hr)
+  parallelism_per_kpu: 1
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+  as_target_of:
+    kinesis_streams:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+    kinesis_firehose:
+      - "firehose:DescribeDeliveryStream"
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+  as_source_to:
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    kinesis_firehose:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    lambda:
+      - "lambda:InvokeFunction"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    kinesis_streams:
+      pattern: "{PEER_UPPER}_STREAM_NAME"
+      ref: "aws_kinesis_stream.{peer_label}.name"
+
+vpc_triggers: []
+
+code_update:
+  method: api_config
+  boto3_client: kinesisanalyticsv2
+  description: >
+    SQL application code updated via update_application() with SqlApplicationConfigurationUpdate.
+    Flink app code (JAR) is uploaded to S3 then referenced via update_application().
+    Must stop application before updating.
+  config_update:
+    client: kinesisanalyticsv2
+    operation: update_application
+    id_param: ApplicationName
+    note: "Get CurrentApplicationVersionId first from describe_application()"
+  discovery_ops:
+    - op: describe_application
+      id_param: ApplicationName
+      returns: ["ApplicationDetail.ApplicationConfigurationDescription", "ApplicationDetail.ApplicationStatus", "ApplicationDetail.ApplicationVersionId"]
+runtime_diagnostics:
+  - pattern: "ResourceInUseException|application.*RUNNING"
+    category: CONFIG
+    cause: "Cannot update application while it is running"
+    fix_type: stop_then_update
+    resolution: "kda.stop_application(ApplicationName=name) → wait for READY → update → kda.start_application()"

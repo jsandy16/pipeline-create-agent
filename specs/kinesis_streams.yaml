@@ -1,0 +1,47 @@
+service_type: kinesis_streams
+is_principal: false
+terraform_resource: aws_kinesis_stream
+description: "On-demand Kinesis data stream for real-time ingestion"
+
+defaults:
+  stream_mode: "ON_DEMAND"
+  shard_count: 1
+  retention_period: 24
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+code_update:
+  method: api_config
+  boto3_client: kinesis
+  description: >
+    Kinesis Streams has no code. Update shard count via update_shard_count() or
+    change stream mode (ON_DEMAND/PROVISIONED) via update_stream_mode().
+  config_update:
+    client: kinesis
+    operation: update_stream_mode
+    id_param: StreamName
+    id_value: "{resource_name}"
+  discovery_ops:
+    - op: describe_stream_summary
+      id_param: StreamName
+      returns: ["StreamDescriptionSummary.StreamStatus", "StreamDescriptionSummary.OpenShardCount", "StreamDescriptionSummary.RetentionPeriodHours", "StreamDescriptionSummary.StreamModeDetails"]
+runtime_diagnostics:
+  - pattern: "ResourceNotFoundException.*kinesis|stream.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Kinesis stream does not exist"
+    fix_type: manual
+    resolution: "Verify stream name matches resource_name. Check terraform apply."
+  - pattern: "ProvisionedThroughputExceededException.*kinesis"
+    category: QUOTA
+    cause: "Kinesis shard throughput limit exceeded (1 MB/s write or 2 MB/s read per shard)"
+    fix_type: update_config
+    resolution: "kinesis.update_shard_count(StreamName=name, TargetShardCount=current*2, ScalingType='UNIFORM_SCALING')"

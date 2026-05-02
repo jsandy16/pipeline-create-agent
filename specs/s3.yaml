@@ -1,0 +1,70 @@
+service_type: s3
+is_principal: false
+terraform_resource: aws_s3_bucket
+description: "Simple object storage bucket with SSE and optional versioning"
+
+# ── AWS S3 Bucket Naming Constraints (enforced by engine/naming.py) ──────────
+# Source: https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
+# - Length: 3–63 characters
+# - Characters: lowercase letters (a-z), digits (0-9), hyphens (-) only
+# - No underscores, uppercase letters, or dots (dots cause SSL cert issues)
+# - Cannot start or end with a hyphen
+# - No consecutive hyphens (e.g. "my--bucket" is invalid)
+# - Cannot be formatted as an IP address (e.g. "192.168.1.1")
+# - Cannot begin with "xn--" (IDNA reserved prefix)
+# - Must be globally unique across all AWS accounts and regions
+# All of these are enforced in resource_name() in engine/naming.py
+
+defaults:
+  versioning_status: "Suspended"
+  sse_algorithm: "AES256"
+  force_destroy: true
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+# S3 does not need VPC placement
+vpc_triggers: []
+
+# Wiring resources this fragment creates
+# S3 OWNS notification + lambda_permission when triggering Lambda
+# S3 OWNS notification when sending to SQS (SQS owns its queue_policy)
+
+code_update:
+  method: api_config
+  boto3_client: s3
+  description: >
+    S3 has no code. Upload/modify objects via put_object(). Update bucket config
+    (lifecycle, versioning, notifications, encryption) via their respective put_* APIs.
+  config_update:
+    client: s3
+    operation: put_bucket_versioning
+    id_param: Bucket
+    id_value: "{resource_name}"
+  discovery_ops:
+    - op: list_objects_v2
+      id_param: Bucket
+      returns: ["Contents[].Key", "Contents[].Size", "Contents[].LastModified", "KeyCount"]
+    - op: get_bucket_notification_configuration
+      id_param: Bucket
+      returns: ["LambdaFunctionConfigurations", "QueueConfigurations", "TopicConfigurations"]
+    - op: get_bucket_versioning
+      id_param: Bucket
+      returns: ["Status", "MFADelete"]
+runtime_diagnostics:
+  - pattern: "NoSuchBucket"
+    category: RESOURCE_NOT_FOUND
+    cause: "S3 bucket does not exist or was deleted"
+    fix_type: manual
+    resolution: "Check if terraform apply completed successfully. Re-run terraform apply if bucket is missing."
+  - pattern: "AccessDenied.*s3|s3.*AccessDenied"
+    category: PERMISSION
+    cause: "Caller IAM role lacks s3:PutObject or s3:GetObject on this bucket"
+    fix_type: update_iam
+    resolution: "Add s3:PutObject, s3:GetObject, s3:ListBucket to the caller's IAM role policy"

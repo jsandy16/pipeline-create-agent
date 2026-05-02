@@ -1,0 +1,902 @@
+# ============================================================================
+# EMR Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL EMR knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/emr.yaml with exhaustive
+# coverage of EMR capabilities, constraints, IAM, integrations, and Terraform
+# resource patterns.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - resource name constraints
+#   3. defaults          - Terraform attribute defaults (minimum-cost)
+#   4. quotas            - AWS service limits
+#   5. clusters          - cluster types, lifecycle, termination
+#   6. instance_types    - instance groups, instance fleets, Spot
+#   7. applications      - supported frameworks (Spark, Hive, Presto, etc.)
+#   8. steps             - step types, ActionOnFailure, step lifecycle
+#   9. bootstrap_actions - custom initialization scripts
+#  10. configurations    - application configuration classifications
+#  11. security          - encryption at rest/in transit, Kerberos, Lake Formation
+#  12. auto_scaling      - managed/custom auto-scaling for core/task groups
+#  13. encryption        - encryption options
+#  14. iam               - complete action catalog, integration graph rules, ARN formats
+#  15. env_vars          - auto-wired environment variables
+#  16. vpc_triggers      - VPC placement rules
+#  17. integrations      - wiring ownership with all connected services
+#  18. terraform_resources - all TF resource types
+#  19. boto3_operations  - complete API reference
+#  20. runtime_diagnostics - error patterns & auto-fix rules
+#  21. tags              - tagging constraints
+#  22. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity ---------------------------------------------------------------
+identity:
+  service_type: emr
+  aws_service_name: "Amazon Elastic MapReduce"
+  is_principal: true             # EMR has an IAM service role + EC2 instance profile role
+  terraform_resource: aws_emr_cluster
+  description: >
+    Managed big-data platform running Apache Spark, Hive, HBase, Flink, Hudi,
+    Presto, and other open-source frameworks on dynamically scalable EC2 instances.
+    EMR handles cluster provisioning, configuration, tuning, and termination.
+  free_tier:
+    status: never_free
+    details: >
+      EMR is NEVER free tier. Charges include EMR per-instance-hour fee (on top
+      of EC2 instance charges), EBS volume charges, and S3 storage for logs/data.
+      Smallest viable configuration: 1 m4.large master + 1 m4.large core ~= $0.27/hr.
+  pricing_model: per_instance_hour  # EMR fee per instance-hour + underlying EC2 + EBS
+
+# -- 2. Naming -----------------------------------------------------------------
+naming:
+  resource_name_limit: 256       # EMR cluster name max length
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9._-"  # letters, digits, dots, underscores, hyphens
+  rules:
+    - "Cluster names do not need to be unique within an account"
+    - "Names appear in console, CLI, and API outputs for identification"
+    - "Engine uses naming.py resource_name() which produces lowercase-hyphenated names"
+  terraform_label_limit: 64      # Terraform resource label character limit
+
+# -- 3. Defaults (minimum-cost) ------------------------------------------------
+defaults:
+  release_label: "emr-6.15.0"
+  master_instance_type: "m4.large"   # smallest viable master; NOT free tier
+  core_instance_type: "m4.large"     # smallest viable core
+  core_instance_count: 1             # minimum core nodes
+  keep_job_flow_alive_when_no_steps: false  # auto-terminate after steps complete
+  termination_protection: false
+  applications:
+    - "Spark"
+    - "Hive"
+  log_encryption_kms_key_id: null    # unencrypted logs by default
+  ebs_root_volume_size: 15           # GB, minimum for EMR
+  custom_ami_id: null                # use default EMR AMI
+  step_concurrency_level: 1          # max concurrent steps (1 = sequential)
+  visible_to_all_users: true
+  # configurations_json is set in the renderer (spark-log4j + yarn-site)
+
+# -- 4. Quotas -----------------------------------------------------------------
+quotas:
+  max_clusters_per_region: 500       # default soft limit, adjustable
+  max_instance_groups_per_cluster: 50  # master=1 + core=1 + up to 48 task groups
+  max_instances_per_cluster: 20000   # default soft limit
+  max_bootstrap_actions: 16          # per cluster
+  max_steps_per_cluster: 256         # for running cluster; unlimited for auto-terminate
+  max_step_concurrency: 256          # step_concurrency_level max
+  max_security_configurations: 100
+  max_instance_fleets: 5             # 1 master + 1 core + up to 3 task fleets
+  max_instance_types_per_fleet: 30
+  max_ebs_volumes_per_instance: 25
+  max_configurations_per_classification: 100
+  supported_regions: "All commercial AWS regions"
+
+# -- 5. Clusters ---------------------------------------------------------------
+clusters:
+  types:
+    long_running:
+      description: "Cluster stays alive, steps submitted interactively"
+      terraform_attribute: "keep_job_flow_alive_when_no_steps = true"
+      use_case: "Interactive workloads, notebooks, ad-hoc queries"
+    transient:
+      description: "Cluster auto-terminates after all steps complete"
+      terraform_attribute: "keep_job_flow_alive_when_no_steps = false"
+      use_case: "Batch ETL, scheduled jobs, cost optimization"
+
+  lifecycle_states:
+    - STARTING        # provisioning EC2 instances
+    - BOOTSTRAPPING   # running bootstrap actions
+    - RUNNING         # ready for steps
+    - WAITING         # idle, waiting for steps (long-running only)
+    - TERMINATING     # shutting down
+    - TERMINATED      # fully stopped
+    - TERMINATED_WITH_ERRORS  # terminated due to error
+
+  termination_protection:
+    description: "Prevents accidental termination via API or console"
+    terraform_attribute: "termination_protection"
+    note: "Must be disabled before cluster can be terminated"
+
+  auto_termination:
+    description: "Auto-terminate after idle period (only for long-running clusters)"
+    terraform_attribute: "auto_termination_policy { idle_timeout = SECONDS }"
+    min_idle_timeout: 60     # seconds
+    max_idle_timeout: 604800 # 7 days
+
+# -- 6. Instance Types ----------------------------------------------------------
+instance_types:
+  instance_groups:
+    description: "Fixed instance type per group. Simpler, supports auto-scaling."
+    types:
+      master:
+        count: 1             # always exactly 1 (3 for HA)
+        terraform_block: "master_instance_group"
+        attributes: ["instance_type", "instance_count", "ebs_config", "bid_price"]
+      core:
+        min_count: 1         # at least 1 core node
+        terraform_block: "core_instance_group"
+        attributes: ["instance_type", "instance_count", "ebs_config", "bid_price", "autoscaling_policy"]
+        note: "Core nodes run HDFS DataNodes. Shrinking core group risks data loss."
+      task:
+        min_count: 0         # optional
+        terraform_resource: "aws_emr_instance_group"
+        note: "Task nodes run compute only (no HDFS). Safe to scale up/down."
+
+  instance_fleets:
+    description: "Multiple instance types per fleet. AWS picks best available."
+    terraform_attribute: "master_instance_fleet / core_instance_fleet"
+    benefits:
+      - "Better Spot availability (AWS can choose from multiple types)"
+      - "Weighted capacity allocation"
+      - "On-demand + Spot mix in same fleet"
+    attributes:
+      - "instance_type_configs (list of {instance_type, weighted_capacity, bid_price_as_percentage_of_on_demand})"
+      - "target_on_demand_capacity"
+      - "target_spot_capacity"
+      - "launch_specifications (on_demand/spot)"
+
+  spot_instances:
+    description: "Use EC2 Spot for cost savings (up to 90% off)"
+    terraform_attribute: "bid_price (instance groups) or bid_price_as_percentage_of_on_demand (fleets)"
+    risk: "Spot instances can be reclaimed with 2-min notice"
+    best_practices:
+      - "Use Spot for task groups only — never for master"
+      - "Use instance fleets with multiple instance types for better Spot availability"
+      - "Set allocation_strategy to capacity-optimized"
+
+  recommended_minimum_cost:
+    master: "m4.large"       # ~$0.10/hr EC2 + ~$0.03/hr EMR
+    core: "m4.large"         # same
+    note: "m5.xlarge recommended for production; m4.large is absolute minimum"
+
+# -- 7. Applications -----------------------------------------------------------
+applications:
+  supported:
+    Spark:
+      description: "In-memory distributed computing framework"
+      versions: "Spark 3.x (included in EMR 6.x releases)"
+      submit_via: "spark-submit (command-runner.jar)"
+      step_jar: "command-runner.jar"
+      step_args_example: ["spark-submit", "--deploy-mode", "cluster", "s3://bucket/script.py"]
+    Hive:
+      description: "SQL-like queries over HDFS/S3 data"
+      versions: "Hive 3.x"
+      submit_via: "hive-script (command-runner.jar)"
+      step_args_example: ["hive-script", "--run-hive-script", "--args", "-f", "s3://bucket/query.hql"]
+    Presto:
+      description: "Distributed SQL query engine for interactive analytics"
+      note: "Use Trino for EMR 6.4+; Presto for older releases"
+    HBase:
+      description: "NoSQL column-family database on HDFS"
+      requires: "Persistent HDFS or S3 backend for durability"
+    Flink:
+      description: "Stream and batch processing framework"
+      versions: "Flink 1.x"
+    Hudi:
+      description: "Incremental data processing and data lake management"
+      note: "Included by default in EMR 6.x Spark"
+    Pig:
+      description: "High-level data flow language"
+      note: "Legacy — prefer Spark for new workloads"
+    Zeppelin:
+      description: "Notebook-style interactive analytics"
+      access: "Port 8890 on master node (requires SSH tunnel or security group rule)"
+    JupyterHub:
+      description: "Multi-user Jupyter notebooks"
+      access: "Port 9443 on master node"
+    Livy:
+      description: "REST API for Spark job submission"
+      access: "Port 8998 on master node"
+    Ganglia:
+      description: "Cluster monitoring"
+      access: "Port 80 on master node"
+
+# -- 8. Steps ------------------------------------------------------------------
+steps:
+  description: >
+    Steps are units of work submitted to a cluster. Each step runs a script or
+    command using command-runner.jar or a custom JAR.
+  max_per_cluster: 256
+  concurrency:
+    description: "step_concurrency_level controls how many steps run in parallel"
+    max: 256
+    default: 1   # sequential execution
+  lifecycle_states:
+    - PENDING      # queued, waiting for resources
+    - CANCEL_PENDING
+    - RUNNING
+    - COMPLETED
+    - CANCELLED
+    - FAILED
+    - INTERRUPTED
+  action_on_failure:
+    TERMINATE_CLUSTER: "Terminate the cluster on step failure"
+    CANCEL_AND_WAIT: "Cancel remaining steps and keep cluster running"
+    CONTINUE: "Continue with next step"
+    TERMINATE_JOB_FLOW: "Same as TERMINATE_CLUSTER (legacy name)"
+  common_step_types:
+    spark_submit:
+      jar: "command-runner.jar"
+      args: ["spark-submit", "--deploy-mode", "cluster", "s3://bucket/script.py"]
+    hive_script:
+      jar: "command-runner.jar"
+      args: ["hive-script", "--run-hive-script", "--args", "-f", "s3://bucket/query.hql"]
+    custom_jar:
+      jar: "s3://bucket/my-custom.jar"
+      args: ["com.example.MainClass", "--input", "s3://bucket/data/"]
+    streaming:
+      jar: "command-runner.jar"
+      args: ["hadoop-streaming", "-mapper", "mapper.py", "-reducer", "reducer.py"]
+    s3_dist_cp:
+      jar: "command-runner.jar"
+      args: ["s3-dist-cp", "--src", "s3://source/", "--dest", "s3://dest/"]
+      description: "Distributed copy between S3 locations"
+
+# -- 9. Bootstrap Actions -------------------------------------------------------
+bootstrap_actions:
+  description: >
+    Shell scripts that run on each node before applications start. Used to install
+    additional software, configure the OS, or download data.
+  max_per_cluster: 16
+  terraform_block: "bootstrap_action"
+  attributes:
+    name: "Display name for the action"
+    path: "S3 path to the shell script"
+    args: "Arguments passed to the script"
+  execution:
+    - "Runs on ALL nodes (master + core + task)"
+    - "Runs sequentially in the order specified"
+    - "If any bootstrap action fails, cluster terminates with BOOTSTRAP_FAILURE"
+    - "Runs with root privileges"
+  common_patterns:
+    install_python_packages: "sudo pip3 install pandas numpy boto3"
+    install_system_packages: "sudo yum install -y git jq"
+    download_config: "aws s3 cp s3://bucket/config.ini /etc/app/config.ini"
+    set_environment: "echo 'export MY_VAR=value' >> /etc/profile.d/custom.sh"
+
+# -- 10. Configurations ---------------------------------------------------------
+configurations:
+  description: >
+    Application-specific settings passed via configurations_json in Terraform.
+    Each configuration has a Classification (the config file name) and Properties.
+  terraform_attribute: "configurations_json"
+  common_classifications:
+    spark_defaults:
+      classification: "spark-defaults"
+      example_properties:
+        "spark.executor.memory": "4g"
+        "spark.executor.cores": "2"
+        "spark.dynamicAllocation.enabled": "true"
+    spark_log4j:
+      classification: "spark-log4j"
+      example_properties:
+        "log4j.rootCategory": "INFO,console,CloudWatch"
+    hive_site:
+      classification: "hive-site"
+      example_properties:
+        "hive.metastore.client.factory.class": "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+    yarn_site:
+      classification: "yarn-site"
+      example_properties:
+        "yarn.log-aggregation-enable": "true"
+    emrfs_site:
+      classification: "emrfs-site"
+      example_properties:
+        "fs.s3.consistent": "true"
+        "fs.s3.consistent.retryCount": "5"
+    mapred_site:
+      classification: "mapred-site"
+      example_properties:
+        "mapreduce.map.memory.mb": "2048"
+        "mapreduce.reduce.memory.mb": "4096"
+  renderer_default_configurations:
+    - classification: "spark-log4j"
+      properties:
+        "log4j.rootCategory": "INFO,console,CloudWatch"
+    - classification: "yarn-site"
+      properties:
+        "yarn.log-aggregation-enable": "true"
+
+# -- 11. Security ---------------------------------------------------------------
+security:
+  encryption_at_rest:
+    s3:
+      description: "Encrypts data in S3 using SSE-S3, SSE-KMS, or CSE-KMS"
+      terraform_resource: "aws_emr_security_configuration"
+    local_disk:
+      description: "Encrypts EBS volumes and instance store using LUKS"
+      terraform_resource: "aws_emr_security_configuration"
+  encryption_in_transit:
+    description: "TLS encryption for inter-node communication"
+    terraform_resource: "aws_emr_security_configuration"
+    requires: "PEM certificates (can use AWS Certificate Manager)"
+  kerberos:
+    description: "Authentication for cluster users"
+    terraform_block: "kerberos_attributes"
+    requires: "Active Directory or MIT KDC"
+  lake_formation:
+    description: "Fine-grained data access control via AWS Lake Formation"
+    note: "Requires EMR 5.31+ or 6.1+; replaces EMRFS authorization"
+  security_groups:
+    master:
+      description: "SG for the master node"
+      terraform_attribute: "ec2_attributes.emr_managed_master_security_group"
+      required_ports: [8443]  # EMR control plane
+    core_task:
+      description: "SG for core and task nodes"
+      terraform_attribute: "ec2_attributes.emr_managed_slave_security_group"
+    service_access:
+      description: "SG for EMR service access (private subnets)"
+      terraform_attribute: "ec2_attributes.service_access_security_group"
+      note: "Required when cluster is in a private subnet"
+
+# -- 12. Auto-Scaling -----------------------------------------------------------
+auto_scaling:
+  managed_scaling:
+    description: "EMR managed scaling — AWS automatically scales core and task groups"
+    terraform_block: "managed_scaling_policy"
+    attributes:
+      minimum_capacity_units: "Minimum total units across all instance groups"
+      maximum_capacity_units: "Maximum total units"
+      maximum_core_capacity_units: "Max units for core group (protects HDFS)"
+      maximum_on_demand_capacity_units: "Max on-demand units (rest are Spot)"
+      unit_type: "InstanceFleetUnits, Instances, or VCPU"
+    best_practices:
+      - "Set maximum_core_capacity_units to protect HDFS"
+      - "Use task groups for Spot-based scaling"
+      - "unit_type=VCPU gives most flexible scaling"
+
+  custom_auto_scaling:
+    description: "CloudWatch-based auto-scaling policies on instance groups"
+    terraform_attribute: "core_instance_group.autoscaling_policy"
+    metrics:
+      - "YARNMemoryAvailablePercentage"
+      - "ContainerPendingRatio"
+      - "AppsRunning"
+      - "AppsPending"
+    note: "Deprecated in favor of managed_scaling_policy"
+
+# -- 13. Encryption -------------------------------------------------------------
+encryption:
+  options:
+    sse_s3:
+      description: "S3-managed keys for data in S3"
+      cost: free
+    sse_kms:
+      description: "KMS-managed keys for data in S3"
+      cost: "KMS API charges"
+    cse_kms:
+      description: "Client-side encryption with KMS before writing to S3"
+    luks:
+      description: "Linux Unified Key Setup for local disk encryption (EBS + instance store)"
+      terraform_via: "aws_emr_security_configuration"
+    tls:
+      description: "In-transit encryption between nodes"
+      terraform_via: "aws_emr_security_configuration"
+
+# -- 14. IAM -------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    cluster: "arn:aws:elasticmapreduce:REGION:ACCOUNT:cluster/CLUSTER-ID"
+    step: "arn:aws:elasticmapreduce:REGION:ACCOUNT:cluster/CLUSTER-ID/step/STEP-ID"
+
+  # Service roles
+  roles:
+    emr_service_role:
+      description: "Role assumed by the EMR service to manage EC2 instances, S3, etc."
+      trust_principal: "elasticmapreduce.amazonaws.com"
+      terraform_attribute: "service_role"
+      aws_managed_policy: "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+    ec2_instance_profile:
+      description: "Role assumed by EC2 instances in the cluster (data access)"
+      trust_principal: "ec2.amazonaws.com"
+      terraform_resource: "aws_iam_instance_profile"
+      terraform_attribute: "ec2_attributes.instance_profile"
+      aws_managed_policy: "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role"
+    auto_scaling_role:
+      description: "Role for EMR auto-scaling (if custom auto-scaling used)"
+      trust_principal: "elasticmapreduce.amazonaws.com"
+      terraform_attribute: "autoscaling_role"
+
+  # Complete IAM action catalog
+  actions:
+    cluster_management:
+      - "elasticmapreduce:RunJobFlow"          # create cluster
+      - "elasticmapreduce:TerminateJobFlows"    # terminate cluster(s)
+      - "elasticmapreduce:DescribeCluster"
+      - "elasticmapreduce:ListClusters"
+      - "elasticmapreduce:SetTerminationProtection"
+      - "elasticmapreduce:SetVisibleToAllUsers"
+      - "elasticmapreduce:SetKeepJobFlowAliveWhenNoSteps"
+    step_management:
+      - "elasticmapreduce:AddJobFlowSteps"     # submit steps
+      - "elasticmapreduce:CancelSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:ListSteps"
+    instance_management:
+      - "elasticmapreduce:ListInstances"
+      - "elasticmapreduce:ListInstanceGroups"
+      - "elasticmapreduce:ListInstanceFleets"
+      - "elasticmapreduce:ModifyInstanceGroups"
+      - "elasticmapreduce:ModifyInstanceFleet"
+      - "elasticmapreduce:AddInstanceGroups"
+      - "elasticmapreduce:AddInstanceFleet"
+    security:
+      - "elasticmapreduce:CreateSecurityConfiguration"
+      - "elasticmapreduce:DeleteSecurityConfiguration"
+      - "elasticmapreduce:DescribeSecurityConfiguration"
+      - "elasticmapreduce:ListSecurityConfigurations"
+    tagging:
+      - "elasticmapreduce:AddTags"
+      - "elasticmapreduce:RemoveTags"
+    scaling:
+      - "elasticmapreduce:PutAutoScalingPolicy"
+      - "elasticmapreduce:RemoveAutoScalingPolicy"
+      - "elasticmapreduce:PutManagedScalingPolicy"
+      - "elasticmapreduce:GetManagedScalingPolicy"
+      - "elasticmapreduce:RemoveManagedScalingPolicy"
+    notebooks:
+      - "elasticmapreduce:CreateEditor"
+      - "elasticmapreduce:DescribeEditor"
+      - "elasticmapreduce:ListEditors"
+      - "elasticmapreduce:StartEditor"
+      - "elasticmapreduce:StopEditor"
+      - "elasticmapreduce:DeleteEditor"
+    bootstrap:
+      - "elasticmapreduce:ListBootstrapActions"
+
+  # Integration graph IAM rules (used by spec_builder)
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "ec2:DescribeInstances"
+    - "ec2:DescribeVolumes"
+  as_target_of:
+    stepfunctions:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+    lambda:
+      - "elasticmapreduce:AddJobFlowSteps"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:BatchWriteItem"
+    glue:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeClusterV2"
+
+  # IAM condition keys
+  condition_keys:
+    - "elasticmapreduce:RequestTag/${TagKey}"
+    - "elasticmapreduce:ResourceTag/${TagKey}"
+    - "aws:RequestTag/${TagKey}"
+    - "aws:TagKeys"
+
+# -- 15. Environment Variables --------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+# -- 16. VPC Triggers -----------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - msk
+  - redshift
+
+# -- 17. Integration Wiring Ownership ------------------------------------------
+integrations:
+  stepfunctions_to_emr:
+    description: "Step Functions adds steps to EMR cluster via addStep.sync integration"
+    owned_by: "stepfunctions"
+    asl_resource: "arn:aws:states:::elasticmapreduce:addStep.sync"
+    iam_on_caller:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:CancelSteps"
+      - "iam:PassRole"
+    parameters:
+      "ClusterId.$": "$.cluster_id"
+      "Step.Name": "step-name"
+      "Step.ActionOnFailure": "CONTINUE"
+      "Step.HadoopJarStep.Jar": "command-runner.jar"
+      "Step.HadoopJarStep.Args.$": "$.step_args"
+
+  lambda_to_emr:
+    description: "Lambda submits steps to EMR via add_job_flow_steps boto3 call"
+    owned_by: "lambda"
+    iam_on_caller:
+      - "elasticmapreduce:AddJobFlowSteps"
+    caller_env_var:
+      pattern: "{PEER_UPPER}_CLUSTER_ID"
+      ref: "aws_emr_cluster.{peer_label}.id"
+
+  emr_to_s3:
+    description: "EMR reads input data, writes output, and stores logs in S3"
+    owned_by: "emr"
+    iam_on_self:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+    renderer_behavior: >
+      The EMR renderer checks for S3 integrations and uses the first S3 bucket
+      found as the log_uri destination: s3://${aws_s3_bucket.LABEL.id}/emr-logs/
+
+  emr_to_dynamodb:
+    description: "EMR writes processed results to DynamoDB"
+    owned_by: "emr"
+    iam_on_self:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:BatchWriteItem"
+
+  emr_to_glue:
+    description: "EMR uses Glue Data Catalog as Hive metastore"
+    owned_by: "emr"
+    iam_on_self:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+    configuration_required:
+      classification: "hive-site"
+      property: "hive.metastore.client.factory.class"
+      value: "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+
+  emr_to_redshift:
+    description: "EMR writes processed data to Redshift"
+    owned_by: "emr"
+    iam_on_self:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+
+  emr_to_aurora:
+    description: "EMR reads/writes data to Aurora via JDBC or Data API"
+    owned_by: "emr"
+    requires_vpc: true
+    iam_on_self:
+      - "rds-data:ExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+
+  emr_to_kinesis:
+    description: "EMR reads/writes to Kinesis Streams (Spark Structured Streaming)"
+    owned_by: "emr"
+    iam_on_self:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+
+  emr_to_msk:
+    description: "EMR reads/writes to MSK (Spark Structured Streaming with Kafka)"
+    owned_by: "emr"
+    requires_vpc: true
+    iam_on_self:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeClusterV2"
+
+# -- 18. Terraform Resources ----------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_emr_cluster"
+      description: "The EMR cluster"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for EMR logs at /aws/emr/{resource_name}"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "EMR service role (trust: elasticmapreduce.amazonaws.com)"
+      always_created: true
+      label_suffix: "_role"
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy for the service role"
+      always_created: true
+      label_suffix: "_policy"
+    - resource: "aws_iam_role"
+      description: "EC2 instance profile role (trust: ec2.amazonaws.com)"
+      always_created: true
+      label_suffix: "_ec2_role"
+    - resource: "aws_iam_instance_profile"
+      description: "EC2 instance profile for EMR nodes"
+      always_created: true
+      label_suffix: "_ec2_profile"
+
+  conditional:
+    - resource: "aws_emr_instance_group"
+      condition: "When task instance groups are defined"
+    - resource: "aws_emr_security_configuration"
+      condition: "When encryption or Kerberos is enabled"
+    - resource: "aws_security_group"
+      condition: "When VPC placement with custom security groups"
+
+# -- 19. Boto3 Operations -------------------------------------------------------
+boto3_operations:
+  client: "emr"
+  cluster_operations:
+    run_job_flow:
+      description: "Create a new EMR cluster"
+      parameters:
+        Name: {type: string, required: true}
+        ReleaseLabel: {type: string, required: true, description: "e.g. emr-6.15.0"}
+        Instances: {type: object, required: true, description: "InstanceGroups or InstanceFleets config"}
+        Steps: {type: list, description: "Initial steps to run"}
+        Applications: {type: list, description: "List of {'Name': 'Spark'} dicts"}
+        ServiceRole: {type: string, required: true, description: "EMR service role"}
+        JobFlowRole: {type: string, required: true, description: "EC2 instance profile name"}
+        LogUri: {type: string, description: "S3 path for cluster logs"}
+        Configurations: {type: list, description: "Application configuration overrides"}
+        BootstrapActions: {type: list}
+        Tags: {type: list}
+        VisibleToAllUsers: {type: boolean}
+        StepConcurrencyLevel: {type: integer}
+        AutoTerminationPolicy: {type: object}
+        ManagedScalingPolicy: {type: object}
+      returns: ["JobFlowId"]
+    describe_cluster:
+      description: "Get cluster details and status"
+      parameters:
+        ClusterId: {type: string, required: true}
+      returns: ["Cluster.Id", "Cluster.Name", "Cluster.Status.State", "Cluster.LogUri",
+                "Cluster.Ec2InstanceAttributes", "Cluster.MasterPublicDnsName",
+                "Cluster.Applications", "Cluster.Configurations"]
+    list_clusters:
+      description: "List EMR clusters with optional state filter"
+      parameters:
+        ClusterStates: {type: list, description: "STARTING, BOOTSTRAPPING, RUNNING, WAITING, TERMINATING, TERMINATED, TERMINATED_WITH_ERRORS"}
+        CreatedAfter: {type: datetime}
+        CreatedBefore: {type: datetime}
+      returns: ["Clusters[].Id", "Clusters[].Name", "Clusters[].Status.State", "Clusters[].NormalizedInstanceHours"]
+    terminate_job_flows:
+      description: "Terminate one or more clusters"
+      parameters:
+        JobFlowIds: {type: list, required: true}
+    set_termination_protection:
+      description: "Enable or disable termination protection"
+      parameters:
+        JobFlowIds: {type: list, required: true}
+        TerminationProtected: {type: boolean, required: true}
+
+  step_operations:
+    add_job_flow_steps:
+      description: "Add processing steps to a running cluster"
+      parameters:
+        JobFlowId: {type: string, required: true}
+        Steps: {type: list, required: true, description: "List of step configs"}
+      returns: ["StepIds"]
+    describe_step:
+      description: "Get step details and status"
+      parameters:
+        ClusterId: {type: string, required: true}
+        StepId: {type: string, required: true}
+      returns: ["Step.Id", "Step.Name", "Step.Status.State", "Step.Config.Jar", "Step.Config.Args"]
+    list_steps:
+      description: "List steps on a cluster"
+      parameters:
+        ClusterId: {type: string, required: true}
+        StepStates: {type: list, description: "PENDING, CANCEL_PENDING, RUNNING, COMPLETED, CANCELLED, FAILED, INTERRUPTED"}
+      returns: ["Steps[].Id", "Steps[].Name", "Steps[].Status.State", "Steps[].Config.Args"]
+    cancel_steps:
+      description: "Cancel pending steps"
+      parameters:
+        ClusterId: {type: string, required: true}
+        StepIds: {type: list, required: true}
+
+  instance_operations:
+    list_instances:
+      description: "List EC2 instances in the cluster"
+      parameters:
+        ClusterId: {type: string, required: true}
+        InstanceGroupTypes: {type: list, description: "MASTER, CORE, TASK"}
+        InstanceStates: {type: list}
+      returns: ["Instances[].Id", "Instances[].PublicIpAddress", "Instances[].PrivateIpAddress", "Instances[].Status.State"]
+    list_instance_groups:
+      description: "List instance groups"
+      parameters:
+        ClusterId: {type: string, required: true}
+      returns: ["InstanceGroups[].Id", "InstanceGroups[].InstanceGroupType", "InstanceGroups[].InstanceType",
+                "InstanceGroups[].RunningInstanceCount", "InstanceGroups[].RequestedInstanceCount"]
+    modify_instance_groups:
+      description: "Resize instance groups"
+      parameters:
+        ClusterId: {type: string}
+        InstanceGroups: {type: list, required: true, description: "[{InstanceGroupId, InstanceCount}]"}
+
+  tagging:
+    add_tags:
+      description: "Tag an EMR cluster"
+      parameters:
+        ResourceId: {type: string, required: true, description: "Cluster ID"}
+        Tags: {type: list, required: true, description: "[{Key, Value}]"}
+    remove_tags:
+      description: "Remove tags from an EMR cluster"
+      parameters:
+        ResourceId: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+
+# -- 20. Runtime Diagnostics ----------------------------------------------------
+runtime_diagnostics:
+  - pattern: "BOOTSTRAP_FAILURE|bootstrap.*failed"
+    category: CONFIG
+    cause: "EMR bootstrap action failed — check bootstrap script in S3"
+    fix_type: manual
+    resolution: "Check bootstrap script S3 path. View bootstrap logs via describe_cluster()['Cluster']['LogUri']"
+
+  - pattern: "FAILED.*step|step.*FAILED"
+    category: CONFIG
+    cause: "EMR step failed — check step logs in S3 at cluster LogUri"
+    fix_type: check_logs
+    resolution: "Get step logs: s3://log-uri/cluster-id/steps/step-id/. View stderr for Python traceback."
+
+  - pattern: "TERMINATED_WITH_ERRORS"
+    category: CLUSTER_FAILURE
+    cause: "Cluster terminated with errors — check state change reason"
+    fix_type: check_logs
+    resolution: "describe_cluster(ClusterId=id)['Cluster']['Status']['StateChangeReason']['Message']"
+
+  - pattern: "InsufficientInstanceCapacity"
+    category: CAPACITY
+    cause: "AWS does not have enough capacity for the requested instance type in this AZ"
+    fix_type: retry
+    resolution: "Try a different instance type or availability zone. Use instance fleets for better availability."
+
+  - pattern: "AccessDeniedException|not authorized"
+    category: PERMISSION
+    cause: "EMR service role or EC2 instance profile role lacks required permissions"
+    fix_type: update_iam
+    resolution: "Check both the EMR service role and EC2 instance profile role. Add missing permissions."
+
+  - pattern: "InvalidRequestException.*subnet"
+    category: CONFIG
+    cause: "Specified subnet does not exist or is not in the VPC"
+    fix_type: manual
+    resolution: "Verify subnet ID exists. EMR requires subnets with DNS hostnames enabled."
+
+  - pattern: "ValidationException.*master.*instance.*type"
+    category: CONFIG
+    cause: "Master instance type is not supported in this region or for EMR"
+    fix_type: manual
+    resolution: "Check supported instance types for EMR in your region. Use m4.large or m5.xlarge."
+
+  - pattern: "EC2.*QUOTA|InstanceLimitExceeded"
+    category: QUOTA
+    cause: "EC2 instance limit reached in this region/account"
+    fix_type: manual
+    resolution: "Request EC2 quota increase via Service Quotas console. Or use smaller/fewer instances."
+
+# -- 21. Tags -------------------------------------------------------------------
+tags:
+  max_per_cluster: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  propagation: "Tags set on the cluster propagate to EC2 instances automatically."
+
+# -- 22. Code Update (Developer Agent) ------------------------------------------
+code_update:
+  method: s3_script
+  boto3_client: emr
+  description: >
+    EMR step scripts (Spark/Hive) are stored in S3. Add new steps to a running cluster via
+    add_job_flow_steps(). Existing steps cannot be modified; add a new step with the corrected script.
+    Update S3 script content via s3.put_object() before submitting the step.
+  config_update:
+    client: emr
+    operation: add_job_flow_steps
+    id_param: JobFlowId
+    note: "Cluster ID from aws_emr_cluster terraform output or describe_cluster()"
+  code_update_steps:
+    - "emr_client = boto3.client('emr', region_name=region)"
+    - "clusters = emr_client.list_clusters(ClusterStates=['WAITING','RUNNING'])['Clusters']"
+    - "cluster = next(c for c in clusters if c['Name'] == resource_name)"
+    - "Update script at S3 path via s3.put_object()"
+    - "emr_client.add_job_flow_steps(JobFlowId=cluster['Id'], Steps=[{Name:'fix-step', ActionOnFailure:'CONTINUE', HadoopJarStep:{Jar:'command-runner.jar', Args:['spark-submit','s3://bucket/script.py']}}])"
+  discovery_ops:
+    - op: describe_cluster
+      id_param: ClusterId
+      returns: ["Cluster.Id", "Cluster.Name", "Cluster.Status.State", "Cluster.LogUri", "Cluster.Ec2InstanceAttributes"]
+    - op: list_clusters
+      filter: "ClusterStates=['WAITING','RUNNING','BOOTSTRAPPING']"
+      returns: ["Clusters[].Id", "Clusters[].Name", "Clusters[].Status.State"]
+    - op: list_steps
+      id_param: ClusterId
+      returns: ["Steps[].Id", "Steps[].Name", "Steps[].Status.State", "Steps[].Config.Args"]
+
+# -- Invocation (from existing spec) -------------------------------------------
+invocation:
+  description: >
+    Lambda/StepFunctions submits steps via add_job_flow_steps(JobFlowId=cluster_id, Steps=[...]).
+    Cluster ID from env var {SELF_UPPER}_CLUSTER_ID. Caller needs iam:PassRole for the
+    EMR service role when RunJobFlow is used.
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_CLUSTER_ID"
+      ref: "aws_emr_cluster.{self_label}.id"
+      boto3_param: "JobFlowId"
+      description: "EMR cluster ID — passed as JobFlowId in add_job_flow_steps()"
+  caller_iam:
+    - "elasticmapreduce:AddJobFlowSteps"
+    - "elasticmapreduce:DescribeStep"
+    - "elasticmapreduce:ListSteps"
+    - "elasticmapreduce:DescribeCluster"
+    - "iam:PassRole"
+  passrole_required: true
+  passrole_resource: "aws_iam_role.{self_label}_role.arn"
+
+# -- Pipeline Monitoring -------------------------------------------------------
+pipeline_monitoring:
+  method: cloudwatch_logs
+  log_group_pattern: "/aws/emr/{resource_name}"
+  terraform_resource: "aws_cloudwatch_log_group"
+  log_aggregator_mappings:
+    service_to_tf: "aws_emr_cluster"
+    tf_name_attr: "name"

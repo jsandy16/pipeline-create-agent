@@ -1,0 +1,18 @@
+templates:
+  every_minute:
+    display_name: "Every Minute"
+    description: "Trigger every minute"
+    config:
+      schedule_expression: "rate(1 minute)"
+
+  hourly:
+    display_name: "Hourly"
+    description: "Trigger every hour"
+    config:
+      schedule_expression: "rate(1 hour)"
+
+  daily:
+    display_name: "Daily"
+    description: "Trigger once per day at midnight UTC"
+    config:
+      schedule_expression: "cron(0 0 * * ? *)"

@@ -1,0 +1,89 @@
+service: s3
+boto3_client: s3
+description: "Amazon S3 — object storage with bucket/prefix/object management"
+
+operations:
+  create_bucket:
+    description: "Create a new S3 bucket"
+    parameters:
+      Bucket: {type: string, required: true, description: "Bucket name"}
+      CreateBucketConfiguration: {type: object, description: "Region constraint"}
+
+  put_object:
+    description: "Upload an object or create a prefix (empty key ending with /)"
+    parameters:
+      Bucket: {type: string, required: true}
+      Key: {type: string, required: true, description: "Object key (use trailing / for prefix)"}
+      Body: {type: bytes, description: "Object content"}
+      ContentType: {type: string}
+      ServerSideEncryption: {type: string, description: "AES256 or aws:kms"}
+      Metadata: {type: object}
+
+  delete_object:
+    description: "Delete an object from a bucket"
+    parameters:
+      Bucket: {type: string, required: true}
+      Key: {type: string, required: true}
+
+  delete_objects:
+    description: "Delete multiple objects in a single request"
+    parameters:
+      Bucket: {type: string, required: true}
+      Delete: {type: object, required: true, description: "Dict with Objects list"}
+
+  copy_object:
+    description: "Copy an object within or between buckets"
+    parameters:
+      Bucket: {type: string, required: true}
+      Key: {type: string, required: true}
+      CopySource: {type: string, required: true, description: "Source bucket/key"}
+
+  list_objects_v2:
+    description: "List objects in a bucket with optional prefix filter"
+    parameters:
+      Bucket: {type: string, required: true}
+      Prefix: {type: string}
+      MaxKeys: {type: integer}
+      Delimiter: {type: string}
+
+  head_object:
+    description: "Get metadata for an object without downloading"
+    parameters:
+      Bucket: {type: string, required: true}
+      Key: {type: string, required: true}
+
+  get_object:
+    description: "Download an object"
+    parameters:
+      Bucket: {type: string, required: true}
+      Key: {type: string, required: true}
+
+  put_bucket_lifecycle_configuration:
+    description: "Set lifecycle rules (expiration, transitions)"
+    parameters:
+      Bucket: {type: string, required: true}
+      LifecycleConfiguration: {type: object, required: true}
+
+  put_bucket_policy:
+    description: "Set a bucket policy (JSON)"
+    parameters:
+      Bucket: {type: string, required: true}
+      Policy: {type: string, required: true, description: "JSON policy document"}
+
+  put_bucket_cors:
+    description: "Configure CORS rules for a bucket"
+    parameters:
+      Bucket: {type: string, required: true}
+      CORSConfiguration: {type: object, required: true}
+
+  put_bucket_notification_configuration:
+    description: "Configure event notifications (Lambda, SQS, SNS)"
+    parameters:
+      Bucket: {type: string, required: true}
+      NotificationConfiguration: {type: object, required: true}
+
+  put_bucket_tagging:
+    description: "Set tags on a bucket"
+    parameters:
+      Bucket: {type: string, required: true}
+      Tagging: {type: object, required: true}

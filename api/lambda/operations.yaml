@@ -1,0 +1,88 @@
+service: lambda
+boto3_client: lambda
+description: "AWS Lambda — serverless functions"
+
+operations:
+  update_function_code:
+    description: "Deploy new code to an existing Lambda function"
+    parameters:
+      FunctionName: {type: string, required: true}
+      ZipFile: {type: bytes, description: "Zip file content"}
+      S3Bucket: {type: string, description: "S3 bucket with deployment package"}
+      S3Key: {type: string, description: "S3 key for deployment package"}
+
+  update_function_configuration:
+    description: "Update function settings (memory, timeout, env vars, runtime)"
+    parameters:
+      FunctionName: {type: string, required: true}
+      Runtime: {type: string}
+      Handler: {type: string}
+      MemorySize: {type: integer}
+      Timeout: {type: integer}
+      Environment: {type: object, description: "Dict with Variables map"}
+      Layers: {type: list, description: "List of layer ARNs"}
+
+  invoke:
+    description: "Invoke a Lambda function (sync or async)"
+    parameters:
+      FunctionName: {type: string, required: true}
+      InvocationType: {type: string, description: "RequestResponse, Event, or DryRun"}
+      Payload: {type: string, description: "JSON payload"}
+
+  create_function:
+    description: "Create a new Lambda function"
+    parameters:
+      FunctionName: {type: string, required: true}
+      Runtime: {type: string, required: true}
+      Role: {type: string, required: true, description: "Execution role ARN"}
+      Handler: {type: string, required: true}
+      Code: {type: object, required: true}
+      MemorySize: {type: integer}
+      Timeout: {type: integer}
+      Environment: {type: object}
+
+  add_permission:
+    description: "Grant another AWS service permission to invoke this function"
+    parameters:
+      FunctionName: {type: string, required: true}
+      StatementId: {type: string, required: true}
+      Action: {type: string, required: true}
+      Principal: {type: string, required: true}
+      SourceArn: {type: string}
+
+  publish_version:
+    description: "Publish a new version of the function"
+    parameters:
+      FunctionName: {type: string, required: true}
+      Description: {type: string}
+
+  create_alias:
+    description: "Create an alias pointing to a specific version"
+    parameters:
+      FunctionName: {type: string, required: true}
+      Name: {type: string, required: true}
+      FunctionVersion: {type: string, required: true}
+
+  put_function_concurrency:
+    description: "Set reserved concurrency for a function"
+    parameters:
+      FunctionName: {type: string, required: true}
+      ReservedConcurrentExecutions: {type: integer, required: true}
+
+  list_functions:
+    description: "List all Lambda functions"
+    parameters:
+      MaxItems: {type: integer}
+
+  get_function:
+    description: "Get function configuration and code location"
+    parameters:
+      FunctionName: {type: string, required: true}
+
+  create_event_source_mapping:
+    description: "Map an event source (SQS, Kinesis, DynamoDB) to a function"
+    parameters:
+      FunctionName: {type: string, required: true}
+      EventSourceArn: {type: string, required: true}
+      BatchSize: {type: integer}
+      Enabled: {type: boolean}

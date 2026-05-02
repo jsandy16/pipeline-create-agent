@@ -1,0 +1,52 @@
+service_type: cloudwatch
+is_principal: false
+terraform_resource: aws_cloudwatch_event_rule
+description: "CloudWatch Event Rule for scheduled triggers or event pattern matching"
+
+defaults:
+  schedule_expression: "rate(5 minutes)"
+  state: "ENABLED"
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+# CloudWatch fragment creates:
+#   1. aws_cloudwatch_event_rule (schedule or event pattern)
+#   2. aws_cloudwatch_event_target (pointing to SQS, Lambda, etc.)
+#   3. For SQS targets: nothing extra (SQS fragment creates queue_policy)
+#   4. For Lambda targets: aws_lambda_permission with principal events.amazonaws.com
+
+code_update:
+  method: api_config
+  boto3_client: events
+  description: >
+    CloudWatch/EventBridge rules updated via put_rule() (upsert semantics — safe to call
+    on existing rules). Targets updated via put_targets(). Disable/enable via
+    disable_rule()/enable_rule().
+  config_update:
+    client: events
+    operation: put_rule
+    id_param: Name
+    id_value: "{resource_name}"
+    note: "put_rule() acts as upsert — updates schedule/pattern if rule already exists"
+  discovery_ops:
+    - op: describe_rule
+      id_param: Name
+      returns: ["Arn", "ScheduleExpression", "EventPattern", "State", "RoleArn"]
+    - op: list_targets_by_rule
+      id_param: Rule
+      returns: ["Targets[].Id", "Targets[].Arn", "Targets[].Input", "Targets[].InputPath"]
+runtime_diagnostics:
+  - pattern: "InvalidEventPatternException|invalid.*event.*pattern"
+    category: CONFIG
+    cause: "EventBridge event pattern JSON is invalid"
+    fix_type: update_config
+    resolution: "Fix event pattern JSON and re-call put_rule(). Validate pattern via events.test_event_pattern()."

@@ -1,0 +1,1349 @@
+# ============================================================================
+# S3 Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL S3 knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/s3.yaml with exhaustive
+# coverage of S3 capabilities, constraints, IAM, integrations, and Terraform
+# resource patterns.
+#
+# Structure:
+#   1. identity          — service metadata & Terraform mapping
+#   2. naming            — bucket naming rules & constraints
+#   3. defaults          — Terraform attribute defaults (free-tier safe)
+#   4. quotas            — AWS service limits
+#   5. storage_classes   — all storage classes with Terraform values
+#   6. encryption        — SSE types, headers, KMS integration
+#   7. versioning        — states, MFA delete
+#   8. lifecycle         — transition waterfall, expiration rules
+#   9. replication       — CRR, SRR, permissions
+#  10. event_notifications — all event types, destinations, filtering
+#  11. access_control    — bucket policies, ACLs, Block Public Access, access points
+#  12. performance       — request rates, multipart upload, Transfer Acceleration
+#  13. static_website    — hosting config, endpoint format
+#  14. object_lock       — WORM, retention modes, legal holds
+#  15. cors              — cross-origin configuration
+#  16. logging           — server access logs, CloudTrail data events
+#  17. iam               — complete IAM action catalog & integration graph rules
+#  18. env_vars          — auto-wired environment variables
+#  19. vpc_triggers      — VPC placement rules
+#  20. integrations      — wiring ownership with all supported service types
+#  21. terraform_resources — all TF resource types this service uses
+#  22. boto3_operations  — complete API operation reference
+#  23. runtime_diagnostics — error patterns & auto-fix rules
+#  24. tags              — tagging constraints
+#  25. code_update       — developer agent instructions
+# ============================================================================
+
+# ── 1. Identity ──────────────────────────────────────────────────────────────
+identity:
+  service_type: s3
+  aws_service_name: "Amazon Simple Storage Service"
+  is_principal: false          # S3 has no execution role of its own
+  terraform_resource: aws_s3_bucket
+  description: >
+    Object storage service with industry-leading scalability, data availability,
+    security, and performance. Stores data as objects within buckets.
+  free_tier:
+    status: always_free
+    details: "5 GB Standard storage, 20,000 GET requests, 2,000 PUT requests/month"
+  pricing_model: pay_per_use   # storage GB/month + request count + data transfer
+
+# ── 2. Naming ────────────────────────────────────────────────────────────────
+naming:
+  resource_name_limit: 63      # max characters for bucket name
+  resource_name_min: 3         # min characters
+  valid_characters: "a-z0-9-"  # lowercase letters, digits, hyphens only
+  # NOTE: AWS allows dots in bucket names but we EXCLUDE them:
+  #   - dots break SSL virtual-hosted-style addressing
+  #   - dots break Transfer Acceleration
+  #   - dots cause certificate validation issues
+  rules:
+    - "Must begin and end with a letter or digit"
+    - "No consecutive hyphens (e.g. my--bucket is invalid)"
+    - "Cannot be formatted as an IP address (e.g. 192.168.1.1)"
+    - "Must be globally unique across ALL AWS accounts in the partition"
+    - "No underscores or uppercase letters"
+  reserved_prefixes:
+    - "xn--"                   # IDNA reserved
+    - "sthree-"                # AWS reserved
+    - "amzn-s3-demo-"          # AWS reserved
+  reserved_suffixes:
+    - "-s3alias"               # Access point alias
+    - "--ol-s3"                # Object Lambda access point alias
+    - ".mrap"                  # Multi-Region Access Point
+    - "--x-s3"                 # Directory bucket
+    - "--table-s3"             # S3 Tables bucket
+
+# ── 3. Defaults (free-tier / minimum-cost safe) ─────────────────────────────
+defaults:
+  versioning_status: "Suspended"
+  sse_algorithm: "AES256"      # SSE-S3 (free, default since Jan 2023)
+  force_destroy: true
+  block_public_access: true    # all 4 BPA settings enabled
+  object_ownership: "BucketOwnerEnforced"  # ACLs disabled
+  # Optional features (disabled by default):
+  transfer_acceleration: false
+  object_lock_enabled: false
+  static_website_hosting: false
+  intelligent_tiering: false
+  # Lifecycle: no rules by default
+  # Replication: disabled by default
+  # CORS: disabled by default
+  # Logging: disabled by default (CloudTrail covers API-level)
+
+# ── 4. Quotas ────────────────────────────────────────────────────────────────
+quotas:
+  max_object_size: "5 TiB"    # single object (5 * 1024^4 bytes = 5,497,558,138,880 bytes)
+  max_object_size_console: "160 GB"
+  max_buckets_per_account: 10000  # adjustable
+  max_object_key_length: 1024  # bytes (UTF-8 encoded)
+  max_metadata_size: "2 KB"    # user-defined metadata per object
+  max_tags_per_object: 10
+  max_tags_per_bucket: 50
+  max_tag_key_length: 128      # UTF-8 characters
+  max_tag_value_length: 256
+  max_bucket_policy_size: "20 KB"
+  max_access_points_per_region: 10000  # adjustable
+  max_event_notification_configs: 100  # per bucket
+  max_lifecycle_rules: 1000    # per configuration
+  max_replication_rules: 1000  # per configuration
+  max_replication_destinations: 28  # per source bucket, adjustable
+  multipart_upload:
+    min_part_size: "5 MB"      # except last part
+    max_part_size: "5 GB"
+    max_parts: 10000
+    recommended_threshold: "100 MB"  # use multipart for objects >= 100 MB
+
+  # Request rate limits (per partitioned prefix)
+  request_rates:
+    get_head: 5500             # GET/HEAD requests per second per prefix
+    put_copy_post_delete: 3500 # PUT/COPY/POST/DELETE per second per prefix
+    no_prefix_limit: true      # unlimited number of prefixes per bucket
+
+# ── 5. Storage Classes ───────────────────────────────────────────────────────
+storage_classes:
+  STANDARD:
+    description: "Frequently accessed data, millisecond access"
+    durability: "99.999999999%"
+    availability: "99.99%"
+    availability_zones: 3
+    min_storage_days: 0
+    min_object_size: null
+    retrieval_fee: false
+    terraform_value: "STANDARD"
+
+  INTELLIGENT_TIERING:
+    description: "Unknown/changing access patterns, auto-tiering"
+    durability: "99.999999999%"
+    availability: "99.9%"
+    availability_zones: 3
+    min_storage_days: 0
+    min_object_size: null      # objects <128 KB not monitored
+    retrieval_fee: false
+    monitoring_fee: true       # monthly per-object charge
+    terraform_value: "INTELLIGENT_TIERING"
+    tiers:
+      - "Frequent Access (default)"
+      - "Infrequent Access (30+ days)"
+      - "Archive Instant Access (90+ days)"
+      - "Archive Access (90+ days, optional, minutes-to-hours)"
+      - "Deep Archive Access (180+ days, optional, hours)"
+
+  STANDARD_IA:
+    description: "Infrequently accessed, millisecond access"
+    durability: "99.999999999%"
+    availability: "99.9%"
+    availability_zones: 3
+    min_storage_days: 30
+    min_object_size: "128 KB"
+    retrieval_fee: true
+    terraform_value: "STANDARD_IA"
+
+  ONEZONE_IA:
+    description: "Infrequently accessed, recreatable data, single AZ"
+    durability: "99.999999999%"
+    availability: "99.5%"
+    availability_zones: 1
+    min_storage_days: 30
+    min_object_size: "128 KB"
+    retrieval_fee: true
+    terraform_value: "ONEZONE_IA"
+
+  GLACIER_IR:
+    description: "Long-term archive, millisecond access (quarterly)"
+    durability: "99.999999999%"
+    availability: "99.9%"
+    availability_zones: 3
+    min_storage_days: 90
+    min_object_size: "128 KB"
+    retrieval_fee: true
+    terraform_value: "GLACIER_IR"
+
+  GLACIER:
+    description: "Long-term archive, minutes-to-hours retrieval"
+    durability: "99.999999999%"
+    availability: "99.99%"    # after restoration
+    availability_zones: 3
+    min_storage_days: 90
+    retrieval_fee: true
+    requires_restore: true
+    terraform_value: "GLACIER"
+    retrieval_tiers:
+      expedited: "1-5 minutes"
+      standard: "3-5 hours"
+      bulk: "5-12 hours"
+
+  DEEP_ARCHIVE:
+    description: "Lowest cost archive, hours retrieval, regulatory compliance"
+    durability: "99.999999999%"
+    availability: "99.99%"    # after restoration
+    availability_zones: 3
+    min_storage_days: 180
+    retrieval_fee: true
+    requires_restore: true
+    terraform_value: "DEEP_ARCHIVE"
+    retrieval_tiers:
+      standard: "up to 12 hours"
+      bulk: "up to 48 hours"
+
+  EXPRESS_ONEZONE:
+    description: "Single-digit ms latency, single AZ, 50% lower request cost"
+    durability: "99.999999999%"
+    availability: "99.95%"
+    availability_zones: 1
+    min_storage_days: 0
+    retrieval_fee: false
+    terraform_value: "EXPRESS_ONEZONE"
+    note: "Requires directory bucket type"
+
+  REDUCED_REDUNDANCY:
+    description: "DEPRECATED — use STANDARD instead"
+    deprecated: true
+    durability: "99.99%"
+    terraform_value: "REDUCED_REDUNDANCY"
+
+# ── 6. Encryption ────────────────────────────────────────────────────────────
+encryption:
+  # All buckets encrypted by default since Jan 5, 2023
+  types:
+    SSE_S3:
+      description: "Amazon S3-managed keys (AES-256). Default. Free. No config needed."
+      algorithm: "AES256"
+      terraform_rule_attribute: "sse_algorithm"
+      terraform_value: "AES256"
+      kms_required: false
+      cost: free
+
+    SSE_KMS:
+      description: "AWS KMS-managed keys. Auditable. Key rotation. CloudTrail logging."
+      algorithm: "aws:kms"
+      terraform_rule_attribute: "sse_algorithm"
+      terraform_value: "aws:kms"
+      kms_required: true
+      cost: "KMS API request charges"
+      kms_key_types:
+        aws_managed: "aws/s3 (auto-created, cannot share cross-account)"
+        customer_managed: "arn:aws:kms:REGION:ACCOUNT:key/KEY-ID"
+      required_kms_permissions:
+        encrypt: ["kms:GenerateDataKey"]
+        decrypt: ["kms:Decrypt"]
+        multipart: ["kms:GenerateDataKey", "kms:Decrypt"]
+      bucket_key:
+        description: "Reduces KMS API calls by up to 99% via bucket-level key caching"
+        terraform_attribute: "bucket_key_enabled"
+        recommended: true
+
+    DSSE_KMS:
+      description: "Dual-layer encryption with KMS. Two independent AES-256 layers."
+      algorithm: "aws:kms:dsse"
+      terraform_rule_attribute: "sse_algorithm"
+      terraform_value: "aws:kms:dsse"
+      kms_required: true
+      cost: "KMS API request charges (higher than SSE-KMS)"
+
+    SSE_C:
+      description: "Customer-provided keys. S3 encrypts/decrypts but you manage keys."
+      note: "Disabled by default for new buckets since April 6, 2026"
+      terraform_support: false  # cannot set as default encryption
+      per_request_only: true
+
+  # Terraform resources for encryption
+  terraform:
+    default_encryption: "aws_s3_bucket_server_side_encryption_configuration"
+
+# ── 7. Versioning ────────────────────────────────────────────────────────────
+versioning:
+  states:
+    unversioned: "Default. No version tracking."
+    enabled: "All objects versioned. CANNOT return to unversioned once enabled."
+    suspended: "Stops accruing new versions. Existing versions remain."
+  key_behaviors:
+    - "Before versioning: objects have version ID 'null'"
+    - "After enabling: new/modified objects get unique version IDs"
+    - "Delete in versioned bucket creates a delete marker (soft delete)"
+    - "Overwrite creates a new version; old versions remain accessible"
+    - "Each version is a full object (not a diff) — billed separately"
+  mfa_delete:
+    description: "Requires MFA for permanent version deletes and versioning state changes"
+    terraform_attribute: "mfa_delete"
+    values: ["Enabled", "Disabled"]
+  terraform_resource: "aws_s3_bucket_versioning"
+  required_for:
+    - "S3 Replication (source and destination)"
+    - "S3 Object Lock"
+
+# ── 8. Lifecycle ─────────────────────────────────────────────────────────────
+lifecycle:
+  terraform_resource: "aws_s3_bucket_lifecycle_configuration"
+  max_rules: 1000
+  action_types:
+    transition:
+      description: "Move objects to a different storage class"
+      terraform_block: "transition"
+    expiration:
+      description: "Delete objects after a period"
+      terraform_block: "expiration"
+    noncurrent_version_transition:
+      description: "Transition noncurrent versions"
+      terraform_block: "noncurrent_version_transition"
+    noncurrent_version_expiration:
+      description: "Delete noncurrent versions"
+      terraform_block: "noncurrent_version_expiration"
+    abort_incomplete_multipart_upload:
+      description: "Clean up incomplete multipart uploads"
+      terraform_block: "abort_incomplete_multipart_upload"
+
+  # Storage class transition waterfall (what can transition to what)
+  transition_waterfall:
+    STANDARD:
+      can_transition_to:
+        - INTELLIGENT_TIERING
+        - STANDARD_IA
+        - ONEZONE_IA
+        - GLACIER_IR
+        - GLACIER
+        - DEEP_ARCHIVE
+    STANDARD_IA:
+      can_transition_to:
+        - INTELLIGENT_TIERING
+        - ONEZONE_IA
+        - GLACIER_IR
+        - GLACIER
+        - DEEP_ARCHIVE
+    INTELLIGENT_TIERING:
+      can_transition_to:
+        - ONEZONE_IA
+        - GLACIER_IR
+        - GLACIER
+        - DEEP_ARCHIVE
+    ONEZONE_IA:
+      can_transition_to:
+        - GLACIER
+        - DEEP_ARCHIVE
+    GLACIER_IR:
+      can_transition_to:
+        - GLACIER
+        - DEEP_ARCHIVE
+    GLACIER:
+      can_transition_to:
+        - DEEP_ARCHIVE
+    DEEP_ARCHIVE:
+      can_transition_to: []    # terminal — no further transitions
+
+  constraints:
+    - "Objects <128 KB will NOT transition by default (use ObjectSizeGreaterThan filter)"
+    - "Minimum 30 days in STANDARD before transition to STANDARD_IA or ONEZONE_IA"
+    - "Early deletion fees for objects removed before minimum storage duration"
+    - "Lifecycle rules cannot be prevented by bucket policies"
+    - "No data retrieval charges for lifecycle transitions"
+    - "Per-request ingestion charges apply for transitions"
+
+  filter_elements:
+    - prefix           # key prefix filter
+    - tags             # object tag filter (key/value pairs)
+    - object_size_greater_than  # minimum size filter (bytes)
+    - object_size_less_than     # maximum size filter (bytes)
+    - "AND"            # combine prefix + tags + size filters
+
+# ── 9. Replication ───────────────────────────────────────────────────────────
+replication:
+  terraform_resource: "aws_s3_bucket_replication_configuration"
+  types:
+    CRR:
+      description: "Cross-Region Replication — replicate across AWS regions"
+      use_cases: ["compliance", "latency reduction", "multi-region compute"]
+    SRR:
+      description: "Same-Region Replication — replicate within same region"
+      use_cases: ["log aggregation", "prod/test sync", "data sovereignty"]
+    batch:
+      description: "S3 Batch Replication — replicate pre-existing objects on demand"
+
+  requirements:
+    - "Versioning MUST be enabled on both source and destination buckets"
+    - "Source and destination can be in same or different AWS accounts"
+    - "IAM role with source read + destination write permissions required"
+
+  replication_time_control:
+    description: "S3 RTC — SLA-backed 15-minute replication for 99.99% of objects"
+    terraform_attribute: "replication_time { status = 'Enabled' }"
+
+  iam_permissions:
+    source_bucket:
+      - "s3:GetReplicationConfiguration"
+      - "s3:ListBucket"
+      - "s3:GetObjectVersionForReplication"
+      - "s3:GetObjectVersionAcl"
+      - "s3:GetObjectVersionTagging"
+    destination_bucket:
+      - "s3:ReplicateObject"
+      - "s3:ReplicateDelete"
+      - "s3:ReplicateTags"
+    trust_policy_principal: "s3.amazonaws.com"
+
+  what_gets_replicated:
+    - "New objects created after replication enabled"
+    - "Object metadata (creation time, version ID)"
+    - "Object tags"
+    - "ACLs (if replica modification sync enabled)"
+  what_does_not_replicate:
+    - "Objects existing before replication was enabled (use Batch Replication)"
+    - "Objects encrypted with SSE-C"
+    - "Objects in Glacier/Deep Archive (unless restored first)"
+    - "Delete markers (unless DeleteMarkerReplication enabled)"
+
+# ── 10. Event Notifications ──────────────────────────────────────────────────
+event_notifications:
+  terraform_resource: "aws_s3_bucket_notification"
+  max_configs_per_bucket: 100
+  delivery_guarantee: "at-least-once"
+  typical_latency: "seconds (can take a minute or longer)"
+
+  destinations:
+    lambda:
+      terraform_block: "lambda_function"
+      constraint: "Must be in same region as bucket"
+    sqs:
+      terraform_block: "queue"
+      constraint: "Standard queues only — FIFO queues NOT supported"
+    sns:
+      terraform_block: "topic"
+      constraint: "Standard topics only — FIFO topics NOT supported"
+    eventbridge:
+      terraform_attribute: "eventbridge = true"
+      constraint: "Sends ALL events when enabled; use EventBridge rules to filter"
+
+  # Complete list of event types
+  event_types:
+    object_created:
+      - "s3:ObjectCreated:*"
+      - "s3:ObjectCreated:Put"
+      - "s3:ObjectCreated:Post"
+      - "s3:ObjectCreated:Copy"
+      - "s3:ObjectCreated:CompleteMultipartUpload"
+    object_removed:
+      - "s3:ObjectRemoved:*"
+      - "s3:ObjectRemoved:Delete"
+      - "s3:ObjectRemoved:DeleteMarkerCreated"
+    object_restore:
+      - "s3:ObjectRestore:*"
+      - "s3:ObjectRestore:Post"
+      - "s3:ObjectRestore:Completed"
+      - "s3:ObjectRestore:Delete"
+    replication:
+      - "s3:Replication:*"
+      - "s3:Replication:OperationFailedReplication"
+      - "s3:Replication:OperationMissedThreshold"
+      - "s3:Replication:OperationReplicatedAfterThreshold"
+      - "s3:Replication:OperationNotTracked"
+    lifecycle:
+      - "s3:LifecycleExpiration:*"
+      - "s3:LifecycleExpiration:Delete"
+      - "s3:LifecycleExpiration:DeleteMarkerCreated"
+      - "s3:LifecycleTransition"
+    intelligent_tiering:
+      - "s3:IntelligentTiering"
+    tagging:
+      - "s3:ObjectTagging:*"
+      - "s3:ObjectTagging:Put"
+      - "s3:ObjectTagging:Delete"
+    acl:
+      - "s3:ObjectAcl:Put"
+    other:
+      - "s3:TestEvent"
+      - "s3:ReducedRedundancyLostObject"
+
+  filtering:
+    prefix: "Filter by object key prefix"
+    suffix: "Filter by object key suffix (e.g. .jpg, .csv)"
+    note: >
+      WARNING: Avoid notifications that write back to the same bucket that
+      triggered them — this creates infinite loops. Use separate buckets
+      or prefix/suffix filters to prevent recursion.
+
+# ── 11. Access Control ───────────────────────────────────────────────────────
+access_control:
+  block_public_access:
+    terraform_resource: "aws_s3_bucket_public_access_block"
+    settings:
+      block_public_acls: true          # block PUT calls with public ACLs
+      ignore_public_acls: true         # ignore existing public ACLs
+      block_public_policy: true        # block PUT of policies that grant public access
+      restrict_public_buckets: true    # restrict cross-account access to public buckets
+    note: "Enabled by default for new buckets. Recommended to keep all 4 enabled."
+
+  object_ownership:
+    terraform_resource: "aws_s3_bucket_ownership_controls"
+    values:
+      BucketOwnerEnforced: "ACLs disabled (recommended). Bucket owner owns all objects."
+      BucketOwnerPreferred: "If upload includes bucket-owner-full-control ACL, bucket owner owns."
+      ObjectWriter: "Uploading account owns objects. ACLs can be used."
+    default: "BucketOwnerEnforced"
+
+  bucket_policy:
+    terraform_resource: "aws_s3_bucket_policy"
+    max_size: "20 KB"
+    format: "JSON IAM policy"
+    common_patterns:
+      ssl_enforcement: |
+        Deny all actions where aws:SecureTransport = false
+      ip_restriction: |
+        Deny/Allow based on aws:SourceIp condition
+      vpc_endpoint: |
+        Restrict to specific VPC endpoint via aws:sourceVpce
+      cross_account: |
+        Allow specific Principal ARN from another account
+      organization: |
+        Allow based on aws:PrincipalOrgID condition
+      mfa_required: |
+        Deny where aws:MultiFactorAuthAge is null
+
+  access_points:
+    terraform_resource: "aws_s3_access_point"
+    arn_format: "arn:aws:s3:REGION:ACCOUNT:accesspoint/NAME"
+    network_origins: ["Internet", "VPC"]
+    object_operations_only: true
+    condition_keys:
+      - "s3:DataAccessPointArn"
+      - "s3:DataAccessPointAccount"
+      - "s3:AccessPointNetworkOrigin"
+
+# ── 12. Performance ──────────────────────────────────────────────────────────
+performance:
+  request_rates:
+    get_head_per_prefix: 5500
+    put_copy_post_delete_per_prefix: 3500
+    note: "No limit on number of prefixes. Scale horizontally by spreading across prefixes."
+
+  transfer_acceleration:
+    terraform_resource: "aws_s3_bucket_accelerate_configuration"
+    endpoint_format: "BUCKET.s3-accelerate.amazonaws.com"
+    dualstack_format: "BUCKET.s3-accelerate.dualstack.amazonaws.com"
+    constraints:
+      - "Bucket name must NOT contain dots"
+      - "Takes up to 20 minutes to take effect"
+      - "Virtual-hosted style requests only"
+    iam_actions:
+      - "s3:PutAccelerateConfiguration"
+      - "s3:GetAccelerateConfiguration"
+
+  multipart_upload:
+    recommended_for: ">= 100 MB objects"
+    min_part_size: "5 MB (except last part)"
+    max_part_size: "5 GB"
+    max_parts: 10000
+    max_object_size: "5 TiB"  # 10,000 parts * 5 GB = ~48.8 TiB theoretical
+    operations:
+      - "CreateMultipartUpload"
+      - "UploadPart"
+      - "UploadPartCopy"
+      - "CompleteMultipartUpload"
+      - "AbortMultipartUpload"
+      - "ListParts"
+      - "ListMultipartUploads"
+    best_practices:
+      - "Upload parts in parallel for maximum throughput"
+      - "Configure AbortIncompleteMultipartUpload lifecycle rule"
+      - "Parts billed immediately upon upload until complete or abort"
+    permissions:
+      create_upload_complete: "s3:PutObject"
+      upload_part_copy: "s3:PutObject + s3:GetObject (source)"
+      abort: "s3:AbortMultipartUpload"
+      list_parts: "s3:ListMultipartUploadParts"
+      list_uploads: "s3:ListBucketMultipartUploads"
+
+  single_instance_bandwidth: "up to 100 Gbps on EC2"
+  object_latency: "100-200 ms first byte"
+
+# ── 13. Static Website Hosting ───────────────────────────────────────────────
+static_website:
+  terraform_resource: "aws_s3_bucket_website_configuration"
+  endpoint_format: "BUCKET.s3-website-REGION.amazonaws.com"  # HTTP only
+  config:
+    index_document: "index.html"
+    error_document: "error.html"
+    redirect_all_requests_to: null  # optional: redirect to another host
+  constraints:
+    - "Website endpoints support HTTP only — use CloudFront for HTTPS"
+    - "SSE-KMS encrypted objects CANNOT be served via website endpoint"
+    - "Bucket must allow public read access (bucket policy or ACL)"
+  recommended: "Use AWS Amplify Hosting or CloudFront distribution instead"
+
+# ── 14. Object Lock ──────────────────────────────────────────────────────────
+object_lock:
+  terraform_attribute: "object_lock_enabled = true"  # on aws_s3_bucket
+  terraform_resource: "aws_s3_bucket_object_lock_configuration"
+  requires_versioning: true
+  retention_modes:
+    governance:
+      description: "Protected from most users. Admins with s3:BypassGovernanceRetention can override."
+      terraform_value: "GOVERNANCE"
+    compliance:
+      description: "CANNOT be overridden or shortened by any user including root. Meets SEC 17a-4."
+      terraform_value: "COMPLIANCE"
+  legal_hold:
+    description: "Indefinite hold with no expiration. Independent of retention period."
+    iam_action: "s3:PutObjectLegalHold"
+  iam_actions:
+    - "s3:GetBucketObjectLockConfiguration"
+    - "s3:PutBucketObjectLockConfiguration"
+    - "s3:GetObjectRetention"
+    - "s3:PutObjectRetention"
+    - "s3:GetObjectLegalHold"
+    - "s3:PutObjectLegalHold"
+    - "s3:BypassGovernanceRetention"
+
+# ── 15. CORS ─────────────────────────────────────────────────────────────────
+cors:
+  terraform_resource: "aws_s3_bucket_cors_configuration"
+  rule_elements:
+    allowed_origins: "Domains allowed to make requests (can use *)"
+    allowed_methods: "HTTP methods: GET, PUT, POST, DELETE, HEAD"
+    allowed_headers: "Request headers permitted (can use *)"
+    expose_headers: "Response headers exposed to browser"
+    max_age_seconds: "Preflight cache duration"
+  evaluation: "First matching CORSRule wins (evaluated in order)"
+  note: "CORS does NOT override ACLs or bucket policies"
+
+# ── 16. Logging & Monitoring ─────────────────────────────────────────────────
+logging:
+  server_access_logs:
+    terraform_resource: "aws_s3_bucket_logging"
+    description: "Detailed records of all requests to the bucket"
+    target: "Another S3 bucket (logging bucket)"
+    fields: "requester, bucket, time, remote_ip, operation, key, status, etc."
+  cloudtrail:
+    management_events: "Bucket-level: ListBuckets, DeleteBucket, PutBucketPolicy, etc."
+    data_events: "Object-level: GetObject, PutObject, DeleteObject (must be explicitly enabled)"
+  cloudwatch_metrics:
+    namespace: "AWS/S3"
+    key_metrics:
+      - "BucketSizeBytes"
+      - "NumberOfObjects"
+      - "AllRequests"
+      - "GetRequests"
+      - "PutRequests"
+      - "DeleteRequests"
+      - "4xxErrors"
+      - "5xxErrors"
+      - "FirstByteLatency"
+      - "TotalRequestLatency"
+  # For pipeline run monitor (log_aggregator.py):
+  pipeline_monitoring: "cloudtrail"  # S3 has no native CW Log Group; use CloudTrail LookupEvents
+
+# ── 17. IAM ──────────────────────────────────────────────────────────────────
+iam:
+  # ARN formats
+  arn_formats:
+    bucket: "arn:aws:s3:::BUCKET-NAME"
+    object: "arn:aws:s3:::BUCKET-NAME/*"
+    object_prefix: "arn:aws:s3:::BUCKET-NAME/PREFIX/*"
+    access_point: "arn:aws:s3:REGION:ACCOUNT:accesspoint/NAME"
+
+  # S3 is not a principal (no execution role), so "always" is empty
+  always: []
+
+  # Complete action catalog organized by category
+  actions:
+    # -- Bucket-level actions --
+    bucket_management:
+      - "s3:CreateBucket"
+      - "s3:DeleteBucket"
+      - "s3:ListBucket"              # ListObjects, ListObjectsV2, HeadBucket
+      - "s3:ListBucketVersions"      # ListObjectVersions
+      - "s3:GetBucketLocation"
+      - "s3:ListAllMyBuckets"        # account-level
+    bucket_configuration:
+      - "s3:PutBucketPolicy"
+      - "s3:GetBucketPolicy"
+      - "s3:DeleteBucketPolicy"
+      - "s3:PutBucketAcl"
+      - "s3:GetBucketAcl"
+      - "s3:PutBucketCORS"
+      - "s3:GetBucketCORS"
+      - "s3:PutBucketVersioning"
+      - "s3:GetBucketVersioning"
+      - "s3:PutBucketTagging"
+      - "s3:GetBucketTagging"
+      - "s3:PutBucketLogging"
+      - "s3:GetBucketLogging"
+      - "s3:PutBucketNotification"
+      - "s3:GetBucketNotification"
+      - "s3:PutBucketWebsite"
+      - "s3:GetBucketWebsite"
+      - "s3:DeleteBucketWebsite"
+      - "s3:PutAccelerateConfiguration"
+      - "s3:GetAccelerateConfiguration"
+      - "s3:PutEncryptionConfiguration"
+      - "s3:GetEncryptionConfiguration"
+      - "s3:PutLifecycleConfiguration"
+      - "s3:GetLifecycleConfiguration"
+      - "s3:PutReplicationConfiguration"
+      - "s3:GetReplicationConfiguration"
+      - "s3:PutBucketObjectLockConfiguration"
+      - "s3:GetBucketObjectLockConfiguration"
+      - "s3:PutBucketPublicAccessBlock"
+      - "s3:GetBucketPublicAccessBlock"
+      - "s3:PutBucketOwnershipControls"
+      - "s3:GetBucketOwnershipControls"
+      - "s3:PutAnalyticsConfiguration"
+      - "s3:GetAnalyticsConfiguration"
+      - "s3:PutInventoryConfiguration"
+      - "s3:GetInventoryConfiguration"
+      - "s3:PutMetricsConfiguration"
+      - "s3:GetMetricsConfiguration"
+      - "s3:PutIntelligentTieringConfiguration"
+      - "s3:GetIntelligentTieringConfiguration"
+    # -- Object-level actions --
+    object_read:
+      - "s3:GetObject"               # GetObject, HeadObject, SelectObjectContent
+      - "s3:GetObjectVersion"        # GetObject with versionId
+      - "s3:GetObjectAcl"
+      - "s3:GetObjectVersionAcl"
+      - "s3:GetObjectTagging"
+      - "s3:GetObjectVersionTagging"
+      - "s3:GetObjectRetention"
+      - "s3:GetObjectLegalHold"
+    object_write:
+      - "s3:PutObject"               # PutObject, CreateMultipartUpload, CompleteMultipartUpload, UploadPart
+      - "s3:DeleteObject"            # DeleteObject (no versionId)
+      - "s3:DeleteObjectVersion"     # DeleteObject with versionId
+      - "s3:PutObjectAcl"
+      - "s3:PutObjectVersionAcl"
+      - "s3:PutObjectTagging"
+      - "s3:DeleteObjectTagging"
+      - "s3:DeleteObjectVersionTagging"
+      - "s3:PutObjectRetention"
+      - "s3:PutObjectLegalHold"
+      - "s3:BypassGovernanceRetention"
+      - "s3:RestoreObject"
+      - "s3:AbortMultipartUpload"
+    object_list:
+      - "s3:ListBucketMultipartUploads"
+      - "s3:ListMultipartUploadParts"
+    # -- Replication-specific --
+    replication:
+      - "s3:ReplicateObject"
+      - "s3:ReplicateDelete"
+      - "s3:ReplicateTags"
+      - "s3:GetObjectVersionForReplication"
+    # -- Access Point actions --
+    access_points:
+      - "s3:CreateAccessPoint"
+      - "s3:DeleteAccessPoint"
+      - "s3:GetAccessPoint"
+      - "s3:ListAccessPoints"
+      - "s3:PutAccessPointPolicy"
+      - "s3:GetAccessPointPolicy"
+      - "s3:DeleteAccessPointPolicy"
+    # -- Batch Operations --
+    batch_operations:
+      - "s3:CreateJob"
+      - "s3:ListJobs"
+      - "s3:DescribeJob"
+      - "s3:UpdateJobStatus"
+      - "s3:UpdateJobPriority"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}    # S3 is passive — it does not need IAM actions from source services
+
+  as_source_to: {}    # S3 is passive — callers need their own permissions
+
+  # Common IAM permission sets for services that READ from S3
+  common_reader_permissions:
+    - "s3:GetObject"
+    - "s3:GetBucketLocation"
+    - "s3:ListBucket"
+
+  # Common IAM permission sets for services that WRITE to S3
+  common_writer_permissions:
+    - "s3:PutObject"
+    - "s3:GetBucketLocation"
+    - "s3:ListBucket"
+
+  # Common IAM permission sets for services that need full access
+  common_full_permissions:
+    - "s3:GetObject"
+    - "s3:PutObject"
+    - "s3:DeleteObject"
+    - "s3:ListBucket"
+    - "s3:GetBucketLocation"
+
+  # S3 condition keys (for bucket policies)
+  condition_keys:
+    - "s3:prefix"                        # ListBucket prefix filter
+    - "s3:delimiter"                     # ListBucket delimiter
+    - "s3:max-keys"                      # ListBucket max keys
+    - "s3:x-amz-acl"                    # canned ACL in PutObject
+    - "s3:x-amz-content-sha256"         # content checksum
+    - "s3:x-amz-server-side-encryption" # encryption algorithm header
+    - "s3:x-amz-server-side-encryption-aws-kms-key-id"  # KMS key ID
+    - "s3:ExistingObjectTag/<key>"       # existing object tag match
+    - "s3:RequestObjectTag/<key>"        # requested object tag match
+    - "s3:RequestObjectTagKeys"          # tag key names in request
+    - "s3:object-lock-remaining-retention-days"
+    - "s3:AccessPointNetworkOrigin"      # VPC or Internet
+    - "s3:DataAccessPointArn"            # access point ARN
+    - "s3:DataAccessPointAccount"        # access point owner account
+    - "s3:InventoryAccessibleOptionalFields"
+
+# ── 18. Environment Variables ────────────────────────────────────────────────
+env_vars:
+  as_target_of: {}  # S3 is passive; no env vars auto-wired for sources
+  as_source_to: {}  # S3 is passive; no env vars auto-wired for targets
+
+# ── 19. VPC Triggers ────────────────────────────────────────────────────────
+vpc_triggers: []     # S3 does not need VPC placement
+
+# ── 20. Integration Wiring Ownership ────────────────────────────────────────
+# These rules define which Terraform fragment creates the wiring resources
+# when S3 is involved in an integration.
+integrations:
+  s3_to_lambda:
+    description: "S3 event notification triggers Lambda function"
+    owned_by: "s3"    # S3 renderer creates the notification + lambda_permission
+    terraform_resources:
+      - "aws_s3_bucket_notification (lambda_function block)"
+      - "aws_lambda_permission (principal: s3.amazonaws.com)"
+    eventbridge_fallback: >
+      When multiple Lambda targets share the same event type without distinct
+      prefix/suffix filters, the S3 renderer switches to EventBridge fan-out:
+      aws_cloudwatch_event_rule + aws_cloudwatch_event_target + aws_lambda_permission
+    events_default: "s3:ObjectCreated:*"
+
+  s3_to_sqs:
+    description: "S3 event notification sends to SQS queue"
+    owned_by: "s3"    # S3 creates notification; SQS renderer creates queue_policy
+    terraform_resources:
+      - "aws_s3_bucket_notification (queue block)"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows s3.amazonaws.com principal)"
+    events_default: "s3:ObjectCreated:*"
+
+  s3_to_sns:
+    description: "S3 event notification sends to SNS topic"
+    owned_by: "s3"
+    terraform_resources:
+      - "aws_s3_bucket_notification (topic block)"
+    events_default: "s3:ObjectCreated:*"
+
+  lambda_reads_s3:
+    description: "Lambda reads objects from S3"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+  lambda_writes_s3:
+    description: "Lambda writes objects to S3"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+
+  glue_crawls_s3:
+    description: "Glue crawler reads S3 for schema discovery"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  kinesis_firehose_to_s3:
+    description: "Kinesis Firehose delivers records to S3 (Extended S3 destination)"
+    owned_by: "kinesis_firehose"
+    iam_permissions_on_caller:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:AbortMultipartUpload"
+      - "s3:ListBucketMultipartUploads"
+
+  athena_reads_s3:
+    description: "Athena queries data in S3"
+    owned_by: "athena"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+    athena_results_bucket:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+
+  emr_uses_s3:
+    description: "EMR reads input data and writes output to S3; also uses S3 for logs"
+    owned_by: "emr"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+
+  sagemaker_uses_s3:
+    description: "SageMaker reads training data and writes model artifacts to S3"
+    owned_by: "sagemaker"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  lake_formation_registers_s3:
+    description: "Lake Formation registers S3 bucket as data lake resource"
+    owned_by: "lake_formation"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  glue_databrew_uses_s3:
+    description: "Glue DataBrew reads input datasets and writes output to S3"
+    owned_by: "glue_databrew"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  quicksight_reads_s3:
+    description: "QuickSight reads data from S3 manifest files"
+    owned_by: "quicksight"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  dms_uses_s3:
+    description: "DMS uses S3 as source or target endpoint"
+    owned_by: "dms"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+
+  step_functions_uses_s3:
+    description: "Step Functions reads/writes S3 via SDK integration"
+    owned_by: "step_functions"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+
+  redshift_uses_s3:
+    description: "Redshift COPY/UNLOAD reads/writes S3"
+    owned_by: "redshift"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+# ── 21. Terraform Resources ──────────────────────────────────────────────────
+terraform_resources:
+  # Core resources the S3 renderer creates
+  primary:
+    - resource: "aws_s3_bucket"
+      description: "The bucket itself"
+      always_created: true
+    - resource: "aws_s3_bucket_versioning"
+      description: "Versioning configuration"
+      always_created: true
+    - resource: "aws_s3_bucket_server_side_encryption_configuration"
+      description: "Server-side encryption (SSE-S3 by default)"
+      always_created: true
+
+  # Conditional resources
+  conditional:
+    - resource: "aws_s3_bucket_notification"
+      condition: "When bucket has Lambda, SQS, SNS, or EventBridge integrations"
+    - resource: "aws_lambda_permission"
+      condition: "When bucket triggers Lambda (principal: s3.amazonaws.com or events.amazonaws.com)"
+    - resource: "aws_cloudwatch_event_rule"
+      condition: "When EventBridge fan-out is needed (overlapping Lambda event types)"
+    - resource: "aws_cloudwatch_event_target"
+      condition: "When EventBridge fan-out is needed"
+
+  # Resources created by OTHER renderers for S3 integrations
+  created_by_others:
+    - resource: "aws_sqs_queue_policy"
+      created_by: "sqs renderer"
+      condition: "When S3 sends notifications to SQS"
+    - resource: "aws_s3_bucket_public_access_block"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_lifecycle_configuration"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_replication_configuration"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_cors_configuration"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_logging"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_website_configuration"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_accelerate_configuration"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_policy"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_object_lock_configuration"
+      created_by: "could be added to s3 renderer"
+    - resource: "aws_s3_bucket_ownership_controls"
+      created_by: "could be added to s3 renderer"
+
+# ── 22. Boto3 Operations ────────────────────────────────────────────────────
+boto3_operations:
+  client: "s3"
+  # Core object operations
+  object_operations:
+    put_object:
+      description: "Upload an object or create a prefix (empty key ending with /)"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true, description: "Object key (trailing / for prefix)"}
+        Body: {type: bytes, description: "Object content"}
+        ContentType: {type: string}
+        ServerSideEncryption: {type: string, description: "AES256 or aws:kms"}
+        Metadata: {type: object, description: "User-defined metadata dict"}
+        StorageClass: {type: string, description: "STANDARD, STANDARD_IA, GLACIER, etc."}
+        Tagging: {type: string, description: "URL-encoded tag set"}
+    get_object:
+      description: "Download an object"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        Range: {type: string, description: "Byte range: bytes=0-999"}
+        VersionId: {type: string}
+      returns: ["Body (StreamingBody)", "ContentType", "ContentLength", "Metadata", "ETag"]
+    head_object:
+      description: "Get metadata without downloading"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        VersionId: {type: string}
+      returns: ["ContentType", "ContentLength", "Metadata", "ETag", "LastModified", "StorageClass"]
+    delete_object:
+      description: "Delete a single object"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        VersionId: {type: string, description: "For permanent delete in versioned bucket"}
+    delete_objects:
+      description: "Delete up to 1000 objects in a single request"
+      parameters:
+        Bucket: {type: string, required: true}
+        Delete: {type: object, required: true, description: "{'Objects': [{'Key': 'k', 'VersionId': 'v'}]}"}
+    copy_object:
+      description: "Copy object within or between buckets"
+      parameters:
+        Bucket: {type: string, required: true, description: "Destination bucket"}
+        Key: {type: string, required: true, description: "Destination key"}
+        CopySource: {type: string, required: true, description: "{'Bucket': 'src', 'Key': 'k'}"}
+    list_objects_v2:
+      description: "List objects with optional prefix/delimiter/continuation"
+      parameters:
+        Bucket: {type: string, required: true}
+        Prefix: {type: string}
+        Delimiter: {type: string, description: "Usually '/' for folder-like listing"}
+        MaxKeys: {type: integer, description: "Max 1000 per request"}
+        ContinuationToken: {type: string}
+      returns: ["Contents[].Key", "Contents[].Size", "Contents[].LastModified", "KeyCount", "NextContinuationToken"]
+    restore_object:
+      description: "Restore an archived object from Glacier/Deep Archive"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        RestoreRequest: {type: object, required: true, description: "{'Days': N, 'GlacierJobParameters': {'Tier': 'Standard|Expedited|Bulk'}}"}
+
+  # Multipart upload operations
+  multipart_operations:
+    create_multipart_upload:
+      description: "Initiate multipart upload, returns UploadId"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        ContentType: {type: string}
+        ServerSideEncryption: {type: string}
+      returns: ["UploadId"]
+    upload_part:
+      description: "Upload a single part"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        PartNumber: {type: integer, required: true, description: "1-10000"}
+        UploadId: {type: string, required: true}
+        Body: {type: bytes, required: true}
+      returns: ["ETag"]
+    complete_multipart_upload:
+      description: "Complete the multipart upload"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        UploadId: {type: string, required: true}
+        MultipartUpload: {type: object, required: true, description: "{'Parts': [{'PartNumber': N, 'ETag': '...'}]}"}
+    abort_multipart_upload:
+      description: "Cancel multipart upload and free storage"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        UploadId: {type: string, required: true}
+
+  # Bucket configuration operations
+  bucket_operations:
+    create_bucket:
+      description: "Create a new S3 bucket"
+      parameters:
+        Bucket: {type: string, required: true}
+        CreateBucketConfiguration: {type: object, description: "{'LocationConstraint': 'us-west-2'}"}
+    put_bucket_lifecycle_configuration:
+      description: "Set lifecycle rules (transitions, expirations)"
+      parameters:
+        Bucket: {type: string, required: true}
+        LifecycleConfiguration: {type: object, required: true}
+    put_bucket_policy:
+      description: "Set bucket policy (JSON string)"
+      parameters:
+        Bucket: {type: string, required: true}
+        Policy: {type: string, required: true, description: "JSON policy document"}
+    put_bucket_cors:
+      description: "Configure CORS rules"
+      parameters:
+        Bucket: {type: string, required: true}
+        CORSConfiguration: {type: object, required: true}
+    put_bucket_notification_configuration:
+      description: "Configure event notifications (Lambda, SQS, SNS, EventBridge)"
+      parameters:
+        Bucket: {type: string, required: true}
+        NotificationConfiguration: {type: object, required: true}
+    put_bucket_versioning:
+      description: "Enable or suspend versioning"
+      parameters:
+        Bucket: {type: string, required: true}
+        VersioningConfiguration: {type: object, required: true, description: "{'Status': 'Enabled'|'Suspended'}"}
+    put_bucket_encryption:
+      description: "Set default encryption configuration"
+      parameters:
+        Bucket: {type: string, required: true}
+        ServerSideEncryptionConfiguration: {type: object, required: true}
+    put_bucket_tagging:
+      description: "Set tags on a bucket"
+      parameters:
+        Bucket: {type: string, required: true}
+        Tagging: {type: object, required: true}
+    put_bucket_replication:
+      description: "Configure replication rules"
+      parameters:
+        Bucket: {type: string, required: true}
+        ReplicationConfiguration: {type: object, required: true}
+        Token: {type: string, description: "MFA device token if MFA delete enabled"}
+    put_bucket_accelerate_configuration:
+      description: "Enable or suspend Transfer Acceleration"
+      parameters:
+        Bucket: {type: string, required: true}
+        AccelerateConfiguration: {type: object, required: true, description: "{'Status': 'Enabled'|'Suspended'}"}
+    put_object_lock_configuration:
+      description: "Configure Object Lock on bucket"
+      parameters:
+        Bucket: {type: string, required: true}
+        ObjectLockConfiguration: {type: object, required: true}
+    get_bucket_notification_configuration:
+      description: "Get current notification configuration"
+      parameters:
+        Bucket: {type: string, required: true}
+      returns: ["LambdaFunctionConfigurations", "QueueConfigurations", "TopicConfigurations", "EventBridgeConfiguration"]
+    get_bucket_versioning:
+      description: "Get versioning status"
+      parameters:
+        Bucket: {type: string, required: true}
+      returns: ["Status", "MFADelete"]
+    get_bucket_encryption:
+      description: "Get default encryption configuration"
+      parameters:
+        Bucket: {type: string, required: true}
+      returns: ["ServerSideEncryptionConfiguration"]
+    get_bucket_lifecycle_configuration:
+      description: "Get lifecycle configuration"
+      parameters:
+        Bucket: {type: string, required: true}
+      returns: ["Rules"]
+    get_bucket_replication:
+      description: "Get replication configuration"
+      parameters:
+        Bucket: {type: string, required: true}
+      returns: ["ReplicationConfiguration"]
+
+  # Pre-signed URL generation (client-side, not an API call)
+  presigned_urls:
+    generate_presigned_url:
+      description: "Generate a time-limited URL for object access without AWS credentials"
+      parameters:
+        ClientMethod: {type: string, required: true, description: "get_object or put_object"}
+        Params: {type: object, required: true, description: "{'Bucket': '...', 'Key': '...'}"}
+        ExpiresIn: {type: integer, description: "Seconds until URL expires (default 3600, max 604800)"}
+    generate_presigned_post:
+      description: "Generate pre-signed POST for browser-based uploads"
+      parameters:
+        Bucket: {type: string, required: true}
+        Key: {type: string, required: true}
+        ExpiresIn: {type: integer}
+        Conditions: {type: list, description: "Upload constraints"}
+
+# ── 23. Runtime Diagnostics ──────────────────────────────────────────────────
+runtime_diagnostics:
+  - pattern: "NoSuchBucket"
+    category: RESOURCE_NOT_FOUND
+    cause: "S3 bucket does not exist or was deleted"
+    fix_type: manual
+    resolution: "Check if terraform apply completed successfully. Re-run terraform apply if bucket is missing."
+
+  - pattern: "NoSuchKey"
+    category: RESOURCE_NOT_FOUND
+    cause: "Object key does not exist in the bucket"
+    fix_type: manual
+    resolution: "Verify the object key. Check prefix/suffix. Use list_objects_v2 to discover keys."
+
+  - pattern: "AccessDenied.*s3|s3.*AccessDenied"
+    category: PERMISSION
+    cause: "Caller IAM role lacks required S3 permissions"
+    fix_type: update_iam
+    resolution: "Add missing s3:* actions to the caller's IAM role. Check bucket policy for explicit Deny."
+
+  - pattern: "BucketAlreadyExists"
+    category: NAME_CONFLICT
+    cause: "Bucket name already taken by another AWS account (global namespace)"
+    fix_type: rename
+    resolution: "Choose a different bucket name. Consider using account-regional namespace."
+
+  - pattern: "BucketAlreadyOwnedByYou"
+    category: ALREADY_EXISTS
+    cause: "Bucket already exists in your account"
+    fix_type: none
+    resolution: "Bucket already created. No action needed."
+
+  - pattern: "InvalidBucketName"
+    category: VALIDATION
+    cause: "Bucket name violates naming rules"
+    fix_type: rename
+    resolution: "Fix name: 3-63 chars, lowercase, digits, hyphens only. No dots, underscores, uppercase."
+
+  - pattern: "EntityTooLarge"
+    category: SIZE_LIMIT
+    cause: "Object exceeds 5 GB single PUT limit"
+    fix_type: code_change
+    resolution: "Use multipart upload for objects > 5 GB."
+
+  - pattern: "SlowDown"
+    category: THROTTLE
+    cause: "Request rate exceeds per-prefix limit (3500 PUT or 5500 GET/s)"
+    fix_type: retry
+    resolution: "Implement exponential backoff. Spread objects across multiple prefixes."
+
+  - pattern: "InvalidObjectState"
+    category: OBJECT_STATE
+    cause: "Object is in Glacier/Deep Archive and not yet restored"
+    fix_type: code_change
+    resolution: "Call restore_object first, then wait for restoration to complete."
+
+  - pattern: "KMS.NotFoundException|KMS.DisabledException"
+    category: ENCRYPTION
+    cause: "KMS key not found or disabled for SSE-KMS encrypted bucket"
+    fix_type: manual
+    resolution: "Verify KMS key exists and is enabled. Check kms:Decrypt and kms:GenerateDataKey permissions."
+
+  - pattern: "BucketNotEmpty"
+    category: PRECONDITION
+    cause: "Cannot delete bucket that contains objects"
+    fix_type: code_change
+    resolution: "Empty the bucket first (delete all objects and versions), or use force_destroy=true in Terraform."
+
+# ── 24. Tags ─────────────────────────────────────────────────────────────────
+tags:
+  max_per_bucket: 50
+  max_per_object: 10
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"  # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# ── 25. Code Update (Developer Agent) ───────────────────────────────────────
+code_update:
+  method: api_config
+  boto3_client: s3
+  description: >
+    S3 has no code to deploy. Interact via boto3 API:
+    - Upload/download objects: put_object, get_object
+    - Configure bucket: lifecycle, versioning, notifications, encryption, CORS, replication
+    - Generate pre-signed URLs for temporary access
+    - Use multipart upload for large objects (>100 MB)
+    - Manage tags, ACLs, and bucket policies
+  config_update:
+    client: s3
+    operation: put_bucket_versioning
+    id_param: Bucket
+    id_value: "{resource_name}"
+  discovery_ops:
+    - op: list_objects_v2
+      id_param: Bucket
+      returns: ["Contents[].Key", "Contents[].Size", "Contents[].LastModified", "KeyCount"]
+    - op: get_bucket_notification_configuration
+      id_param: Bucket
+      returns: ["LambdaFunctionConfigurations", "QueueConfigurations", "TopicConfigurations"]
+    - op: get_bucket_versioning
+      id_param: Bucket
+      returns: ["Status", "MFADelete"]
+    - op: get_bucket_lifecycle_configuration
+      id_param: Bucket
+      returns: ["Rules"]
+    - op: get_bucket_encryption
+      id_param: Bucket
+      returns: ["ServerSideEncryptionConfiguration"]
+    - op: get_bucket_replication
+      id_param: Bucket
+      returns: ["ReplicationConfiguration"]
+    - op: get_bucket_policy
+      id_param: Bucket
+      returns: ["Policy"]
+    - op: get_bucket_cors
+      id_param: Bucket
+      returns: ["CORSRules"]
+    - op: get_bucket_tagging
+      id_param: Bucket
+      returns: ["TagSet"]
+    - op: get_bucket_accelerate_configuration
+      id_param: Bucket
+      returns: ["Status"]
+
+# -- Sub-Components (spec-driven, zero Python code) ----------------------------
+sub_components:
+  prefixes:
+    terraform_resource: aws_s3_object
+    trigger_key: prefixes
+    is_list: true
+    label_suffix: prefix
+    name_field: value
+    attributes:
+      bucket: "{parent_resource_ref}.id"
+      key: "{item.value}"
+      content_type: "application/x-directory"

@@ -1,0 +1,58 @@
+service: ec2
+boto3_client: ec2
+description: "Amazon EC2 — virtual servers, security groups, networking"
+
+operations:
+  run_instances:
+    description: "Launch one or more EC2 instances"
+    parameters:
+      ImageId: {type: string, required: true}
+      InstanceType: {type: string, required: true}
+      MinCount: {type: integer, required: true}
+      MaxCount: {type: integer, required: true}
+      KeyName: {type: string}
+      SecurityGroupIds: {type: list}
+      SubnetId: {type: string}
+      UserData: {type: string, description: "Base64-encoded startup script"}
+      TagSpecifications: {type: list}
+
+  describe_instances:
+    description: "List or filter running instances"
+    parameters:
+      InstanceIds: {type: list}
+      Filters: {type: list}
+
+  stop_instances:
+    description: "Stop running instances"
+    parameters:
+      InstanceIds: {type: list, required: true}
+
+  start_instances:
+    description: "Start stopped instances"
+    parameters:
+      InstanceIds: {type: list, required: true}
+
+  create_tags:
+    description: "Tag EC2 resources"
+    parameters:
+      Resources: {type: list, required: true}
+      Tags: {type: list, required: true}
+
+  authorize_security_group_ingress:
+    description: "Add inbound rules to a security group"
+    parameters:
+      GroupId: {type: string, required: true}
+      IpPermissions: {type: list, required: true}
+
+  create_security_group:
+    description: "Create a new security group"
+    parameters:
+      GroupName: {type: string, required: true}
+      Description: {type: string, required: true}
+      VpcId: {type: string}
+
+  create_key_pair:
+    description: "Create an SSH key pair"
+    parameters:
+      KeyName: {type: string, required: true}
+      KeyType: {type: string, description: "rsa or ed25519"}

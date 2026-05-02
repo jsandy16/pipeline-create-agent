@@ -1,0 +1,43 @@
+service: emr
+boto3_client: emr
+description: "Amazon EMR — managed Spark, Hadoop, and big data processing"
+
+operations:
+  add_job_flow_steps:
+    description: "Add processing steps (Spark, Hive, etc.) to a running cluster"
+    parameters:
+      JobFlowId: {type: string, required: true}
+      Steps: {type: list, required: true, description: "Step configs with Name, ActionOnFailure, HadoopJarStep"}
+
+  run_job_flow:
+    description: "Create a new EMR cluster with steps"
+    parameters:
+      Name: {type: string, required: true}
+      ReleaseLabel: {type: string, required: true}
+      Instances: {type: object, required: true}
+      Steps: {type: list}
+      Applications: {type: list}
+      ServiceRole: {type: string, required: true}
+      JobFlowRole: {type: string, required: true}
+
+  describe_cluster:
+    description: "Get cluster details and status"
+    parameters:
+      ClusterId: {type: string, required: true}
+
+  list_steps:
+    description: "List steps on a cluster"
+    parameters:
+      ClusterId: {type: string, required: true}
+      StepStates: {type: list}
+
+  terminate_job_flows:
+    description: "Terminate one or more clusters"
+    parameters:
+      JobFlowIds: {type: list, required: true}
+
+  add_tags:
+    description: "Tag an EMR cluster"
+    parameters:
+      ResourceId: {type: string, required: true}
+      Tags: {type: list, required: true}

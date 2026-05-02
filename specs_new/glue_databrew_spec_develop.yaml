@@ -1,0 +1,837 @@
+# ============================================================================
+# AWS Glue DataBrew Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Glue DataBrew knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/glue_databrew.yaml with
+# exhaustive coverage of DataBrew capabilities, constraints, IAM, integrations,
+# and Terraform resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — resource name constraints
+#   3. defaults            — Terraform attribute defaults
+#   4. quotas              — AWS service limits
+#   5. projects            — DataBrew projects, sessions
+#   6. datasets            — dataset types, input formats
+#   7. recipes             — recipe actions, steps, transformations
+#   8. jobs                — recipe jobs, profile jobs
+#   9. profiles            — data profiling, statistics
+#  10. encryption          — SSE options
+#  11. iam                 — complete action catalog, integration graph rules
+#  12. env_vars            — auto-wired environment variables
+#  13. vpc_triggers        — VPC placement rules
+#  14. integrations        — wiring ownership with all connected services
+#  15. terraform_resources — all TF resource types
+#  16. boto3_operations    — complete API reference
+#  17. runtime_diagnostics — error patterns & auto-fix rules
+#  18. tags                — tagging constraints
+#  19. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: glue_databrew
+  aws_service_name: "AWS Glue DataBrew"
+  is_principal: true              # DataBrew has an IAM execution role
+  terraform_resource: aws_databrew_project
+  description: >
+    Visual data preparation tool for cleaning and normalizing data without
+    writing code. Provides 250+ built-in transformations for filtering,
+    converting, and enriching data. Supports data profiling to understand
+    data quality and distribution. Works with S3, Glue Data Catalog,
+    Redshift, and database sources.
+  free_tier:
+    status: never_free
+    details: >
+      No free tier. Billed per node-hour: ~$0.48/node-hour for interactive
+      sessions, same for recipe/profile jobs. Minimum 3 nodes per job.
+      Typical minimum cost: ~$1.44/hour for a running job.
+  pricing_model: per_node_hour
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 255
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_-"
+  rules:
+    - "Must be unique within the AWS account and region"
+    - "Allows letters, digits, hyphens, and underscores"
+    - "Dataset, recipe, project, and job names follow the same rules"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  worker_size: "T_2"            # smallest DataBrew node type (~$0.48/node-hr)
+  max_capacity: 3               # minimum concurrent nodes
+  timeout: 2880                 # minutes (48 hours)
+  # Job defaults
+  job_type: "PROFILE"           # PROFILE or RECIPE
+  log_subscription: "ENABLE"    # enable CloudWatch logging
+  max_retries: 0
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_projects_per_account: 100
+  max_datasets_per_account: 100
+  max_recipes_per_account: 100
+  max_recipe_versions_per_recipe: 100
+  max_recipe_steps_per_recipe: 100
+  max_jobs_per_account: 100
+  max_concurrent_job_runs_per_account: 10
+  max_schedules_per_account: 10
+  max_rulesets_per_account: 100
+  max_rules_per_ruleset: 100
+  max_columns_per_dataset: 2000
+  max_dataset_size: "20 GB"       # for interactive sessions
+  max_output_files_per_job: 100
+  session_timeout_minutes: 60     # interactive session max idle time
+  node_types:
+    "T_2":
+      description: "Standard node"
+      vcpu: 2
+      memory_gb: 16
+      cost_per_hour: 0.48
+
+# -- 5. Projects --------------------------------------------------------------
+projects:
+  description: >
+    A DataBrew project binds a dataset to a recipe for interactive data
+    preparation. Opening a project starts an interactive session.
+  terraform_resource: "aws_databrew_project"
+  attributes:
+    name: {type: string, required: true}
+    dataset_name: {type: string, required: true}
+    recipe_name: {type: string, required: true}
+    role_arn: {type: string, required: true}
+    sample: {type: object, description: "Sample size and type for interactive session"}
+  sample_types:
+    FIRST_N: "First N rows from the dataset"
+    LAST_N: "Last N rows from the dataset"
+    RANDOM: "Random sample of N rows"
+  default_sample_size: 500
+
+# -- 6. Datasets --------------------------------------------------------------
+datasets:
+  description: >
+    A dataset is a reference to data (S3 path, Glue table, or database table).
+    Datasets are reusable across projects and jobs.
+  terraform_resource: "aws_databrew_dataset"
+  input_types:
+    s3:
+      terraform_block: "s3_input_definition"
+      attributes: ["bucket", "key"]
+    data_catalog:
+      terraform_block: "data_catalog_input_definition"
+      attributes: ["catalog_id", "database_name", "table_name", "temp_directory"]
+    database:
+      terraform_block: "database_input_definition"
+      attributes: ["glue_connection_name", "database_table_name", "temp_directory", "query_string"]
+
+  format_options:
+    csv:
+      terraform_block: "csv"
+      attributes: ["delimiter", "header_row"]
+    json:
+      terraform_block: "json"
+      attributes: ["multi_line"]
+    excel:
+      terraform_block: "excel"
+      attributes: ["sheet_names", "sheet_indexes", "header_row"]
+    parquet: {}
+    orc: {}
+
+  path_options:
+    description: "Filter files using path parameters"
+    terraform_block: "path_options"
+    attributes:
+      - "last_modified_date_condition"
+      - "files_limit"
+      - "parameters"
+
+# -- 7. Recipes ---------------------------------------------------------------
+recipes:
+  description: >
+    A recipe is an ordered list of transformation steps applied to a dataset.
+    Recipes are versioned; you must publish a version before running it in a job.
+  terraform_resource: "aws_databrew_recipe"
+
+  step_structure:
+    action:
+      operation: "Name of the transformation"
+      parameters: "Key-value parameters for the operation"
+    condition_expressions: "Optional conditions to apply step conditionally"
+
+  transformation_categories:
+    column_operations:
+      - "DELETE_COLUMN"
+      - "RENAME_COLUMN"
+      - "DUPLICATE_COLUMN"
+      - "MOVE_COLUMN"
+      - "CHANGE_DATA_TYPE"
+      - "MERGE_COLUMNS"
+      - "SPLIT_COLUMN"
+      - "NEST_COLUMN"
+      - "UNNEST_COLUMN"
+      - "FLAG_COLUMN"
+    string_operations:
+      - "UPPER_CASE"
+      - "LOWER_CASE"
+      - "TRIM"
+      - "LEFT_TRIM"
+      - "RIGHT_TRIM"
+      - "PAD_STRING"
+      - "REMOVE_WHITESPACE"
+      - "REMOVE_SPECIAL_CHARACTERS"
+      - "REPLACE_VALUE"
+      - "REGEX_REPLACE"
+      - "SUBSTRING"
+      - "EXTRACT_PATTERN"
+    number_operations:
+      - "ROUND"
+      - "FLOOR"
+      - "CEIL"
+      - "ABS"
+      - "LOG"
+      - "SQRT"
+      - "POWER"
+      - "MATH_EXPRESSION"
+    date_operations:
+      - "DATE_FORMAT"
+      - "DATE_ADD"
+      - "DATE_DIFF"
+      - "EXTRACT_DATE_PART"
+      - "CONVERT_TIMEZONE"
+    data_quality:
+      - "FILL_MISSING_VALUES"
+      - "REMOVE_DUPLICATES"
+      - "REMOVE_OUTLIERS"
+      - "REMOVE_NULL_ROWS"
+      - "VALIDATE_DATA"
+    aggregation:
+      - "GROUP_BY"
+      - "PIVOT"
+      - "UNPIVOT"
+      - "ROLLING_WINDOW"
+    filtering:
+      - "FILTER_ROWS"
+      - "FILTER_VALUES"
+      - "TOP_N"
+      - "BOTTOM_N"
+      - "SAMPLE"
+    joining:
+      - "JOIN"
+      - "UNION"
+    encoding:
+      - "ONE_HOT_ENCODING"
+      - "ORDINAL_ENCODING"
+      - "BINARY_ENCODING"
+    custom:
+      - "CUSTOM_SQL"
+      - "CUSTOM_FUNCTION"
+
+  versioning:
+    description: "Recipes are versioned. Must publish before running in a job."
+    publish_api: "publish_recipe"
+    latest_working: "Editable draft version"
+    published: "Immutable numbered versions"
+    max_versions: 100
+
+# -- 8. Jobs -------------------------------------------------------------------
+jobs:
+  description: >
+    DataBrew jobs apply a recipe to a full dataset or profile a dataset.
+    Jobs run on managed compute nodes (no Spark cluster to manage).
+
+  types:
+    RECIPE:
+      description: "Apply a published recipe to a dataset and write results"
+      terraform_resource: "aws_databrew_job"
+      terraform_type_value: "RECIPE"
+      required_attributes: ["recipe_reference", "outputs"]
+      output_options:
+        s3:
+          format: ["CSV", "JSON", "PARQUET", "AVRO", "ORC", "XML", "GLUEPARQUET", "TABLEAUHYPER"]
+          compression: ["GZIP", "LZ4", "SNAPPY", "BZIP2", "DEFLATE", "LZO", "BROTLI", "ZSTD", "ZLIB"]
+          overwrite_output: true
+        data_catalog:
+          description: "Write to Glue Data Catalog table"
+          terraform_block: "data_catalog_output"
+        database:
+          description: "Write to database table"
+          terraform_block: "database_output"
+
+    PROFILE:
+      description: "Analyze dataset to generate statistics and data quality insights"
+      terraform_resource: "aws_databrew_job"
+      terraform_type_value: "PROFILE"
+      required_attributes: ["output_location"]
+      output: "JSON profile report in S3"
+      profile_configuration:
+        entity_detection: true
+        dataset_statistics: true
+        column_statistics: true
+        profile_columns: "all or subset"
+
+  scheduling:
+    terraform_resource: "aws_databrew_schedule"
+    format: "cron(Minutes Hours Day-of-month Month Day-of-week Year)"
+    examples:
+      hourly: "cron(0 * * * ? *)"
+      daily: "cron(0 6 * * ? *)"
+
+  node_configuration:
+    min_nodes: 3                  # max_capacity minimum
+    max_nodes: 90                 # max_capacity maximum
+    default_worker_size: "T_2"
+
+# -- 9. Data Profiling ---------------------------------------------------------
+profiles:
+  description: >
+    DataBrew profiling jobs analyze datasets and produce detailed statistics
+    including data types, distributions, missing values, duplicates, outliers,
+    and correlations. Profile results are stored as JSON in S3.
+  statistics_generated:
+    dataset_level:
+      - "Row count"
+      - "Column count"
+      - "Duplicate row count"
+      - "Duplicate row percentage"
+    column_level:
+      - "Data type distribution"
+      - "Null value count and percentage"
+      - "Unique value count and percentage"
+      - "Min / Max / Mean / Median / Std Dev"
+      - "Most common values"
+      - "String length distribution"
+      - "Pattern detection"
+    entity_detection:
+      - "PII detection (email, phone, SSN, credit card, etc.)"
+      - "Custom entity patterns"
+
+# -- 10. Encryption ------------------------------------------------------------
+encryption:
+  at_rest:
+    description: "DataBrew encrypts data at rest using SSE"
+    options:
+      SSE_S3: "Amazon S3-managed keys (default)"
+      SSE_KMS: "AWS KMS-managed keys"
+    terraform_attribute: "encryption_mode"
+    terraform_key_arn: "encryption_key_arn"
+  in_transit:
+    description: "All DataBrew API calls use TLS"
+  log_encryption:
+    description: "CloudWatch Logs can be encrypted with KMS"
+
+# -- 11. IAM ------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    project: "arn:aws:databrew:REGION:ACCOUNT:project/PROJECT_NAME"
+    dataset: "arn:aws:databrew:REGION:ACCOUNT:dataset/DATASET_NAME"
+    recipe: "arn:aws:databrew:REGION:ACCOUNT:recipe/RECIPE_NAME"
+    job: "arn:aws:databrew:REGION:ACCOUNT:job/JOB_NAME"
+    schedule: "arn:aws:databrew:REGION:ACCOUNT:schedule/SCHEDULE_NAME"
+    ruleset: "arn:aws:databrew:REGION:ACCOUNT:ruleset/RULESET_NAME"
+
+  service_principal: "databrew.amazonaws.com"
+
+  # Actions DataBrew always needs on its execution role
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "glue:GetDatabase"
+    - "glue:GetTable"
+    - "glue:CreateTable"
+    - "glue:UpdateTable"
+
+  # Complete action catalog by category
+  actions:
+    project_management:
+      - "databrew:CreateProject"
+      - "databrew:DescribeProject"
+      - "databrew:UpdateProject"
+      - "databrew:DeleteProject"
+      - "databrew:ListProjects"
+      - "databrew:StartProjectSession"
+      - "databrew:SendProjectSessionAction"
+    dataset_management:
+      - "databrew:CreateDataset"
+      - "databrew:DescribeDataset"
+      - "databrew:UpdateDataset"
+      - "databrew:DeleteDataset"
+      - "databrew:ListDatasets"
+    recipe_management:
+      - "databrew:CreateRecipe"
+      - "databrew:DescribeRecipe"
+      - "databrew:UpdateRecipe"
+      - "databrew:DeleteRecipeVersion"
+      - "databrew:ListRecipes"
+      - "databrew:ListRecipeVersions"
+      - "databrew:PublishRecipe"
+      - "databrew:BatchDeleteRecipeVersion"
+    job_management:
+      - "databrew:CreateRecipeJob"
+      - "databrew:CreateProfileJob"
+      - "databrew:DescribeJob"
+      - "databrew:DescribeJobRun"
+      - "databrew:UpdateRecipeJob"
+      - "databrew:UpdateProfileJob"
+      - "databrew:DeleteJob"
+      - "databrew:ListJobs"
+      - "databrew:ListJobRuns"
+      - "databrew:StartJobRun"
+      - "databrew:StopJobRun"
+    schedule_management:
+      - "databrew:CreateSchedule"
+      - "databrew:DescribeSchedule"
+      - "databrew:UpdateSchedule"
+      - "databrew:DeleteSchedule"
+      - "databrew:ListSchedules"
+    ruleset_management:
+      - "databrew:CreateRuleset"
+      - "databrew:DescribeRuleset"
+      - "databrew:UpdateRuleset"
+      - "databrew:DeleteRuleset"
+      - "databrew:ListRulesets"
+    tagging:
+      - "databrew:TagResource"
+      - "databrew:UntagResource"
+      - "databrew:ListTagsForResource"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+    stepfunctions:
+      - "databrew:StartJobRun"
+      - "databrew:DescribeJobRun"
+    lambda:
+      - "databrew:StartJobRun"
+
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+
+  # Managed policies
+  managed_policies:
+    - "arn:aws:iam::aws:policy/AwsGlueDataBrewFullAccessPolicy"
+
+  # Condition keys
+  condition_keys:
+    - "aws:RequestTag/${TagKey}"
+    - "aws:ResourceTag/${TagKey}"
+    - "aws:TagKeys"
+
+# -- 12. Environment Variables -------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+# -- 13. VPC Triggers ---------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - redshift
+
+# -- 14. Integration Wiring Ownership -----------------------------------------
+integrations:
+  s3_to_databrew:
+    description: "S3 provides input dataset for DataBrew"
+    owned_by: "glue_databrew"
+    terraform_resources:
+      - "aws_databrew_dataset (s3_input_definition block)"
+    iam_permissions_on_databrew:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  databrew_to_s3:
+    description: "DataBrew writes transformed/profiled output to S3"
+    owned_by: "glue_databrew"
+    terraform_resources:
+      - "aws_databrew_job (output s3_location block)"
+    iam_permissions_on_databrew:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+
+  databrew_to_dynamodb:
+    description: "DataBrew writes output to DynamoDB"
+    owned_by: "glue_databrew"
+    iam_permissions_on_databrew:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+
+  databrew_to_redshift:
+    description: "DataBrew writes output to Redshift"
+    owned_by: "glue_databrew"
+    vpc_required: true
+    iam_permissions_on_databrew:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+
+  databrew_to_glue_data_catalog:
+    description: "DataBrew reads schema from Glue Data Catalog"
+    owned_by: "glue_databrew"
+    iam_permissions_on_databrew:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+
+  stepfunctions_to_databrew:
+    description: "Step Functions starts DataBrew job runs"
+    owned_by: "step_functions"
+    iam_permissions_on_caller:
+      - "databrew:StartJobRun"
+      - "databrew:DescribeJobRun"
+      - "databrew:ListJobRuns"
+      - "databrew:StopJobRun"
+
+  lambda_to_databrew:
+    description: "Lambda starts DataBrew job"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "databrew:StartJobRun"
+      - "databrew:DescribeJobRun"
+
+  eventbridge_to_databrew:
+    description: "EventBridge triggers DataBrew job on schedule"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target"
+
+# -- 15. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_databrew_dataset"
+      description: "Dataset definition (reference to S3/catalog data)"
+      always_created: true
+    - resource: "aws_databrew_project"
+      description: "DataBrew project binding dataset + recipe"
+      always_created: true
+    - resource: "aws_databrew_job"
+      description: "Profile or recipe job"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "IAM execution role for DataBrew"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline policy for DataBrew role"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "CloudWatch log group for DataBrew job logs"
+      always_created: true
+
+  conditional:
+    - resource: "aws_databrew_recipe"
+      condition: "When inline recipe is defined (often created via console)"
+    - resource: "aws_databrew_schedule"
+      condition: "When recurring schedule is configured"
+    - resource: "aws_databrew_ruleset"
+      condition: "When data quality rules are defined"
+
+  all_known:
+    - "aws_databrew_dataset"
+    - "aws_databrew_project"
+    - "aws_databrew_recipe"
+    - "aws_databrew_job"
+    - "aws_databrew_schedule"
+    - "aws_databrew_ruleset"
+
+# -- 16. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "databrew"
+
+  dataset_operations:
+    create_dataset:
+      description: "Create a dataset (reference to S3 data)"
+      parameters:
+        Name: {type: string, required: true}
+        Input: {type: object, required: true, description: "{'S3InputDefinition': {'Bucket': '...', 'Key': '...'}}"}
+        Format: {type: string, description: "CSV, JSON, PARQUET, EXCEL, ORC"}
+        FormatOptions: {type: object, description: "Format-specific options"}
+        PathOptions: {type: object, description: "File filtering options"}
+        Tags: {type: object}
+      returns: ["Name"]
+
+    describe_dataset:
+      description: "Get dataset details"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["Name", "Input", "Format", "FormatOptions", "Source", "ResourceArn", "CreateDate"]
+
+    update_dataset:
+      description: "Update a dataset definition"
+      parameters:
+        Name: {type: string, required: true}
+        Input: {type: object, required: true}
+        Format: {type: string}
+        FormatOptions: {type: object}
+      returns: ["Name"]
+
+    list_datasets:
+      description: "List available datasets"
+      parameters:
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+      returns: ["Datasets[].Name", "Datasets[].Input", "Datasets[].Format"]
+
+  recipe_operations:
+    create_recipe:
+      description: "Create a recipe (transformation steps)"
+      parameters:
+        Name: {type: string, required: true}
+        Steps: {type: list, required: true, description: "[{'Action': {'Operation': '...', 'Parameters': {...}}}]"}
+        Description: {type: string}
+        Tags: {type: object}
+      returns: ["Name"]
+
+    describe_recipe:
+      description: "Get recipe details"
+      parameters:
+        Name: {type: string, required: true}
+        RecipeVersion: {type: string, description: "Specific version or LATEST_WORKING/LATEST_PUBLISHED"}
+      returns: ["Name", "Steps", "RecipeVersion", "ResourceArn", "Description"]
+
+    update_recipe:
+      description: "Update recipe steps (working version)"
+      parameters:
+        Name: {type: string, required: true}
+        Steps: {type: list, required: true}
+        Description: {type: string}
+      returns: ["Name"]
+
+    publish_recipe:
+      description: "Publish the current working version as a numbered version"
+      parameters:
+        Name: {type: string, required: true}
+        Description: {type: string}
+      returns: ["Name"]
+
+    list_recipes:
+      description: "List available recipes"
+      parameters:
+        MaxResults: {type: integer}
+        RecipeVersion: {type: string}
+      returns: ["Recipes[].Name", "Recipes[].RecipeVersion"]
+
+  job_operations:
+    create_recipe_job:
+      description: "Create a job that runs a recipe on a dataset"
+      parameters:
+        Name: {type: string, required: true}
+        DatasetName: {type: string, required: true}
+        RecipeReference: {type: object, required: true, description: "{'Name': '...', 'RecipeVersion': '...'}"}
+        RoleArn: {type: string, required: true}
+        Outputs: {type: list, required: true, description: "[{'Location': {'Bucket': '...', 'Key': '...'}, 'Format': 'CSV'}]"}
+        MaxCapacity: {type: integer}
+        MaxRetries: {type: integer}
+        Timeout: {type: integer}
+        Tags: {type: object}
+      returns: ["Name"]
+
+    create_profile_job:
+      description: "Create a data profiling job"
+      parameters:
+        Name: {type: string, required: true}
+        DatasetName: {type: string, required: true}
+        RoleArn: {type: string, required: true}
+        OutputLocation: {type: object, required: true, description: "{'Bucket': '...', 'Key': '...'}"}
+        Configuration: {type: object, description: "Profile job configuration (entity detection, statistics)"}
+        MaxCapacity: {type: integer}
+        MaxRetries: {type: integer}
+        Timeout: {type: integer}
+        Tags: {type: object}
+      returns: ["Name"]
+
+    start_job_run:
+      description: "Start a DataBrew job"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["RunId"]
+
+    describe_job_run:
+      description: "Get job run details"
+      parameters:
+        Name: {type: string, required: true}
+        RunId: {type: string, required: true}
+      returns: ["State", "ErrorMessage", "Outputs", "StartedOn", "CompletedOn", "ExecutionTime", "LogGroupName"]
+
+    list_job_runs:
+      description: "List runs for a job"
+      parameters:
+        Name: {type: string, required: true}
+        MaxResults: {type: integer}
+      returns: ["JobRuns[].RunId", "JobRuns[].State", "JobRuns[].ErrorMessage", "JobRuns[].StartedOn"]
+
+    stop_job_run:
+      description: "Stop a running job"
+      parameters:
+        Name: {type: string, required: true}
+        RunId: {type: string, required: true}
+
+    describe_job:
+      description: "Get job configuration"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["Type", "DatasetName", "RecipeReference", "Outputs", "MaxCapacity", "Timeout", "RoleArn"]
+
+  project_operations:
+    create_project:
+      description: "Create a DataBrew project"
+      parameters:
+        Name: {type: string, required: true}
+        DatasetName: {type: string, required: true}
+        RecipeName: {type: string, required: true}
+        RoleArn: {type: string, required: true}
+        Sample: {type: object, description: "{'Type': 'FIRST_N', 'Size': 500}"}
+        Tags: {type: object}
+      returns: ["Name"]
+
+    describe_project:
+      description: "Get project details"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["Name", "DatasetName", "RecipeName", "RoleArn", "Sample", "SessionStatus"]
+
+  schedule_operations:
+    create_schedule:
+      description: "Create a recurring schedule for jobs"
+      parameters:
+        Name: {type: string, required: true}
+        CronExpression: {type: string, required: true}
+        JobNames: {type: list}
+        Tags: {type: object}
+      returns: ["Name"]
+
+# -- 17. Runtime Diagnostics ---------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AccessDenied.*s3|EntityNotFoundException"
+    category: PERMISSION
+    cause: "DataBrew cannot access S3 input or Glue catalog"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={s3+glue permissions})"
+
+  - pattern: "ResourceNotFoundException.*dataset|dataset.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "DataBrew dataset does not exist"
+    fix_type: manual
+    resolution: "Verify dataset name. Check if terraform apply completed successfully."
+
+  - pattern: "ConflictException.*recipe.*published"
+    category: VALIDATION
+    cause: "Cannot modify a published recipe version"
+    fix_type: code_change
+    resolution: "Edit the working version, then publish a new version: databrew.publish_recipe(Name=name)"
+
+  - pattern: "ServiceQuotaExceededException"
+    category: THROTTLE
+    cause: "Account quota exceeded (projects, datasets, recipes, or jobs)"
+    fix_type: manual
+    resolution: "Request a quota increase via AWS Service Quotas console"
+
+  - pattern: "ValidationException.*output"
+    category: VALIDATION
+    cause: "Job output configuration is invalid (missing bucket, wrong format)"
+    fix_type: manual
+    resolution: "Check output S3 bucket exists and format is supported"
+
+  - pattern: "FAILED.*DataBrew|DataBrew.*FAILED"
+    category: JOB_FAILURE
+    cause: "DataBrew job execution failed"
+    fix_type: check_logs
+    resolution: "Check CloudWatch Logs at /aws-glue-databrew/jobs/{job_name} for error details"
+
+  - pattern: "InvalidInputException.*recipe.*step"
+    category: VALIDATION
+    cause: "Recipe step has invalid operation or parameters"
+    fix_type: code_change
+    resolution: "Review recipe step definitions. Check operation name and parameter types."
+
+  - pattern: "InternalServerException"
+    category: AWS_INTERNAL
+    cause: "DataBrew internal service error"
+    fix_type: retry
+    resolution: "Retry with exponential backoff"
+
+# -- 18. Tags -----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  supported_resources:
+    - "aws_databrew_project"
+    - "aws_databrew_dataset"
+    - "aws_databrew_recipe"
+    - "aws_databrew_job"
+    - "aws_databrew_schedule"
+    - "aws_databrew_ruleset"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 19. Code Update (Developer Agent) ----------------------------------------
+code_update:
+  method: api_config
+  boto3_client: databrew
+  description: >
+    DataBrew recipe steps updated via update_recipe(). Job config (outputs, max nodes)
+    via update_job(). Must publish recipe version before running job against it.
+  config_update:
+    client: databrew
+    operation: update_recipe
+    id_param: Name
+  code_update_steps:
+    - "databrew = boto3.client('databrew', region_name=region)"
+    - "recipe = databrew.describe_recipe(Name=resource_name)"
+    - "steps = recipe['Steps']  # list of {Action: {Operation, Parameters}, ConditionExpressions}"
+    - "Modify steps list"
+    - "databrew.update_recipe(Name=resource_name, Steps=modified_steps)"
+    - "databrew.publish_recipe(Name=resource_name)  # required before running job"
+  discovery_ops:
+    - op: describe_recipe
+      id_param: Name
+      returns: ["Steps", "RecipeVersion", "ResourceArn"]
+    - op: describe_job
+      id_param: Name
+      returns: ["JobType", "Outputs", "DataCatalogOutputs", "MaxCapacity", "Timeout"]
+    - op: list_job_runs
+      id_param: Name
+      returns: ["JobRuns[].RunId", "JobRuns[].State", "JobRuns[].ErrorMessage"]
+
+invocation:
+  description: "DataBrew jobs started via databrew.start_job_run(Name=job_name)"
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_JOB_NAME"
+      ref: "aws_databrew_job.{self_label}_job.name"
+      boto3_param: "Name"
+      description: "DataBrew job name"
+  caller_iam:
+    - "databrew:StartJobRun"
+    - "databrew:DescribeJobRun"
+    - "databrew:StopJobRun"
+  passrole_required: false
+
+# Pipeline monitoring (log_aggregator.py)
+pipeline_monitoring:
+  method: "cloudwatch_logs"
+  log_group_pattern: "/aws-glue-databrew/jobs/{resource_name}"
+  terraform_log_group: "aws_cloudwatch_log_group"
+  log_aggregator_config:
+    service_to_tf: "aws_databrew_project"
+    tf_name_attr: "name"

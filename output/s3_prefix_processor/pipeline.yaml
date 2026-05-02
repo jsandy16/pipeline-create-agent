@@ -1,0 +1,58 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: case/
+  source: src
+  suffix: null
+  target: case_processor
+- event: s3:ObjectCreated:*
+  prefix: party/
+  source: src
+  suffix: null
+  target: party_processor
+- event: s3:ObjectCreated:*
+  prefix: collision/
+  source: src
+  suffix: null
+  target: collision_processor
+- event: s3:ObjectCreated:*
+  prefix: victim/
+  source: src
+  suffix: null
+  target: victim_processor
+pipeline_name: s3_prefix_processor
+region: us-east-1
+services:
+- config:
+    versioning_status: Enabled
+  name: src
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: case_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: party_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.11
+    timeout: 30
+  name: collision_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: victim_processor
+  type: lambda

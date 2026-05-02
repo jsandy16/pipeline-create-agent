@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: aws-pipeline-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false          # set manually in Render dashboard
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_DEFAULT_REGION
+        value: us-east-1
+
+    autoDeploy: true

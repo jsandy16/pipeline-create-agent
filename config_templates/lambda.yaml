@@ -1,0 +1,28 @@
+templates:
+  high_memory:
+    display_name: "High-Memory Lambda"
+    description: "1 GB memory, 5 min timeout for data processing workloads"
+    config:
+      memory_size: 1024
+      timeout: 300
+
+  api_handler:
+    display_name: "API Handler"
+    description: "Node.js runtime, 256 MB memory, 30s timeout for API responses"
+    config:
+      runtime: "nodejs20.x"
+      memory_size: 256
+      timeout: 30
+
+  heavy_compute:
+    display_name: "Heavy Compute"
+    description: "3 GB memory, 15 min timeout for ETL or ML inference"
+    config:
+      memory_size: 3008
+      timeout: 900
+
+  python_311:
+    display_name: "Python 3.11"
+    description: "Python 3.11 runtime with default memory and timeout"
+    config:
+      runtime: "python3.11"

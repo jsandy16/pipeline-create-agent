@@ -1,0 +1,800 @@
+# ============================================================================
+# Kinesis Data Analytics (v2) Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Kinesis Analytics knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/kinesis_analytics.yaml with
+# exhaustive coverage of capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# NOTE: "Kinesis Data Analytics" was rebranded to "Amazon Managed Service for
+# Apache Flink" in August 2023. The v2 API (kinesisanalyticsv2) supports both
+# SQL and Flink applications. Our engine uses the original naming convention.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — application naming rules
+#   3. defaults            — Terraform attribute defaults (minimum-cost)
+#   4. quotas              — AWS service limits
+#   5. applications        — SQL vs Flink application types
+#   6. inputs_outputs      — streaming inputs and output destinations
+#   7. sql_applications    — SQL-specific features
+#   8. flink_applications  — Flink-specific features
+#   9. snapshots           — application state snapshots
+#  10. encryption          — at-rest encryption
+#  11. iam                 — complete IAM action catalog & integration graph rules
+#  12. env_vars            — auto-wired environment variables
+#  13. vpc_triggers        — VPC placement rules
+#  14. integrations        — wiring ownership with all supported service types
+#  15. terraform_resources — all TF resource types this service uses
+#  16. boto3_operations    — complete API operation reference
+#  17. runtime_diagnostics — error patterns & auto-fix rules
+#  18. tags                — tagging constraints
+#  19. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: kinesis_analytics
+  aws_service_name: "Amazon Kinesis Data Analytics (v2) / Amazon Managed Service for Apache Flink"
+  is_principal: true             # Kinesis Analytics has an IAM execution role
+  terraform_resource: aws_kinesisanalyticsv2_application
+  description: >
+    Real-time stream processing service supporting SQL queries and Apache Flink
+    applications. Processes data from Kinesis Data Streams, Kinesis Firehose, or
+    Amazon MSK and delivers results to S3, Kinesis Streams, Kinesis Firehose,
+    Lambda, or other destinations. SQL applications run ad-hoc queries on streaming
+    data; Flink applications run compiled Java/Scala/Python code.
+  free_tier:
+    status: never_free
+    details: >
+      Kinesis Analytics is NOT free tier eligible.
+      ~$0.11/KPU-hour (Kinesis Processing Unit). Each KPU provides 1 vCPU,
+      4 GB memory, and associated networking. Minimum 1 KPU. Flink applications
+      also charge for application storage (~$0.10/GB-month for snapshots).
+      Orchestration cost: ~$0.009/running-application-hour.
+  pricing_model: per_kpu_hour
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 128       # max characters for application name
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_.-"
+  rules:
+    - "1-128 characters"
+    - "Letters, digits, underscores, hyphens, and periods"
+    - "Must be unique within an AWS account and region"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  runtime_environment: "SQL-1_0"       # cheapest: SQL (no Flink JARs needed)
+  application_code: "-- placeholder SQL\nSELECT * FROM \"SOURCE_SQL_STREAM_001\";\n"
+  parallelism: 1                       # minimum KPUs
+  parallelism_per_kpu: 1              # parallelism per KPU
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_applications_per_account: 50      # per region, adjustable
+  max_inputs_per_application: 1         # SQL: 1 streaming input; Flink: unlimited via code
+  max_outputs_per_application: 3        # SQL applications
+  max_reference_data_sources: 1         # SQL applications (S3-backed lookup table)
+  max_application_code_size: "100 KB"   # SQL application code
+  max_flink_application_size: "512 MB"  # Flink JAR/ZIP on S3
+  kpu_limits:
+    min_kpus: 1
+    max_kpus: 512                       # adjustable via service quotas
+    memory_per_kpu: "4 GB"
+    vcpu_per_kpu: 1
+  sql_limits:
+    max_in_application_streams: 64
+    max_columns_per_stream: 1000
+    max_sql_code_length: "100 KB"
+    max_reference_data_size: "1 GB"     # S3 reference data source
+  flink_limits:
+    max_parallelism: 512
+    max_parallelism_per_kpu: 8
+    checkpoint_interval_min: "1 second"
+    snapshot_max_size: "1 TB"
+
+# -- 5. Applications ---------------------------------------------------------
+applications:
+  sql:
+    description: >
+      SQL applications process streaming data using SQL queries. Simple to set up
+      but limited in complexity. Best for filtering, aggregation, and simple
+      transformations. Being deprecated in favor of Flink.
+    terraform_value: "SQL-1_0"
+    runtime_versions:
+      - "SQL-1_0"
+    features:
+      - "Ad-hoc SQL queries on streaming data"
+      - "In-application streams (internal data channels)"
+      - "Tumbling, sliding, and stagger windows"
+      - "Reference data from S3 (lookup tables)"
+      - "Up to 3 output destinations"
+      - "Schema discovery from input stream"
+    limitations:
+      - "Single streaming input source"
+      - "SQL-only (no custom code)"
+      - "Max 100 KB application code"
+      - "Max 64 in-application streams"
+      - "Being deprecated — new workloads should use Flink"
+
+  flink:
+    description: >
+      Apache Flink applications run compiled Java, Scala, or Python code for
+      complex stream processing. Supports exactly-once semantics, complex event
+      processing, stateful computations, and windowed aggregations. Flink code
+      is packaged as a JAR/ZIP on S3.
+    runtime_versions:
+      - "FLINK-1_6"
+      - "FLINK-1_8"
+      - "FLINK-1_11"
+      - "FLINK-1_13"
+      - "FLINK-1_15"
+      - "FLINK-1_18"
+      - "FLINK-1_19"
+    terraform_value: "FLINK-1_19"   # latest
+    features:
+      - "Java, Scala, and Python (PyFlink) support"
+      - "Exactly-once processing semantics"
+      - "Complex event processing (CEP)"
+      - "Stateful computations with checkpointing"
+      - "Windowed aggregations (tumbling, sliding, session)"
+      - "Async I/O for external lookups"
+      - "Multiple inputs and outputs via code"
+      - "Application snapshots for state recovery"
+    s3_code_content:
+      terraform_block: "application_configuration { code_content { s3_content_location { ... } } }"
+      attributes:
+        bucket_arn: "S3 bucket containing the JAR/ZIP"
+        file_key: "S3 object key"
+        object_version: "S3 object version (optional)"
+
+# -- 6. Inputs and Outputs ---------------------------------------------------
+inputs_outputs:
+  inputs:
+    kinesis_streams:
+      description: "Read from Kinesis Data Streams"
+      terraform_block: "inputs { kinesis_streams_input { resource_arn, role_arn } }"
+      sql_only: true    # Flink connects to sources via code
+      schema:
+        terraform_block: "schema { record_format { ... } record_columns { ... } }"
+        formats:
+          json: "JSON with JSONPath expressions"
+          csv: "CSV with column delimiters"
+    kinesis_firehose:
+      description: "Read from Kinesis Firehose delivery stream"
+      terraform_block: "inputs { kinesis_firehose_input { resource_arn, role_arn } }"
+      sql_only: true
+    reference_data:
+      description: "S3-backed reference data (lookup table) for SQL applications"
+      terraform_block: "reference_data_sources { s3_reference_data_source { ... } }"
+      sql_only: true
+      max_size: "1 GB"
+      refresh: "Manual via API call or on application restart"
+
+  outputs:
+    kinesis_streams:
+      description: "Write to Kinesis Data Streams"
+      terraform_block: "outputs { kinesis_streams_output { resource_arn, role_arn } }"
+      sql_only: true
+    kinesis_firehose:
+      description: "Write to Kinesis Firehose delivery stream"
+      terraform_block: "outputs { kinesis_firehose_output { resource_arn, role_arn } }"
+      sql_only: true
+    lambda:
+      description: "Write to Lambda function"
+      terraform_block: "outputs { lambda_output { resource_arn, role_arn } }"
+      sql_only: true
+    s3:
+      description: "Flink applications write to S3 via FileSystem sink connector"
+      flink_only: true
+    note: >
+      SQL applications define inputs/outputs declaratively in Terraform.
+      Flink applications define inputs/outputs in code using connectors.
+
+# -- 7. SQL Application Details -----------------------------------------------
+sql_applications:
+  in_application_streams:
+    description: >
+      Internal data channels within a SQL application. Input data flows into
+      SOURCE_SQL_STREAM_001, SQL queries transform it, and results go to
+      DESTINATION_SQL_STREAM for output mapping.
+    naming:
+      input_prefix: "SOURCE_SQL_STREAM"
+      output_prefix: "DESTINATION_SQL_STREAM"
+    max_streams: 64
+
+  windowing:
+    tumbling:
+      description: "Fixed-size, non-overlapping time windows"
+      sql_example: "GROUP BY STEP(ROWTIME BY INTERVAL '1' MINUTE)"
+    sliding:
+      description: "Fixed-size windows that slide at specified intervals"
+      sql_example: "GROUP BY STEP(ROWTIME BY INTERVAL '10' SECOND) WINDOW INTERVAL '1' MINUTE"
+    stagger:
+      description: "Groups based on a key's first arrival in a time window"
+      sql_example: "WINDOWED BY STAGGER(ORDER BY ROWTIME, PARTITION BY deviceId RANGE INTERVAL '1' MINUTE)"
+
+  schema_discovery:
+    description: >
+      Kinesis Analytics can automatically discover the schema of the input
+      stream by sampling records. This creates record_columns and record_format
+      configuration.
+    api: "discover_input_schema"
+    formats: ["JSON", "CSV"]
+
+  pumps:
+    description: >
+      A PUMP is a continuous INSERT INTO query that moves data from one
+      in-application stream to another. Required to connect SQL outputs.
+    example: |
+      CREATE OR REPLACE PUMP "STREAM_PUMP" AS
+      INSERT INTO "DESTINATION_SQL_STREAM"
+      SELECT STREAM "column1", COUNT(*) AS "count"
+      FROM "SOURCE_SQL_STREAM_001"
+      GROUP BY STEP("SOURCE_SQL_STREAM_001".ROWTIME BY INTERVAL '1' MINUTE);
+
+# -- 8. Flink Application Details ---------------------------------------------
+flink_applications:
+  runtime_properties:
+    description: "Key-value properties passed to Flink application (like environment variables)"
+    terraform_block: "environment_properties { property_group { ... } }"
+    access_in_code: "KinesisAnalyticsRuntime.getApplicationProperties()"
+
+  checkpointing:
+    description: >
+      Flink periodically snapshots application state to enable exactly-once
+      processing and failure recovery. Checkpoints are stored internally.
+    terraform_block: "application_configuration { flink_application_configuration { checkpoint_configuration { ... } } }"
+    attributes:
+      configuration_type: "DEFAULT | CUSTOM"
+      checkpointing_enabled: true
+      checkpoint_interval: "60000 ms (default)"
+      min_pause_between_checkpoints: "5000 ms (default)"
+    note: "Cannot disable checkpointing for production workloads"
+
+  monitoring:
+    description: "Application monitoring and logging level"
+    terraform_block: "application_configuration { flink_application_configuration { monitoring_configuration { ... } } }"
+    attributes:
+      configuration_type: "DEFAULT | CUSTOM"
+      log_level: "INFO | WARN | ERROR | DEBUG"
+      metrics_level: "APPLICATION | TASK | OPERATOR | PARALLELISM"
+
+  parallelism_config:
+    description: "KPU allocation and parallelism settings"
+    terraform_block: "application_configuration { flink_application_configuration { parallelism_configuration { ... } } }"
+    attributes:
+      configuration_type: "DEFAULT | CUSTOM"
+      parallelism: "Number of parallel tasks (1+)"
+      parallelism_per_kpu: "Tasks per KPU (1-8, default 1)"
+      auto_scaling_enabled: "true/false"
+
+  connectors:
+    description: "Flink connects to AWS services via bundled connectors"
+    kinesis:
+      consumer: "org.apache.flink:flink-connector-kinesis"
+      producer: "org.apache.flink:flink-connector-kinesis"
+    kafka:
+      consumer: "org.apache.flink:flink-connector-kafka"
+      producer: "org.apache.flink:flink-connector-kafka"
+    s3:
+      sink: "org.apache.flink:flink-connector-filesystem"
+    elasticsearch:
+      sink: "org.apache.flink:flink-connector-elasticsearch"
+
+# -- 9. Snapshots -------------------------------------------------------------
+snapshots:
+  description: >
+    Flink application snapshots capture the entire application state at a point
+    in time. Used for application updates, rollbacks, and migration between
+    Flink versions. Stored in S3 internally by the service.
+  api:
+    create: "create_application_snapshot"
+    delete: "delete_application_snapshot"
+    list: "list_application_snapshots"
+    describe: "describe_application_snapshot"
+  terraform_attribute: "application_configuration { application_snapshot_configuration { snapshots_enabled = true } }"
+  constraints:
+    - "Only for Flink applications (not SQL)"
+    - "Application must be RUNNING to create a snapshot"
+    - "Snapshot creation time depends on state size"
+    - "Max snapshot size: ~1 TB"
+  use_cases:
+    - "Application version updates (stop with snapshot, update code, start from snapshot)"
+    - "Rollback to previous state after a bad deployment"
+    - "Fork an application (start a new application from an existing snapshot)"
+
+# -- 10. Encryption -----------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Encrypt application data at rest using KMS"
+    terraform_attribute: "application_configuration { ... } (not directly — KMS applied to underlying storage)"
+    note: >
+      Kinesis Analytics encrypts application snapshots and state checkpoints
+      using service-managed encryption. Customer-managed KMS keys can be
+      specified at application creation time.
+  in_transit:
+    description: "All API calls and data in transit use TLS"
+
+# -- 11. IAM -----------------------------------------------------------------
+iam:
+  # ARN format
+  arn_formats:
+    application: "arn:aws:kinesisanalytics:REGION:ACCOUNT:application/APPLICATION-NAME"
+
+  # Kinesis Analytics IS a principal
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+
+  # Complete action catalog
+  actions:
+    application_management:
+      - "kinesisanalytics:CreateApplication"
+      - "kinesisanalytics:DeleteApplication"
+      - "kinesisanalytics:DescribeApplication"
+      - "kinesisanalytics:DescribeApplicationVersion"
+      - "kinesisanalytics:ListApplications"
+      - "kinesisanalytics:ListApplicationVersions"
+      - "kinesisanalytics:UpdateApplication"
+      - "kinesisanalytics:RollbackApplication"
+    application_lifecycle:
+      - "kinesisanalytics:StartApplication"
+      - "kinesisanalytics:StopApplication"
+    application_io:
+      - "kinesisanalytics:AddApplicationInput"
+      - "kinesisanalytics:AddApplicationOutput"
+      - "kinesisanalytics:AddApplicationReferenceDataSource"
+      - "kinesisanalytics:DeleteApplicationOutput"
+      - "kinesisanalytics:DeleteApplicationReferenceDataSource"
+      - "kinesisanalytics:AddApplicationVpcConfiguration"
+      - "kinesisanalytics:DeleteApplicationVpcConfiguration"
+      - "kinesisanalytics:AddApplicationCloudWatchLoggingOption"
+      - "kinesisanalytics:DeleteApplicationCloudWatchLoggingOption"
+    snapshots:
+      - "kinesisanalytics:CreateApplicationSnapshot"
+      - "kinesisanalytics:DeleteApplicationSnapshot"
+      - "kinesisanalytics:ListApplicationSnapshots"
+      - "kinesisanalytics:DescribeApplicationSnapshot"
+    schema_discovery:
+      - "kinesisanalytics:DiscoverInputSchema"
+    tagging:
+      - "kinesisanalytics:TagResource"
+      - "kinesisanalytics:UntagResource"
+      - "kinesisanalytics:ListTagsForResource"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    kinesis_streams:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+    kinesis_firehose:
+      - "firehose:DescribeDeliveryStream"
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  as_source_to:
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    kinesis_firehose:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    lambda:
+      - "lambda:InvokeFunction"
+
+  # Trust policy
+  trust_policy_principal: "kinesisanalytics.amazonaws.com"
+
+  # Condition keys
+  condition_keys:
+    - "kinesisanalytics:ResourceTag/${TagKey}"
+
+  # VPC permissions (needed when application runs in VPC)
+  vpc_permissions:
+    - "ec2:DescribeVpcs"
+    - "ec2:DescribeSubnets"
+    - "ec2:DescribeSecurityGroups"
+    - "ec2:DescribeNetworkInterfaces"
+    - "ec2:CreateNetworkInterface"
+    - "ec2:CreateNetworkInterfacePermission"
+    - "ec2:DeleteNetworkInterface"
+
+# -- 12. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    kinesis_streams:
+      pattern: "{PEER_UPPER}_STREAM_NAME"
+      ref: "aws_kinesis_stream.{peer_label}.name"
+
+# -- 13. VPC Triggers --------------------------------------------------------
+vpc_triggers: []
+  # Kinesis Analytics can optionally run in a VPC (for Flink apps accessing
+  # VPC resources like MSK, Aurora, OpenSearch). This is configured via
+  # VpcConfiguration in the application, not forced by peer types.
+
+# -- 14. Integration Wiring Ownership ----------------------------------------
+integrations:
+  kinesis_stream_to_analytics:
+    description: "Kinesis Analytics reads from Kinesis stream as input"
+    owned_by: "kinesis_analytics"
+    terraform_resources:
+      - "inputs block with kinesis_streams_input in aws_kinesisanalyticsv2_application"
+    iam_on_analytics:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  firehose_to_analytics:
+    description: "Kinesis Analytics reads from Firehose as input (SQL apps)"
+    owned_by: "kinesis_analytics"
+    terraform_resources:
+      - "inputs block with kinesis_firehose_input in aws_kinesisanalyticsv2_application"
+    iam_on_analytics:
+      - "firehose:DescribeDeliveryStream"
+
+  analytics_to_kinesis_stream:
+    description: "Kinesis Analytics writes output to Kinesis stream"
+    owned_by: "kinesis_analytics"
+    terraform_resources:
+      - "outputs block with kinesis_streams_output (SQL app)"
+    iam_on_analytics:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  analytics_to_firehose:
+    description: "Kinesis Analytics writes output to Firehose delivery stream"
+    owned_by: "kinesis_analytics"
+    terraform_resources:
+      - "outputs block with kinesis_firehose_output (SQL app)"
+    iam_on_analytics:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  analytics_to_lambda:
+    description: "Kinesis Analytics invokes Lambda as output (SQL apps)"
+    owned_by: "kinesis_analytics"
+    terraform_resources:
+      - "outputs block with lambda_output (SQL app)"
+    iam_on_analytics:
+      - "lambda:InvokeFunction"
+
+  analytics_to_s3:
+    description: "Kinesis Analytics writes to S3 (Flink FileSystem sink or SQL reference data read)"
+    owned_by: "kinesis_analytics"
+    iam_on_analytics:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+
+  analytics_reads_s3_code:
+    description: "Flink application reads JAR/ZIP code from S3"
+    owned_by: "kinesis_analytics"
+    iam_on_analytics:
+      - "s3:GetObject"
+      - "s3:GetObjectVersion"
+    note: "Flink code is stored on S3 and referenced via s3_content_location"
+
+  analytics_reads_msk:
+    description: "Flink application reads from MSK topic via Kafka connector"
+    owned_by: "kinesis_analytics"
+    requires_vpc: true
+    iam_on_analytics:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:ReadData"
+      - "ec2:DescribeVpcs"
+      - "ec2:DescribeSubnets"
+      - "ec2:DescribeSecurityGroups"
+      - "ec2:DescribeNetworkInterfaces"
+      - "ec2:CreateNetworkInterface"
+      - "ec2:CreateNetworkInterfacePermission"
+      - "ec2:DeleteNetworkInterface"
+
+  analytics_writes_msk:
+    description: "Flink application writes to MSK topic via Kafka connector"
+    owned_by: "kinesis_analytics"
+    requires_vpc: true
+    iam_on_analytics:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:WriteData"
+
+  step_functions_manages_analytics:
+    description: "Step Functions starts/stops Kinesis Analytics application"
+    owned_by: "step_functions"
+    iam_on_step_functions:
+      - "kinesisanalytics:StartApplication"
+      - "kinesisanalytics:StopApplication"
+      - "kinesisanalytics:DescribeApplication"
+
+  glue_provides_schema:
+    description: "Glue Data Catalog provides schema for Flink SQL tables"
+    owned_by: "kinesis_analytics"
+    iam_on_analytics:
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+
+# -- 15. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_kinesisanalyticsv2_application"
+      description: "The Kinesis Analytics v2 application"
+      always_created: true
+      key_attributes:
+        - "name"
+        - "runtime_environment"
+        - "service_execution_role"
+        - "application_configuration { sql_application_configuration | flink_application_configuration }"
+        - "cloudwatch_logging_options"
+        - "tags"
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for application logs"
+      always_created: true
+    - resource: "aws_cloudwatch_log_stream"
+      description: "Log stream for application logs"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Execution role (kinesisanalytics.amazonaws.com)"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline policy for input/output access"
+      always_created: true
+
+  conditional:
+    - resource: "aws_kinesisanalyticsv2_application_snapshot"
+      condition: "When snapshots are explicitly managed"
+    - resource: "VPC configuration block"
+      condition: "When application needs VPC access (e.g., MSK, Aurora)"
+
+# -- 16. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  client: "kinesisanalyticsv2"
+
+  application_management:
+    create_application:
+      description: "Create a new Kinesis Analytics v2 application"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        RuntimeEnvironment: {type: string, required: true, description: "SQL-1_0 | FLINK-1_6 through FLINK-1_19"}
+        ServiceExecutionRole: {type: string, required: true}
+        ApplicationConfiguration: {type: object, description: "SQL or Flink config"}
+        CloudWatchLoggingOptions: {type: list}
+        Tags: {type: list}
+      note: "Usually managed via Terraform"
+
+    delete_application:
+      description: "Delete an application"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CreateTimestamp: {type: datetime, required: true}
+
+    describe_application:
+      description: "Get application details including configuration and status"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        IncludeAdditionalDetails: {type: boolean}
+      returns: ["ApplicationDetail.ApplicationConfigurationDescription", "ApplicationDetail.ApplicationStatus", "ApplicationDetail.ApplicationVersionId", "ApplicationDetail.RuntimeEnvironment", "ApplicationDetail.ServiceExecutionRole"]
+
+    list_applications:
+      description: "List all applications in the account"
+      parameters:
+        Limit: {type: integer}
+        NextToken: {type: string}
+      returns: ["ApplicationSummaries[].ApplicationName", "ApplicationSummaries[].ApplicationStatus", "ApplicationSummaries[].RuntimeEnvironment"]
+
+    update_application:
+      description: "Update application code, configuration, or I/O mappings"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CurrentApplicationVersionId: {type: integer, required: true, description: "From describe_application"}
+        ApplicationConfigurationUpdate: {type: object, description: "SQL/Flink config updates"}
+        RunConfigurationUpdate: {type: object}
+        CloudWatchLoggingOptionUpdates: {type: list}
+      note: "SQL apps: must stop before updating. Flink apps: can update in-place with snapshots."
+
+    rollback_application:
+      description: "Roll back a Flink application to the previous running version"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CurrentApplicationVersionId: {type: integer, required: true}
+
+  application_lifecycle:
+    start_application:
+      description: "Start an application"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        RunConfiguration: {type: object, description: "Input starting positions (SQL) or restore config (Flink)"}
+      note: "Application must be in READY state"
+
+    stop_application:
+      description: "Stop a running application"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        Force: {type: boolean, description: "Force stop without snapshot (Flink)"}
+      note: "Flink apps: by default creates a snapshot before stopping"
+
+  io_management:
+    add_application_input:
+      description: "Add a streaming input source (SQL apps only, max 1)"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CurrentApplicationVersionId: {type: integer, required: true}
+        Input: {type: object, required: true, description: "Kinesis stream or Firehose input config"}
+
+    add_application_output:
+      description: "Add an output destination (SQL apps, max 3)"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CurrentApplicationVersionId: {type: integer, required: true}
+        Output: {type: object, required: true, description: "Kinesis stream, Firehose, or Lambda output"}
+
+    add_application_reference_data_source:
+      description: "Add S3-backed reference data (SQL apps, max 1)"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CurrentApplicationVersionId: {type: integer, required: true}
+        ReferenceDataSource: {type: object, required: true}
+
+    delete_application_output:
+      description: "Remove an output destination"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        CurrentApplicationVersionId: {type: integer, required: true}
+        OutputId: {type: string, required: true}
+
+    discover_input_schema:
+      description: "Auto-discover schema from input stream samples"
+      parameters:
+        ServiceExecutionRole: {type: string, required: true}
+        InputStartingPositionConfiguration: {type: object}
+        S3Configuration: {type: object, description: "For S3-based discovery"}
+        InputProcessingConfiguration: {type: object}
+        ResourceARN: {type: string, description: "Kinesis stream or Firehose ARN"}
+      returns: ["InputSchema.RecordFormat", "InputSchema.RecordColumns[]", "ParsedInputRecords[]"]
+
+  snapshot_management:
+    create_application_snapshot:
+      description: "Create a snapshot of Flink application state"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        SnapshotName: {type: string, required: true}
+
+    delete_application_snapshot:
+      description: "Delete an application snapshot"
+      parameters:
+        ApplicationName: {type: string, required: true}
+        SnapshotName: {type: string, required: true}
+        SnapshotCreationTimestamp: {type: datetime, required: true}
+
+    list_application_snapshots:
+      description: "List snapshots for an application"
+      parameters:
+        ApplicationName: {type: string, required: true}
+      returns: ["SnapshotSummaries[].SnapshotName", "SnapshotSummaries[].SnapshotStatus", "SnapshotSummaries[].SnapshotCreationTimestamp"]
+
+  tagging:
+    tag_resource:
+      description: "Add tags to an application"
+      parameters:
+        ResourceARN: {type: string, required: true}
+        Tags: {type: list, required: true, description: "[{'Key': 'k', 'Value': 'v'}]"}
+
+    untag_resource:
+      description: "Remove tags"
+      parameters:
+        ResourceARN: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+
+    list_tags_for_resource:
+      description: "List tags for an application"
+      parameters:
+        ResourceARN: {type: string, required: true}
+      returns: ["Tags[].Key", "Tags[].Value"]
+
+# -- 17. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "ResourceInUseException|application.*RUNNING"
+    category: CONFIG
+    cause: "Cannot update application while it is running"
+    fix_type: stop_then_update
+    resolution: "kda.stop_application(ApplicationName=name) -> wait for READY -> update -> kda.start_application()"
+
+  - pattern: "ResourceNotFoundException.*kinesisanalytics|application.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Kinesis Analytics application does not exist"
+    fix_type: manual
+    resolution: "Verify application name. Check terraform apply completed."
+
+  - pattern: "InvalidArgumentException.*VersionId"
+    category: VERSION_CONFLICT
+    cause: "Application version ID mismatch (concurrent update)"
+    fix_type: retry
+    resolution: "Call describe_application to get current version ID, then retry update."
+
+  - pattern: "CodeValidationException|SQL.*syntax.*error"
+    category: CODE_ERROR
+    cause: "SQL application code has syntax errors"
+    fix_type: code_change
+    resolution: "Fix SQL syntax. Common issues: missing quotes around stream names, invalid column references."
+
+  - pattern: "UnableToDetectSchemaException"
+    category: SCHEMA_ERROR
+    cause: "Cannot discover schema from input stream — no records or invalid format"
+    fix_type: manual
+    resolution: "Ensure input stream has records. Verify JSON/CSV format. Try manual schema definition."
+
+  - pattern: "TooManyTagsException"
+    category: QUOTA
+    cause: "Exceeded maximum number of tags (50)"
+    fix_type: manual
+    resolution: "Remove unused tags before adding new ones."
+
+  - pattern: "LimitExceededException.*applications"
+    category: QUOTA
+    cause: "Exceeded max applications per region (default 50)"
+    fix_type: manual
+    resolution: "Request limit increase via AWS Service Quotas."
+
+  - pattern: "AccessDeniedException.*kinesisanalytics"
+    category: PERMISSION
+    cause: "Application execution role lacks required permissions"
+    fix_type: update_iam
+    resolution: "Add missing permissions for input source and output destination to the execution role."
+
+  - pattern: "InvalidApplicationConfigurationException"
+    category: CONFIG
+    cause: "Invalid application configuration (e.g., wrong Flink version, missing VPC config)"
+    fix_type: update_config
+    resolution: "Check runtime_environment matches code version. Verify VPC config for MSK/Aurora access."
+
+# -- 18. Tags ----------------------------------------------------------------
+tags:
+  max_per_application: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 19. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: kinesisanalyticsv2
+  description: >
+    SQL application code updated via update_application() with
+    SqlApplicationConfigurationUpdate. Flink app code (JAR/ZIP) is uploaded
+    to S3 then referenced via update_application() with CodeContentUpdate.
+    Must stop SQL application before updating. Flink apps support in-place
+    updates with automatic snapshots.
+    Key workflow: stop_application -> update_application -> start_application
+  config_update:
+    client: kinesisanalyticsv2
+    operation: update_application
+    id_param: ApplicationName
+    note: "Get CurrentApplicationVersionId first from describe_application()"
+  discovery_ops:
+    - op: describe_application
+      id_param: ApplicationName
+      returns: ["ApplicationDetail.ApplicationConfigurationDescription", "ApplicationDetail.ApplicationStatus", "ApplicationDetail.ApplicationVersionId", "ApplicationDetail.RuntimeEnvironment"]
+    - op: list_applications
+      returns: ["ApplicationSummaries[].ApplicationName", "ApplicationSummaries[].ApplicationStatus"]
+    - op: list_application_snapshots
+      id_param: ApplicationName
+      returns: ["SnapshotSummaries[].SnapshotName", "SnapshotSummaries[].SnapshotStatus"]

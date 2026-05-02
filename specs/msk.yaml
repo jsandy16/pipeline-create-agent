@@ -1,0 +1,53 @@
+service_type: msk
+is_principal: false
+terraform_resource: aws_msk_cluster
+description: "Amazon Managed Streaming for Apache Kafka (MSK) cluster — fully managed Kafka service"
+
+defaults:
+  kafka_version: "3.5.1"
+  number_of_broker_nodes: 2        # minimum for multi-AZ; NOT free tier (~$0.11/hr/broker)
+  broker_instance_type: "kafka.t3.small"  # smallest available MSK broker
+  volume_size: 1                   # minimum EBS volume (GB)
+  enhanced_monitoring: "DEFAULT"
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers:
+  - lambda
+  - ec2
+  - emr
+
+code_update:
+  method: api_config
+  boto3_client: kafka
+  description: >
+    MSK has no user code — Kafka topics managed via Kafka AdminClient library (not boto3).
+    Cluster config updated via update_cluster_configuration(). Broker storage via
+    update_broker_storage(). Bootstrap brokers from get_bootstrap_brokers().
+  config_update:
+    client: kafka
+    operation: update_cluster_configuration
+    id_param: ClusterArn
+    note: "ClusterArn from list_clusters_v2() filtering by cluster name"
+  discovery_ops:
+    - op: list_clusters_v2
+      returns: ["ClusterInfoList[].ClusterArn", "ClusterInfoList[].ClusterName", "ClusterInfoList[].ClusterType", "ClusterInfoList[].State"]
+    - op: describe_cluster_v2
+      id_param: ClusterArn
+      returns: ["ClusterInfo.ClusterArn", "ClusterInfo.State", "ClusterInfo.BrokerNodeGroupInfo.InstanceType"]
+    - op: get_bootstrap_brokers
+      id_param: ClusterArn
+      returns: ["BootstrapBrokerString", "BootstrapBrokerStringTls", "BootstrapBrokerStringSaslScram"]
+runtime_diagnostics:
+  - pattern: "bootstrap.*not reachable|Connection.*refused.*9092"
+    category: NETWORK
+    cause: "MSK cluster not reachable — check VPC security group allows port 9092/9094"
+    fix_type: update_sg
+    resolution: "Add inbound rule to MSK security group: TCP 9092-9094 from Lambda/EC2 security group"

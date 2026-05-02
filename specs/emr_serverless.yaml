@@ -1,0 +1,238 @@
+service_type: emr_serverless
+is_principal: true
+terraform_resource: aws_emrserverless_application
+description: "Amazon EMR Serverless — run Spark/Hive jobs without managing clusters; pay per vCPU-second"
+
+defaults:
+  release_label: "emr-6.15.0"
+  type: "SPARK"                      # SPARK or HIVE
+  architecture: "X86_64"             # X86_64 or ARM64
+  # Pre-initialized capacity (optional — set to 0 to disable and reduce idle cost)
+  initial_capacity_driver_cpu: "1vCPU"
+  initial_capacity_driver_memory: "2gb"
+  initial_capacity_executor_cpu: "1vCPU"
+  initial_capacity_executor_memory: "2gb"
+  initial_capacity_executor_count: 1
+  # Maximum capacity caps — keep low to control cost
+  max_cpu: "4vCPU"
+  max_memory: "8gb"
+  max_disk: "40gb"
+  idle_timeout_minutes: 15           # auto-stop idle application
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "logs:DescribeLogGroups"
+    - "logs:DescribeLogStreams"
+    - "emr-serverless:StartApplication"
+    - "emr-serverless:StopApplication"
+    - "emr-serverless:StartJobRun"
+    - "emr-serverless:GetJobRun"
+    - "emr-serverless:ListJobRuns"
+    - "emr-serverless:CancelJobRun"
+    - "emr-serverless:GetApplication"
+  as_target_of:
+    stepfunctions:
+      - "emr-serverless:StartJobRun"
+      - "emr-serverless:GetJobRun"
+    lambda:
+      - "emr-serverless:StartJobRun"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+    glue:
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+      - "glue:CreatePartition"
+      - "glue:BatchCreatePartition"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:BatchWriteItem"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+vpc_triggers:
+  - aurora
+  - msk
+  - redshift
+
+# ---------------------------------------------------------------------------
+# Invocation requirements — what ANY CALLER must provide to invoke this service.
+# The caller (Lambda, StepFunctions, etc.) must have these env vars and IAM.
+# ---------------------------------------------------------------------------
+invocation:
+  description: >
+    start_job_run() requires THREE things that are commonly missed:
+    (1) applicationId — the EMR Serverless application ID
+    (2) executionRoleArn — the IAM role the job run assumes (min 20 chars; empty = ValidationException before AWS)
+    (3) configurationOverrides.monitoringConfiguration.cloudWatchLoggingConfiguration.enabled = True
+        (missing = ValidationException "Missing required parameter")
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_APPLICATION_ID"
+      ref: "aws_emrserverless_application.{self_label}.id"
+      boto3_param: "applicationId"
+      description: "The EMR Serverless application ID — passed as applicationId in start_job_run()"
+    - pattern: "{SELF_UPPER}_EXECUTION_ROLE_ARN"
+      ref: "aws_iam_role.{self_label}_role.arn"
+      boto3_param: "executionRoleArn"
+      description: "IAM role the job runs assume to access S3/Glue/etc. MUST be a valid ARN (≥20 chars)"
+  caller_iam:
+    - "emr-serverless:StartJobRun"
+    - "emr-serverless:GetJobRun"
+    - "emr-serverless:CancelJobRun"
+    - "emr-serverless:GetApplication"
+    - "iam:PassRole"               # MANDATORY — caller passes executionRoleArn to EMR
+  passrole_required: true
+  passrole_resource: "aws_iam_role.{self_label}_role.arn"
+  required_static_params:
+    - path: "configurationOverrides.monitoringConfiguration.cloudWatchLoggingConfiguration.enabled"
+      value: true
+      description: "Must always be True — AWS rejects start_job_run without it"
+    - path: "configurationOverrides.monitoringConfiguration.cloudWatchLoggingConfiguration.logGroupName"
+      value: "/aws/emr-serverless/{resource_name}"
+      description: "CloudWatch log group name — created by Terraform as /aws/emr-serverless/<resource_name>"
+  minimal_start_job_run_example: |
+    emr_s = boto3.client('emr-serverless')
+    emr_s.start_job_run(
+        applicationId=os.environ['{SELF_UPPER}_APPLICATION_ID'],
+        executionRoleArn=os.environ['{SELF_UPPER}_EXECUTION_ROLE_ARN'],
+        jobDriver={
+            'sparkSubmit': {
+                'entryPoint': 's3://your-bucket/scripts/job.py',
+                'entryPointArguments': [],
+                'sparkSubmitParameters': '--conf spark.executor.cores=1'
+            }
+        },
+        configurationOverrides={
+            'monitoringConfiguration': {
+                'cloudWatchLoggingConfiguration': {
+                    'enabled': True,
+                    'logGroupName': '/aws/emr-serverless/{resource_name}'
+                }
+            }
+        }
+    )
+
+# ---------------------------------------------------------------------------
+# How to update this service's code/configuration after deployment.
+# ---------------------------------------------------------------------------
+code_update:
+  method: s3_script
+  boto3_client: emr-serverless
+  description: >
+    PySpark/Hive scripts are stored in S3 at the job's sparkSubmit.entryPoint path.
+    Update the script via s3.put_object(). Application config (capacity, auto-stop)
+    via update_application(). Cannot change application type (SPARK/HIVE) after creation.
+
+  config_update:
+    client: emr-serverless
+    operation: update_application
+    id_param: applicationId
+    note: "applicationId found via list_applications(), filter where application['name'] matches resource_name"
+    updatable: [initialCapacity, maximumCapacity, autoStartConfiguration, autoStopConfiguration, networkConfiguration]
+
+  code_update_steps:
+    - "emr_s = boto3.client('emr-serverless', region_name=region)"
+    - "apps = emr_s.list_applications()['applications']"
+    - "app = next(a for a in apps if a['name'] == resource_name)"
+    - "runs = emr_s.list_job_runs(applicationId=app['applicationId'])['jobRuns']"
+    - "run = emr_s.get_job_run(applicationId=app['applicationId'], jobRunId=runs[0]['jobRunId'])"
+    - "entry = run['jobRun']['jobDriver']['sparkSubmit']['entryPoint']  # s3://bucket/key"
+    - "bucket, key = entry[5:].split('/', 1)"
+    - "script = s3.get_object(Bucket=bucket, Key=key)['Body'].read().decode()"
+    - "modified = script.replace('<old>', '<new>')"
+    - "s3.put_object(Bucket=bucket, Key=key, Body=modified.encode())"
+
+  discovery_ops:
+    - op: list_applications
+      returns: ["applications[].applicationId", "applications[].name", "applications[].state", "applications[].type"]
+    - op: get_application
+      id_param: applicationId
+      returns: ["application.state", "application.maximumCapacity", "application.autoStartConfiguration", "application.autoStopConfiguration"]
+    - op: list_job_runs
+      id_param: applicationId
+      returns: ["jobRuns[].jobRunId", "jobRuns[].state", "jobRuns[].jobDriver", "jobRuns[].createdAt"]
+    - op: get_job_run
+      id_params: [applicationId, jobRunId]
+      returns: ["jobRun.jobDriver.sparkSubmit.entryPoint", "jobRun.state", "jobRun.totalExecutionDurationSeconds", "jobRun.stateDetails"]
+
+# ---------------------------------------------------------------------------
+# Common runtime errors with causes and fixes.
+# ---------------------------------------------------------------------------
+runtime_diagnostics:
+  - pattern: "Invalid length for parameter executionRoleArn, value: 0"
+    category: CONFIG
+    cause: >
+      The calling Lambda/StepFunctions has an empty executionRoleArn — the env var
+      {SELF_UPPER}_EXECUTION_ROLE_ARN was not set because it was missing from
+      specs/lambda.yaml env_vars.as_source_to.emr_serverless before this fix.
+    fix_type: update_caller_env_vars
+    resolution: >
+      1. Get the role ARN: iam.get_role(RoleName=resource_name+'-role')['Role']['Arn']
+      2. Get the application ID: emr_s.list_applications() filter by name == resource_name
+      3. Get caller Lambda name from pipeline topology
+      4. Set env vars on the caller:
+         current = lam.get_function_configuration(FunctionName=caller_name).get('Environment',{}).get('Variables',{})
+         lam.update_function_configuration(FunctionName=caller_name,
+           Environment={'Variables': {**current, '{SELF_UPPER}_EXECUTION_ROLE_ARN': role_arn, '{SELF_UPPER}_APPLICATION_ID': app_id}})
+
+  - pattern: "Missing required parameter.*cloudWatchLoggingConfiguration.*enabled"
+    category: CONFIG
+    cause: >
+      The start_job_run() call is missing configurationOverrides.monitoringConfiguration.
+      cloudWatchLoggingConfiguration.enabled = True. AWS requires this parameter.
+    fix_type: update_caller_code
+    resolution: >
+      Update the calling Lambda's code to include:
+      configurationOverrides={'monitoringConfiguration': {'cloudWatchLoggingConfiguration': {'enabled': True, 'logGroupName': '/aws/emr-serverless/APPNAME'}}}
+
+  - pattern: "SubscriptionRequiredException|needs a subscription for the service"
+    category: CONFIG
+    cause: "EMR Serverless service is not enabled in this AWS account/region"
+    fix_type: manual
+    resolution: "Go to AWS Console → EMR → EMR Serverless → Get started (one-time per account/region)"
+
+  - pattern: "Application.*not in state STARTED|application.*STOPPED|application.*STOPPING"
+    category: CONFIG
+    cause: "EMR Serverless application is not in STARTED state; auto_start_configuration.enabled should be true"
+    fix_type: update_config
+    resolution: "emr_s.update_application(applicationId=app_id, autoStartConfiguration={'enabled': True})"

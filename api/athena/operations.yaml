@@ -1,0 +1,59 @@
+service: athena
+boto3_client: athena
+description: "Amazon Athena — serverless SQL query service for S3 data"
+
+operations:
+  start_query_execution:
+    description: "Run a SQL query against data in S3"
+    parameters:
+      QueryString: {type: string, required: true}
+      QueryExecutionContext: {type: object, description: "Database name"}
+      ResultConfiguration: {type: object, required: true, description: "OutputLocation (S3 path)"}
+      WorkGroup: {type: string}
+
+  get_query_execution:
+    description: "Get the status and details of a query execution"
+    parameters:
+      QueryExecutionId: {type: string, required: true}
+
+  get_query_results:
+    description: "Get the results of a completed query"
+    parameters:
+      QueryExecutionId: {type: string, required: true}
+      MaxResults: {type: integer}
+
+  create_named_query:
+    description: "Save a named query (saved SQL)"
+    parameters:
+      Name: {type: string, required: true}
+      Database: {type: string, required: true}
+      QueryString: {type: string, required: true}
+      Description: {type: string}
+      WorkGroup: {type: string}
+
+  create_work_group:
+    description: "Create a workgroup with query settings and cost controls"
+    parameters:
+      Name: {type: string, required: true}
+      Configuration: {type: object, description: "ResultConfiguration, BytesScannedCutoff"}
+      Description: {type: string}
+      Tags: {type: list}
+
+  create_data_catalog:
+    description: "Register an external data catalog (Hive metastore, Lambda)"
+    parameters:
+      Name: {type: string, required: true}
+      Type: {type: string, required: true, description: "LAMBDA, GLUE, or HIVE"}
+      Parameters: {type: object}
+      Description: {type: string}
+
+  list_named_queries:
+    description: "List saved queries"
+    parameters:
+      WorkGroup: {type: string}
+
+  list_query_executions:
+    description: "List recent query executions"
+    parameters:
+      WorkGroup: {type: string}
+      MaxResults: {type: integer}

@@ -1,0 +1,54 @@
+service: glue_databrew
+boto3_client: databrew
+description: "AWS Glue DataBrew — visual data preparation and profiling"
+
+operations:
+  create_dataset:
+    description: "Create a dataset (reference to S3 data)"
+    parameters:
+      Name: {type: string, required: true}
+      Input: {type: object, required: true, description: "S3InputDefinition or DatabaseInputDefinition"}
+      FormatOptions: {type: object}
+
+  create_recipe:
+    description: "Create a recipe (transformation steps)"
+    parameters:
+      Name: {type: string, required: true}
+      Steps: {type: list, required: true, description: "List of recipe step actions"}
+
+  create_recipe_job:
+    description: "Create a job that runs a recipe on a dataset"
+    parameters:
+      Name: {type: string, required: true}
+      DatasetName: {type: string, required: true}
+      RecipeReference: {type: object, required: true}
+      RoleArn: {type: string, required: true}
+      Outputs: {type: list, required: true}
+
+  create_profile_job:
+    description: "Create a data profiling job"
+    parameters:
+      Name: {type: string, required: true}
+      DatasetName: {type: string, required: true}
+      RoleArn: {type: string, required: true}
+      OutputLocation: {type: object, required: true}
+
+  start_job_run:
+    description: "Start a DataBrew job"
+    parameters:
+      Name: {type: string, required: true}
+
+  publish_recipe:
+    description: "Publish a recipe version"
+    parameters:
+      Name: {type: string, required: true}
+
+  list_datasets:
+    description: "List available datasets"
+    parameters:
+      MaxResults: {type: integer}
+
+  list_recipes:
+    description: "List available recipes"
+    parameters:
+      MaxResults: {type: integer}

@@ -1,0 +1,766 @@
+# ============================================================================
+# SQS Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL SQS knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/sqs.yaml with exhaustive
+# coverage of SQS capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - queue naming rules & constraints
+#   3. defaults          - Terraform attribute defaults (free-tier safe)
+#   4. quotas            - AWS service limits
+#   5. queue_types       - Standard vs FIFO queues
+#   6. dead_letter_queues - DLQ configuration and redrive
+#   7. message_attributes - message metadata system
+#   8. encryption        - SSE-SQS and SSE-KMS
+#   9. access_policies   - queue policies & permissions
+#  10. long_polling      - receive wait time optimization
+#  11. delay_queues      - message delay configuration
+#  12. visibility_timeout - message processing window
+#  13. iam               - complete action catalog, integration graph rules
+#  14. env_vars          - auto-wired environment variables
+#  15. vpc_triggers      - VPC placement rules
+#  16. integrations      - wiring ownership with all service types
+#  17. terraform_resources - all TF resource types
+#  18. boto3_operations  - complete API reference
+#  19. runtime_diagnostics - error patterns & auto-fix rules
+#  20. tags              - tagging constraints
+#  21. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -----------------------------------------------------------------
+identity:
+  service_type: sqs
+  aws_service_name: "Amazon Simple Queue Service"
+  is_principal: false            # SQS has no execution role
+  terraform_resource: aws_sqs_queue
+  description: >
+    Fully managed message queuing service for decoupling and scaling
+    microservices, distributed systems, and serverless applications.
+    Supports Standard (best-effort ordering, at-least-once delivery) and
+    FIFO (exactly-once processing, strict ordering) queue types.
+  free_tier:
+    status: always_free
+    details: "1 million requests/month (Standard and FIFO combined)"
+  pricing_model: pay_per_use     # per-request (64 KB chunks)
+
+# -- 2. Naming -------------------------------------------------------------------
+naming:
+  standard_queue:
+    resource_name_limit: 80      # max characters for queue name
+    resource_name_min: 1
+    valid_characters: "a-zA-Z0-9-_"  # alphanumeric, hyphens, underscores
+    rules:
+      - "Must be unique within an AWS account and region"
+      - "1-80 characters"
+      - "Alphanumeric, hyphens, underscores only"
+  fifo_queue:
+    resource_name_limit: 80      # including .fifo suffix
+    suffix: ".fifo"              # MANDATORY suffix for FIFO queues
+    rules:
+      - "Must end with .fifo suffix"
+      - "Name before .fifo: 1-75 characters"
+      - "Same character restrictions as Standard"
+
+# -- 3. Defaults (free-tier safe) ------------------------------------------------
+defaults:
+  visibility_timeout_seconds: 30     # seconds (0-43200)
+  message_retention_seconds: 86400   # 1 day (60-1209600 = 60s to 14 days)
+  # Optional features (not set by default):
+  # delay_seconds: 0                 # (0-900)
+  # max_message_size: 262144         # bytes (1024-262144 = 1KB-256KB)
+  # receive_wait_time_seconds: 0     # (0-20, >0 enables long polling)
+  # fifo_queue: false
+  # content_based_deduplication: false  # FIFO only
+  # deduplication_scope: "queue"     # FIFO only: "queue" or "messageGroup"
+  # fifo_throughput_limit: "perQueue" # FIFO only: "perQueue" or "perMessageGroupId"
+  # sqs_managed_sse_enabled: true    # SSE-SQS (free, enabled by default since 2023)
+  # kms_master_key_id: null          # SSE-KMS (costs money)
+  # redrive_policy: null             # DLQ config
+
+# -- 4. Quotas -------------------------------------------------------------------
+quotas:
+  # Queue limits
+  max_queues_per_account: 1000000    # per region, adjustable
+  queue_name_max_length: 80          # characters
+
+  # Message limits
+  max_message_size: 262144           # bytes = 256 KB
+  min_message_size: 1                # byte
+  max_message_attributes: 10         # per message
+  max_message_attribute_name_length: 256  # characters
+  message_attribute_data_types: ["String", "Number", "Binary"]
+  max_metadata_size: "total message size includes attributes"
+
+  # Retention
+  min_retention: 60                  # seconds (1 minute)
+  max_retention: 1209600             # seconds (14 days)
+  default_retention: 345600          # seconds (4 days) - AWS default
+
+  # Visibility timeout
+  min_visibility_timeout: 0          # seconds
+  max_visibility_timeout: 43200      # seconds (12 hours)
+
+  # Delay
+  min_delay_seconds: 0
+  max_delay_seconds: 900             # seconds (15 minutes)
+
+  # Long polling
+  max_receive_wait_time: 20          # seconds
+
+  # Batch operations
+  max_batch_size: 10                 # messages per SendMessageBatch/DeleteMessageBatch
+  max_receive_messages: 10           # messages per ReceiveMessage call
+
+  # In-flight messages
+  inflight_standard: 120000          # max messages received but not deleted (per queue)
+  inflight_fifo: 20000               # max messages received but not deleted (per queue)
+
+  # FIFO specific
+  fifo_messages_per_second: 300      # per API action (without batching)
+  fifo_messages_per_second_high: 3000  # with batching (10 per batch * 300)
+  fifo_high_throughput_per_second: 30000  # per message group ID (high throughput mode)
+  fifo_message_groups: "unlimited"
+  fifo_deduplication_window: 300     # seconds (5 minutes)
+
+  # Tags
+  max_tags_per_queue: 50
+  tag_key_max_length: 128
+  tag_value_max_length: 256
+
+  # Request size
+  max_request_payload: "256 KB per action (batch entries combined)"
+
+# -- 5. Queue Types --------------------------------------------------------------
+queue_types:
+  standard:
+    description: >
+      Default queue type. Maximum throughput, best-effort ordering,
+      at-least-once delivery. Messages may be delivered more than once
+      and in a different order than sent.
+    terraform_attribute: "fifo_queue = false"  # default
+    ordering: "best-effort"
+    delivery: "at-least-once"
+    throughput: "nearly unlimited"
+    deduplication: "none (application must handle)"
+    use_cases:
+      - "Decoupling microservices"
+      - "Buffering and batch processing"
+      - "Fan-out with SNS"
+      - "S3 event notifications"
+
+  fifo:
+    description: >
+      First-In-First-Out ordering guaranteed within message groups.
+      Exactly-once processing via deduplication. Lower throughput than Standard.
+    terraform_attribute: "fifo_queue = true"
+    ordering: "strict FIFO within message group"
+    delivery: "exactly-once"
+    throughput: "300 msg/s (3,000 with batching, 30,000 with high throughput)"
+    deduplication:
+      content_based: "SHA-256 hash of message body"
+      explicit: "MessageDeduplicationId parameter"
+    terraform_attributes:
+      fifo_queue: true
+      content_based_deduplication: "true/false"
+      deduplication_scope: "queue or messageGroup"
+      fifo_throughput_limit: "perQueue or perMessageGroupId"
+    constraints:
+      - "Queue name MUST end with .fifo"
+      - "MessageGroupId is REQUIRED for every message"
+      - "S3 event notifications do NOT support FIFO queues"
+      - "SNS FIFO topics can only send to SQS FIFO queues"
+    use_cases:
+      - "Order processing where sequence matters"
+      - "Financial transactions"
+      - "Command/event ordering"
+
+# -- 6. Dead Letter Queues -------------------------------------------------------
+dead_letter_queues:
+  description: >
+    A DLQ receives messages that cannot be processed successfully after
+    a configured number of attempts. The DLQ must be the same type as the
+    source queue (Standard DLQ for Standard source, FIFO DLQ for FIFO source).
+  terraform_attribute: "redrive_policy"
+  terraform_format: |
+    redrive_policy = jsonencode({
+      deadLetterTargetArn = aws_sqs_queue.dlq.arn
+      maxReceiveCount     = 3
+    })
+  parameters:
+    deadLetterTargetArn: "ARN of the DLQ"
+    maxReceiveCount: "Number of receive attempts before moving to DLQ (1-1000)"
+  constraints:
+    - "DLQ must be same type as source (Standard or FIFO)"
+    - "DLQ must be in same AWS account and region"
+    - "maxReceiveCount minimum is 1"
+    - "DLQ retention should be >= source queue retention"
+  redrive_allow_policy:
+    description: "Controls which source queues can use this queue as their DLQ"
+    terraform_resource: "aws_sqs_queue_redrive_allow_policy"
+    values:
+      allowAll: "Any queue can use this as DLQ"
+      denyAll: "No queue can use this as DLQ"
+      byQueue: "Only specified queue ARNs can use this as DLQ"
+  message_move_task:
+    description: "Move messages from DLQ back to source queue for reprocessing"
+    boto3_operation: "start_message_move_task"
+    iam_actions:
+      - "sqs:StartMessageMoveTask"
+      - "sqs:CancelMessageMoveTask"
+      - "sqs:ListMessageMoveTasks"
+
+# -- 7. Message Attributes -------------------------------------------------------
+message_attributes:
+  description: >
+    Structured metadata attached to messages. Up to 10 attributes per message.
+    Used for message filtering (with SNS subscriptions) and routing logic.
+  max_per_message: 10
+  data_types:
+    - "String"
+    - "Number"            # sent as string, interpreted as number
+    - "Binary"            # base64-encoded binary data
+    - "String.custom"     # custom type suffix
+    - "Number.custom"
+    - "Binary.custom"
+  size_impact: "Attributes count toward the 256 KB message size limit"
+  system_attributes:
+    - "ApproximateReceiveCount"
+    - "ApproximateFirstReceiveTimestamp"
+    - "MessageDeduplicationId"       # FIFO only
+    - "MessageGroupId"               # FIFO only
+    - "SenderId"
+    - "SentTimestamp"
+    - "SequenceNumber"               # FIFO only
+    - "AWSTraceHeader"               # X-Ray tracing
+    - "DeadLetterQueueSourceArn"     # set when moved to DLQ
+
+# -- 8. Encryption ---------------------------------------------------------------
+encryption:
+  types:
+    SSE_SQS:
+      description: "SQS-managed encryption keys (AES-256). Free. Default since 2023."
+      terraform_attribute: "sqs_managed_sse_enabled"
+      terraform_value: true
+      cost: free
+      kms_required: false
+    SSE_KMS:
+      description: "AWS KMS-managed encryption. Auditable via CloudTrail."
+      terraform_attribute: "kms_master_key_id"
+      terraform_value: "alias/aws/sqs or custom key ARN"
+      cost: "KMS API charges"
+      kms_required: true
+      kms_data_key_reuse_period:
+        description: "Period (seconds) SQS can reuse a data key before calling KMS again"
+        terraform_attribute: "kms_data_key_reuse_period_seconds"
+        default: 300           # seconds (5 minutes)
+        range: "60-86400"      # 1 minute to 24 hours
+      required_kms_permissions:
+        producer: ["kms:GenerateDataKey", "kms:Decrypt"]
+        consumer: ["kms:Decrypt"]
+      cross_account_note: >
+        Cross-account access with SSE-KMS requires the KMS key policy to
+        allow the producing/consuming account's IAM principal.
+
+# -- 9. Access Policies ----------------------------------------------------------
+access_policies:
+  queue_policy:
+    terraform_resource: "aws_sqs_queue_policy"
+    description: >
+      Resource-based policy on the queue. Used to allow other AWS services
+      (S3, SNS, EventBridge) to send messages to the queue.
+    max_size: "8192 bytes"       # 8 KB
+    format: "JSON IAM policy"
+    common_patterns:
+      s3_notification: |
+        Allow s3.amazonaws.com with ArnEquals condition on aws:SourceArn
+      sns_subscription: |
+        Allow sns.amazonaws.com with ArnEquals condition on aws:SourceArn
+      eventbridge_target: |
+        Allow events.amazonaws.com (no source ARN condition needed)
+      cross_account: |
+        Allow specific Principal ARN from another account
+    important_constraint: >
+      AWS allows exactly ONE aws_sqs_queue_policy per queue. If S3 AND SNS
+      AND EventBridge all need to send to the same queue, consolidate into
+      a SINGLE policy with multiple statements. The SQS renderer handles this.
+
+# -- 10. Long Polling -------------------------------------------------------------
+long_polling:
+  description: >
+    Reduces API calls and cost by waiting up to 20 seconds for messages to
+    arrive before returning an empty response. Eliminates empty responses
+    when the queue is temporarily empty.
+  terraform_attribute: "receive_wait_time_seconds"
+  range: "0-20 seconds"
+  default: 0                     # short polling (returns immediately)
+  recommended: 20                # maximum long polling for cost savings
+  cost_impact: "Reduces number of ReceiveMessage API calls significantly"
+  note: >
+    Long polling queries ALL SQS servers, reducing false-empty responses.
+    Short polling queries a subset of servers, which may return empty even
+    when messages exist.
+
+# -- 11. Delay Queues -------------------------------------------------------------
+delay_queues:
+  description: >
+    Postpone delivery of all messages to the queue for a specified number
+    of seconds. Messages are invisible to consumers during the delay period.
+  terraform_attribute: "delay_seconds"
+  range: "0-900 seconds (15 minutes)"
+  default: 0
+  per_message_delay:
+    description: "Override queue-level delay for individual messages"
+    parameter: "DelaySeconds on SendMessage"
+    note: "Standard queues only. FIFO queues do NOT support per-message delay."
+
+# -- 12. Visibility Timeout -------------------------------------------------------
+visibility_timeout:
+  description: >
+    After a consumer receives a message, SQS hides it from other consumers
+    for this duration. If the consumer doesn't delete the message within the
+    timeout, it becomes visible again (redelivered to another consumer).
+  terraform_attribute: "visibility_timeout_seconds"
+  range: "0-43200 seconds (12 hours)"
+  default: 30
+  best_practice: >
+    Set visibility timeout to at least 6x the function timeout when using
+    Lambda event source mapping. This prevents duplicate processing when
+    Lambda retries after a timeout.
+  change_per_message:
+    description: "Extend or shorten timeout for a specific message"
+    boto3_operation: "change_message_visibility"
+
+# -- 13. IAM --------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    queue: "arn:aws:sqs:REGION:ACCOUNT:QUEUE-NAME"
+
+  # SQS is not a principal (no execution role), so "always" is empty
+  always: []
+
+  # Complete action catalog
+  actions:
+    message_operations:
+      - "sqs:SendMessage"                  # send a message (also covers SendMessageBatch)
+      - "sqs:ReceiveMessage"               # receive up to 10 messages
+      - "sqs:DeleteMessage"                # delete a processed message (also covers DeleteMessageBatch)
+      - "sqs:ChangeMessageVisibility"      # extend/shorten visibility (also covers batch)
+      - "sqs:PurgeQueue"                   # delete all messages in queue
+    queue_management:
+      - "sqs:CreateQueue"                  # create a new queue
+      - "sqs:DeleteQueue"                  # delete a queue
+      - "sqs:GetQueueUrl"                  # get queue URL from name
+      - "sqs:GetQueueAttributes"           # get queue attributes/metrics
+      - "sqs:SetQueueAttributes"           # set queue attributes
+      - "sqs:ListQueues"                   # list queues in account
+      - "sqs:ListDeadLetterSourceQueues"   # list queues using this as DLQ
+    permissions:
+      - "sqs:AddPermission"                # add permission to queue policy
+      - "sqs:RemovePermission"             # remove permission from queue policy
+    tagging:
+      - "sqs:TagQueue"                     # add tags
+      - "sqs:UntagQueue"                   # remove tags
+      - "sqs:ListQueueTags"               # list tags
+    message_move:
+      - "sqs:StartMessageMoveTask"         # move messages from DLQ
+      - "sqs:CancelMessageMoveTask"        # cancel move task
+      - "sqs:ListMessageMoveTasks"         # list move tasks
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}    # SQS is passive -- no IAM actions needed when receiving
+
+  as_source_to: {}    # SQS is passive -- callers need their own permissions
+
+  # Common permission sets for services that interact with SQS
+  common_producer_permissions:
+    - "sqs:SendMessage"
+    - "sqs:GetQueueUrl"
+  common_consumer_permissions:
+    - "sqs:ReceiveMessage"
+    - "sqs:DeleteMessage"
+    - "sqs:GetQueueAttributes"
+  common_full_permissions:
+    - "sqs:SendMessage"
+    - "sqs:ReceiveMessage"
+    - "sqs:DeleteMessage"
+    - "sqs:GetQueueUrl"
+    - "sqs:GetQueueAttributes"
+    - "sqs:ChangeMessageVisibility"
+
+  # SQS condition keys (for queue policies)
+  condition_keys:
+    - "aws:SourceArn"                      # ARN of calling service
+    - "aws:SourceAccount"                  # account of calling service
+    - "aws:SourceIp"                       # caller IP
+    - "aws:SecureTransport"                # require HTTPS
+
+# -- 14. Environment Variables ---------------------------------------------------
+env_vars:
+  as_target_of: {}  # SQS is passive; no env vars auto-wired for sources
+  as_source_to: {}  # SQS is passive; no env vars auto-wired for targets
+
+# -- 15. VPC Triggers -----------------------------------------------------------
+vpc_triggers: []     # SQS does not need VPC placement (public endpoint)
+
+# -- 16. Integration Wiring Ownership -------------------------------------------
+integrations:
+  # SQS as TARGET (receives messages)
+  s3_to_sqs:
+    description: "S3 event notification sends to SQS queue"
+    owned_by: "s3"
+    s3_side:
+      - "aws_s3_bucket_notification (queue block)"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows s3.amazonaws.com with ArnEquals condition)"
+    events_default: "s3:ObjectCreated:*"
+    constraint: "Standard queues only - FIFO queues NOT supported for S3 notifications"
+
+  sns_to_sqs:
+    description: "SNS subscription delivers messages to SQS queue"
+    owned_by: "sns"
+    sns_side:
+      - "aws_sns_topic_subscription (protocol: sqs, endpoint: queue ARN)"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows sns.amazonaws.com with ArnEquals condition)"
+
+  eventbridge_to_sqs:
+    description: "EventBridge rule targets SQS queue"
+    owned_by: "cloudwatch/eventbridge"
+    eventbridge_side:
+      - "aws_cloudwatch_event_target"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows events.amazonaws.com)"
+
+  cloudwatch_to_sqs:
+    description: "CloudWatch Events rule targets SQS queue"
+    owned_by: "cloudwatch"
+    cloudwatch_side:
+      - "aws_cloudwatch_event_target"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows events.amazonaws.com)"
+
+  lambda_to_sqs:
+    description: "Lambda sends messages to SQS"
+    owned_by: "lambda"
+    iam_on_caller: ["sqs:SendMessage"]
+    env_var_on_caller: "{PEER_UPPER}_QUEUE_URL"
+
+  stepfunctions_to_sqs:
+    description: "Step Functions sends messages to SQS"
+    owned_by: "stepfunctions"
+    iam_on_caller: ["sqs:SendMessage"]
+
+  # SQS as SOURCE (triggers processing)
+  sqs_to_lambda:
+    description: "SQS triggers Lambda via event source mapping"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping"
+    config:
+      batch_size: 10
+      enabled: true
+    iam_on_lambda:
+      - "sqs:ReceiveMessage"
+      - "sqs:DeleteMessage"
+      - "sqs:GetQueueAttributes"
+    note: "Lambda renderer creates the event source mapping"
+
+  sqs_to_stepfunctions:
+    description: "SQS triggers Step Functions execution"
+    owned_by: "stepfunctions"
+    note: "Step Functions can poll SQS via EventBridge Pipes or direct integration"
+
+  # SQS as intermediary (other services produce, Lambda consumes)
+  kinesis_firehose_to_sqs:
+    description: "Firehose backup/error destination to SQS"
+    owned_by: "kinesis_firehose"
+    note: "Firehose error output can be configured to send to SQS"
+
+  glue_to_sqs:
+    description: "Glue job sends messages to SQS after processing"
+    owned_by: "glue"
+    iam_on_caller: ["sqs:SendMessage"]
+
+  emr_to_sqs:
+    description: "EMR job sends results/notifications to SQS"
+    owned_by: "emr"
+    iam_on_caller: ["sqs:SendMessage"]
+
+  emr_serverless_to_sqs:
+    description: "EMR Serverless job sends results/notifications to SQS"
+    owned_by: "emr_serverless"
+    iam_on_caller: ["sqs:SendMessage"]
+
+# -- 17. Terraform Resources ----------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_sqs_queue"
+      description: "The SQS queue itself"
+      always_created: true
+
+  conditional:
+    - resource: "aws_sqs_queue_policy"
+      condition: "When S3, SNS, or EventBridge/CloudWatch sends to this queue"
+      suffix: "_policy"
+      important: >
+        Only ONE queue policy per queue. SQS renderer consolidates all
+        source principals into a single policy with multiple statements.
+
+  created_by_others:
+    - resource: "aws_s3_bucket_notification"
+      created_by: "s3 renderer"
+      condition: "When S3 sends notifications to this queue"
+    - resource: "aws_sns_topic_subscription"
+      created_by: "sns renderer"
+      condition: "When SNS delivers to this queue"
+    - resource: "aws_cloudwatch_event_target"
+      created_by: "cloudwatch/eventbridge renderer"
+      condition: "When EventBridge targets this queue"
+    - resource: "aws_lambda_event_source_mapping"
+      created_by: "lambda renderer"
+      condition: "When this queue triggers a Lambda function"
+
+  available_but_not_in_default_renderer:
+    - "aws_sqs_queue (DLQ)"
+    - "aws_sqs_queue_redrive_policy"
+    - "aws_sqs_queue_redrive_allow_policy"
+
+# -- 18. Boto3 Operations -------------------------------------------------------
+boto3_operations:
+  client: "sqs"
+  message_operations:
+    send_message:
+      description: "Send a message to a queue"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        MessageBody: {type: string, required: true, description: "Max 256 KB"}
+        DelaySeconds: {type: integer, description: "0-900, overrides queue default"}
+        MessageAttributes: {type: object, description: "Up to 10 key-value pairs"}
+        MessageGroupId: {type: string, description: "REQUIRED for FIFO queues"}
+        MessageDeduplicationId: {type: string, description: "FIFO: required unless content-based dedup enabled"}
+        MessageSystemAttributes: {type: object, description: "e.g., AWSTraceHeader for X-Ray"}
+      returns: ["MessageId", "MD5OfMessageBody", "SequenceNumber (FIFO only)"]
+    send_message_batch:
+      description: "Send up to 10 messages in a single request"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        Entries: {type: list, required: true, description: "List of {Id, MessageBody, ...}"}
+      returns: ["Successful[].MessageId", "Failed[].Id", "Failed[].Code"]
+    receive_message:
+      description: "Receive up to 10 messages from a queue"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        MaxNumberOfMessages: {type: integer, description: "1-10, default 1"}
+        WaitTimeSeconds: {type: integer, description: "0-20, >0 = long polling"}
+        VisibilityTimeout: {type: integer, description: "0-43200, overrides queue default"}
+        AttributeNames: {type: list, description: "System attributes to return: All, SenderId, SentTimestamp, etc."}
+        MessageAttributeNames: {type: list, description: "User attribute names to return (or 'All')"}
+        MessageSystemAttributeNames: {type: list}
+      returns: ["Messages[].MessageId", "Messages[].ReceiptHandle", "Messages[].Body", "Messages[].Attributes", "Messages[].MessageAttributes"]
+    delete_message:
+      description: "Delete a processed message from the queue"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        ReceiptHandle: {type: string, required: true, description: "From receive_message response"}
+    delete_message_batch:
+      description: "Delete up to 10 messages in a single request"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        Entries: {type: list, required: true, description: "List of {Id, ReceiptHandle}"}
+    change_message_visibility:
+      description: "Change the visibility timeout of a received message"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        ReceiptHandle: {type: string, required: true}
+        VisibilityTimeout: {type: integer, required: true, description: "0-43200 seconds"}
+    change_message_visibility_batch:
+      description: "Change visibility for up to 10 messages at once"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        Entries: {type: list, required: true}
+    purge_queue:
+      description: "Delete all messages in a queue (takes up to 60 seconds)"
+      parameters:
+        QueueUrl: {type: string, required: true}
+      note: "Can only be called once every 60 seconds per queue"
+
+  queue_operations:
+    create_queue:
+      description: "Create a new queue or return URL of existing one"
+      parameters:
+        QueueName: {type: string, required: true}
+        Attributes: {type: object, description: "Queue attributes: VisibilityTimeout, FifoQueue, etc."}
+        tags: {type: object, description: "Key-value tags"}
+    delete_queue:
+      description: "Delete a queue and all its messages"
+      parameters:
+        QueueUrl: {type: string, required: true}
+    get_queue_url:
+      description: "Get queue URL from queue name"
+      parameters:
+        QueueName: {type: string, required: true}
+        QueueOwnerAWSAccountId: {type: string, description: "For cross-account access"}
+      returns: ["QueueUrl"]
+    get_queue_attributes:
+      description: "Get queue attributes and metrics"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        AttributeNames: {type: list, description: "Specific attributes or 'All'"}
+      returns: ["VisibilityTimeout", "MessageRetentionPeriod", "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed", "QueueArn", "CreatedTimestamp", "LastModifiedTimestamp", "MaximumMessageSize", "DelaySeconds", "ReceiveMessageWaitTimeSeconds", "RedrivePolicy"]
+    set_queue_attributes:
+      description: "Set queue attributes"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        Attributes: {type: object, required: true}
+    list_queues:
+      description: "List queues in the account"
+      parameters:
+        QueueNamePrefix: {type: string, description: "Filter by prefix"}
+        MaxResults: {type: integer, description: "1-1000"}
+      returns: ["QueueUrls"]
+    list_dead_letter_source_queues:
+      description: "List queues using this queue as their DLQ"
+      parameters:
+        QueueUrl: {type: string, required: true}
+      returns: ["queueUrls"]
+
+  tagging_operations:
+    tag_queue:
+      description: "Add tags to a queue"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        Tags: {type: object, required: true}
+    untag_queue:
+      description: "Remove tags from a queue"
+      parameters:
+        QueueUrl: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+    list_queue_tags:
+      description: "List tags on a queue"
+      parameters:
+        QueueUrl: {type: string, required: true}
+      returns: ["Tags"]
+
+  message_move_operations:
+    start_message_move_task:
+      description: "Move messages from DLQ back to source queue"
+      parameters:
+        SourceArn: {type: string, required: true, description: "DLQ ARN"}
+        DestinationArn: {type: string, description: "Target queue ARN (defaults to original source)"}
+        MaxNumberOfMessagesPerSecond: {type: integer}
+    cancel_message_move_task:
+      description: "Cancel an in-progress message move task"
+      parameters:
+        TaskHandle: {type: string, required: true}
+    list_message_move_tasks:
+      description: "List message move tasks for a queue"
+      parameters:
+        SourceArn: {type: string, required: true}
+
+# -- 19. Runtime Diagnostics -----------------------------------------------------
+runtime_diagnostics:
+  - pattern: "QueueDoesNotExist|NonExistentQueue|AWS\\.SimpleQueueService\\.NonExistentQueue"
+    category: RESOURCE_NOT_FOUND
+    cause: "SQS queue not found"
+    fix_type: manual
+    resolution: "Verify terraform apply completed. Queue name must match resource_name exactly."
+
+  - pattern: "InvalidMessageContents|MessageTooLong"
+    category: CONFIG
+    cause: "Message payload exceeds SQS maximum (256 KB)"
+    fix_type: update_config
+    resolution: "Store payload in S3, put S3 reference in SQS message instead (claim-check pattern)"
+
+  - pattern: "OverLimit|TooManyEntriesInBatchRequest"
+    category: BATCH_SIZE
+    cause: "Batch request exceeds 10 entries maximum"
+    fix_type: code_change
+    resolution: "Split batch into chunks of 10 messages"
+
+  - pattern: "AccessDenied.*sqs|sqs.*not authorized"
+    category: PERMISSION
+    cause: "Caller IAM role lacks required SQS permissions"
+    fix_type: update_iam
+    resolution: "Add sqs:SendMessage/ReceiveMessage/DeleteMessage to caller's IAM role"
+
+  - pattern: "InvalidAttributeName|InvalidAttributeValue"
+    category: CONFIG
+    cause: "Invalid queue attribute name or value"
+    fix_type: manual
+    resolution: "Check attribute name spelling and value range (e.g., VisibilityTimeout 0-43200)"
+
+  - pattern: "QueueDeletedRecently"
+    category: TIMING
+    cause: "Cannot create a queue with the same name within 60 seconds of deleting it"
+    fix_type: retry
+    resolution: "Wait 60 seconds and retry, or use a different queue name"
+
+  - pattern: "PurgeQueueInProgress"
+    category: TIMING
+    cause: "Purge already in progress (can only purge once per 60 seconds)"
+    fix_type: retry
+    resolution: "Wait 60 seconds before attempting another purge"
+
+  - pattern: "KmsAccessDenied|KmsDisabled|KmsNotFound"
+    category: ENCRYPTION
+    cause: "KMS key issue for SSE-KMS encrypted queue"
+    fix_type: manual
+    resolution: "Verify KMS key exists, is enabled, and caller has kms:GenerateDataKey and kms:Decrypt"
+
+  - pattern: "InvalidParameterValue.*MessageGroupId"
+    category: CONFIG
+    cause: "FIFO queue requires MessageGroupId but none provided"
+    fix_type: code_change
+    resolution: "Include MessageGroupId parameter in SendMessage call"
+
+  - pattern: "ReceiptHandleIsInvalid"
+    category: TIMING
+    cause: "Receipt handle expired (visibility timeout exceeded) or message already deleted"
+    fix_type: code_change
+    resolution: "Process messages faster, increase visibility timeout, or handle this error gracefully"
+
+# -- 20. Tags -------------------------------------------------------------------
+tags:
+  max_per_queue: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"        # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  reserved_prefixes:
+    - "aws:"                     # reserved for AWS use
+
+# -- 21. Code Update (Developer Agent) ------------------------------------------
+code_update:
+  method: api_config
+  boto3_client: sqs
+  description: >
+    SQS has no code. Update queue attributes (visibility timeout, retention period,
+    redrive policy) via set_queue_attributes(). Queue URL from get_queue_url().
+  config_update:
+    client: sqs
+    operation: set_queue_attributes
+    id_param: QueueUrl
+    note: "Get QueueUrl: sqs.get_queue_url(QueueName=resource_name)['QueueUrl']"
+    updatable_attributes:
+      - VisibilityTimeout
+      - MessageRetentionPeriod
+      - MaximumMessageSize
+      - ReceiveMessageWaitTimeSeconds
+      - DelaySeconds
+      - RedrivePolicy
+      - Policy
+      - SqsManagedSseEnabled
+      - KmsMasterKeyId
+      - KmsDataKeyReusePeriodSeconds
+  discovery_ops:
+    - op: get_queue_url
+      id_param: QueueName
+      returns: ["QueueUrl"]
+    - op: get_queue_attributes
+      id_param: QueueUrl
+      returns: ["VisibilityTimeout", "MessageRetentionPeriod", "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "QueueArn", "DelaySeconds", "ReceiveMessageWaitTimeSeconds", "RedrivePolicy", "MaximumMessageSize"]

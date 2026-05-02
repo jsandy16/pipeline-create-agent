@@ -1,0 +1,215 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: collision/
+  source: traffic_collision_raw
+  suffix: null
+  target: collision_preprocessor
+- event: s3:ObjectCreated:*
+  prefix: victim/
+  source: traffic_collision_raw
+  suffix: null
+  target: victim_preprocessor
+- event: s3:ObjectCreated:*
+  prefix: party/
+  source: traffic_collision_raw
+  suffix: null
+  target: party_preprocessor
+- event: s3:ObjectCreated:*
+  prefix: case/
+  source: traffic_collision_raw
+  suffix: null
+  target: case_preprocessor
+- event: send_message
+  prefix: null
+  source: collision_preprocessor
+  suffix: null
+  target: preprocessing_queue
+- event: send_message
+  prefix: null
+  source: victim_preprocessor
+  suffix: null
+  target: preprocessing_queue
+- event: send_message
+  prefix: null
+  source: party_preprocessor
+  suffix: null
+  target: preprocessing_queue
+- event: send_message
+  prefix: null
+  source: case_preprocessor
+  suffix: null
+  target: preprocessing_queue
+- event: sqs_trigger
+  prefix: null
+  source: preprocessing_queue
+  suffix: null
+  target: emr_transform_job
+- event: write
+  prefix: null
+  source: emr_transform_job
+  suffix: null
+  target: traffic_collision_staging
+- event: crawl
+  prefix: null
+  source: traffic_collision_staging
+  suffix: null
+  target: collision_catalog
+pipeline_name: traffic_collision_analytics_pipeline
+region: us-east-1
+services:
+- config:
+    prefixes:
+    - collision/
+    - victim/
+    - party/
+    - case/
+  name: traffic_collision_raw
+  type: s3
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\n\nsqs = boto3.client('sqs')\nQUEUE_URL\
+      \ = 'REPLACE_WITH_QUEUE_URL'\n\ndef handler(event, context):\n    for record\
+      \ in event['Records']:\n        bucket = record['s3']['bucket']['name']\n  \
+      \      key = record['s3']['object']['key']\n        \n        print(f'Processing\
+      \ collision data: {key}')\n        \n        # Data cleaning and schema normalization\
+      \ logic here\n        \n        # Send completion message to SQS\n        message\
+      \ = {\n            'source': 'collision_preprocessor',\n            'bucket':\
+      \ bucket,\n            'key': key,\n            'status': 'completed'\n    \
+      \    }\n        \n        sqs.send_message(\n            QueueUrl=QUEUE_URL,\n\
+      \            MessageBody=json.dumps(message)\n        )\n        \n    return\
+      \ {'statusCode': 200, 'body': 'Preprocessing completed'}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: collision_preprocessor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\n\nsqs = boto3.client('sqs')\nQUEUE_URL\
+      \ = 'REPLACE_WITH_QUEUE_URL'\n\ndef handler(event, context):\n    for record\
+      \ in event['Records']:\n        bucket = record['s3']['bucket']['name']\n  \
+      \      key = record['s3']['object']['key']\n        \n        print(f'Processing\
+      \ victim data: {key}')\n        \n        # Data cleaning and schema normalization\
+      \ logic here\n        \n        # Send completion message to SQS\n        message\
+      \ = {\n            'source': 'victim_preprocessor',\n            'bucket': bucket,\n\
+      \            'key': key,\n            'status': 'completed'\n        }\n   \
+      \     \n        sqs.send_message(\n            QueueUrl=QUEUE_URL,\n       \
+      \     MessageBody=json.dumps(message)\n        )\n        \n    return {'statusCode':\
+      \ 200, 'body': 'Preprocessing completed'}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: victim_preprocessor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\n\nsqs = boto3.client('sqs')\nQUEUE_URL\
+      \ = 'REPLACE_WITH_QUEUE_URL'\n\ndef handler(event, context):\n    for record\
+      \ in event['Records']:\n        bucket = record['s3']['bucket']['name']\n  \
+      \      key = record['s3']['object']['key']\n        \n        print(f'Processing\
+      \ party data: {key}')\n        \n        # Data cleaning and schema normalization\
+      \ logic here\n        \n        # Send completion message to SQS\n        message\
+      \ = {\n            'source': 'party_preprocessor',\n            'bucket': bucket,\n\
+      \            'key': key,\n            'status': 'completed'\n        }\n   \
+      \     \n        sqs.send_message(\n            QueueUrl=QUEUE_URL,\n       \
+      \     MessageBody=json.dumps(message)\n        )\n        \n    return {'statusCode':\
+      \ 200, 'body': 'Preprocessing completed'}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: party_preprocessor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\n\nsqs = boto3.client('sqs')\nQUEUE_URL\
+      \ = 'REPLACE_WITH_QUEUE_URL'\n\ndef handler(event, context):\n    for record\
+      \ in event['Records']:\n        bucket = record['s3']['bucket']['name']\n  \
+      \      key = record['s3']['object']['key']\n        \n        print(f'Processing\
+      \ case data: {key}')\n        \n        # Data cleaning and schema normalization\
+      \ logic here\n        \n        # Send completion message to SQS\n        message\
+      \ = {\n            'source': 'case_preprocessor',\n            'bucket': bucket,\n\
+      \            'key': key,\n            'status': 'completed'\n        }\n   \
+      \     \n        sqs.send_message(\n            QueueUrl=QUEUE_URL,\n       \
+      \     MessageBody=json.dumps(message)\n        )\n        \n    return {'statusCode':\
+      \ 200, 'body': 'Preprocessing completed'}\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: case_preprocessor
+  type: lambda
+- config: {}
+  name: preprocessing_queue
+  type: sqs
+- config:
+    application_type: Spark
+    release_label: emr-6.10.0
+  name: emr_transform_job
+  type: emr_serverless
+- config: {}
+  name: traffic_collision_staging
+  type: s3
+- config:
+    tables:
+    - columns:
+      - name: collision_id
+        type: string
+      - name: collision_type
+        type: string
+      - name: collision_timestamp
+        type: timestamp
+      - name: location
+        type: string
+      - name: severity
+        type: string
+      location: s3://traffic_collision_staging/collision/
+      name: collision_tbl
+    - columns:
+      - name: victim_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: victim_name
+        type: string
+      - name: age
+        type: int
+      - name: injury_type
+        type: string
+      location: s3://traffic_collision_staging/victim/
+      name: victim_tbl
+    - columns:
+      - name: party_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: party_name
+        type: string
+      - name: party_type
+        type: string
+      - name: vehicle_type
+        type: string
+      location: s3://traffic_collision_staging/party/
+      name: party_tbl
+    - columns:
+      - name: case_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: case_number
+        type: string
+      - name: case_date
+        type: timestamp
+      - name: case_status
+        type: string
+      location: s3://traffic_collision_staging/case/
+      name: case_tbl
+  name: collision_catalog
+  type: glue_data_catalog
+- config: {}
+  name: collision_athena
+  type: athena
+- config:
+    instance_type: ml.t3.medium
+  name: analytics_notebook
+  type: sagemaker_notebook

@@ -1,0 +1,36 @@
+service: kinesis_firehose
+boto3_client: firehose
+description: "Amazon Kinesis Data Firehose — load streaming data into S3, Redshift, etc."
+
+operations:
+  put_record:
+    description: "Write a single record to a delivery stream"
+    parameters:
+      DeliveryStreamName: {type: string, required: true}
+      Record: {type: object, required: true, description: "Dict with Data key"}
+
+  put_record_batch:
+    description: "Write multiple records in a single request"
+    parameters:
+      DeliveryStreamName: {type: string, required: true}
+      Records: {type: list, required: true}
+
+  update_destination:
+    description: "Update the destination configuration (S3, Redshift, etc.)"
+    parameters:
+      DeliveryStreamName: {type: string, required: true}
+      CurrentDeliveryStreamVersionId: {type: string, required: true}
+      DestinationId: {type: string, required: true}
+      S3DestinationUpdate: {type: object}
+      RedshiftDestinationUpdate: {type: object}
+
+  describe_delivery_stream:
+    description: "Get delivery stream details and status"
+    parameters:
+      DeliveryStreamName: {type: string, required: true}
+
+  tag_delivery_stream:
+    description: "Add tags to a delivery stream"
+    parameters:
+      DeliveryStreamName: {type: string, required: true}
+      Tags: {type: list, required: true}

@@ -1,0 +1,981 @@
+# ============================================================================
+# Lake Formation Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Lake Formation knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/lake_formation.yaml with
+# exhaustive coverage of Lake Formation capabilities, constraints, IAM,
+# integrations, and Terraform resource patterns.
+#
+# Structure:
+#   1. identity              - service metadata & Terraform mapping
+#   2. naming                - resource name constraints
+#   3. defaults              - Terraform attribute defaults
+#   4. quotas                - AWS service limits
+#   5. data_lake             - data lake settings, admin configuration
+#   6. permissions           - Lake Formation permission model
+#   7. catalog_integration   - Glue Data Catalog integration
+#   8. resource_registration - S3 location registration
+#   9. blueprints            - data ingestion blueprints
+#  10. governed_tables       - ACID transactions on S3
+#  11. tags_lf               - LF-Tags (tag-based access control)
+#  12. data_filters          - column/row/cell-level security
+#  13. cross_account         - cross-account data sharing
+#  14. hybrid_mode           - IAM + LF permissions coexistence
+#  15. encryption            - data lake encryption options
+#  16. monitoring            - CloudTrail, audit logging
+#  17. iam                   - complete action catalog, ARN formats
+#  18. env_vars              - from existing spec
+#  19. vpc_triggers          - from existing spec
+#  20. integrations          - wiring ownership with all connected services
+#  21. terraform_resources   - all TF resource types
+#  22. boto3_operations      - complete API reference
+#  23. runtime_diagnostics   - error patterns
+#  24. tags                  - resource tagging constraints
+#  25. code_update           - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: lake_formation
+  aws_service_name: "AWS Lake Formation"
+  is_principal: false           # Lake Formation is a governance layer, not a compute service
+  terraform_resource: aws_lakeformation_data_lake_settings
+  description: >
+    AWS Lake Formation is a managed service that simplifies building, securing,
+    and managing data lakes. It provides centralized governance over data stored
+    in S3 and cataloged in the Glue Data Catalog, replacing the need for complex
+    S3 bucket policies and IAM policies with a simpler grant/revoke permission
+    model at the database, table, and column level.
+  free_tier:
+    status: always_free
+    details: "Lake Formation itself is free. You pay for underlying services (S3 storage, Glue crawlers, Athena queries, etc.)"
+    note: "No compute resources — Lake Formation is a control plane/governance layer"
+  pricing_model: free           # no direct charges; pay for S3, Glue, Athena, etc.
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  database_name:
+    max_length: 255
+    valid_characters: "a-z0-9_"
+    rules:
+      - "Must be unique within the Glue Data Catalog"
+      - "Lowercase letters, digits, and underscores"
+  table_name:
+    max_length: 255
+    valid_characters: "a-z0-9_"
+  lf_tag_key:
+    max_length: 128
+    valid_characters: "a-zA-Z0-9-_./=+@"
+  lf_tag_value:
+    max_length: 256
+    valid_characters: "a-zA-Z0-9-_./=+@"
+  resource_label_rules:
+    - "resource_label uses engine/naming.py resource_label() for safe Terraform identifiers"
+
+# -- 3. Defaults --------------------------------------------------------------
+defaults:
+  create_database_default_permissions: true
+  create_table_default_permissions: true
+  # Default permissions granted to IAM_ALLOWED_PRINCIPALS:
+  # This is the "hybrid mode" where both IAM and LF permissions apply.
+  # Setting to empty list [] switches to "Lake Formation-only" mode.
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_databases_per_catalog: 10000          # adjustable
+  max_tables_per_database: 200000           # adjustable
+  max_partitions_per_table: 10000000        # adjustable
+  max_lf_tags_per_account: 1000             # adjustable
+  max_lf_tag_values_per_key: 1000
+  max_lf_tags_per_resource: 50
+  max_permissions_per_grant: 7              # individual permission types
+  max_data_lake_admins: 30
+  max_registered_s3_locations: 10000
+  max_data_cells_filter_per_table: 100
+  max_cross_account_grants: 100             # per resource
+  max_blueprints_per_account: 10000
+  api_rate_limits:
+    grant_permissions: "15 TPS"
+    revoke_permissions: "15 TPS"
+    get_data_lake_settings: "5 TPS"
+    list_permissions: "15 TPS"
+
+# -- 5. Data Lake Settings ---------------------------------------------------
+data_lake:
+  description: "Central configuration for the data lake"
+  terraform_resource: "aws_lakeformation_data_lake_settings"
+
+  admins:
+    description: "IAM principals with full Lake Formation admin privileges"
+    terraform_attribute: "admins"
+    capabilities:
+      - "Grant/revoke any permission to any principal"
+      - "Register/deregister S3 locations"
+      - "Create databases without explicit permission"
+      - "View and manage all LF-Tags"
+      - "Manage data lake settings"
+    max_admins: 30
+    note: "AWS account root is always an implicit admin"
+
+  read_only_admins:
+    description: "Principals who can view all metadata and permissions but not modify"
+    terraform_attribute: "read_only_admins"
+
+  default_permissions:
+    description: "Default permissions for newly created databases and tables"
+    create_database_default:
+      terraform_block: "create_database_default_permissions"
+      default_principal: "IAM_ALLOWED_PRINCIPALS"
+      default_permissions: ["ALL"]
+      note: >
+        When set to IAM_ALLOWED_PRINCIPALS with ALL, newly created databases
+        are accessible to any IAM principal that has Glue permissions. This is
+        "hybrid mode". Set to empty to require explicit LF grants.
+    create_table_default:
+      terraform_block: "create_table_default_permissions"
+      default_principal: "IAM_ALLOWED_PRINCIPALS"
+      default_permissions: ["ALL"]
+
+  trusted_resource_owners:
+    description: "AWS accounts whose resources are trusted for cross-account access"
+    terraform_attribute: "trusted_resource_owners"
+
+  parameters:
+    description: "Key-value parameters for data lake configuration"
+    terraform_attribute: "parameters"
+
+# -- 6. Permissions -----------------------------------------------------------
+permissions:
+  description: "Lake Formation's core permission model"
+  terraform_resource: "aws_lakeformation_permissions"
+
+  # Permission types
+  types:
+    database_permissions:
+      - "ALL"
+      - "ALTER"
+      - "CREATE_TABLE"
+      - "DESCRIBE"
+      - "DROP"
+    table_permissions:
+      - "ALL"
+      - "ALTER"
+      - "DELETE"
+      - "DESCRIBE"
+      - "DROP"
+      - "INSERT"
+      - "SELECT"
+    column_permissions:
+      - "SELECT"                 # column-level SELECT only
+    data_location_permissions:
+      - "DATA_LOCATION_ACCESS"   # permission to store data at a registered S3 location
+    lf_tag_permissions:
+      - "DESCRIBE"
+      - "ASSOCIATE"
+    lf_tag_expression_permissions:
+      - "ALL"
+      - "ALTER"
+      - "DELETE"
+      - "DESCRIBE"
+      - "DROP"
+      - "INSERT"
+      - "SELECT"
+
+  # Grant/revoke model
+  grant_model:
+    description: "Permissions are granted from a grantor to a grantee on a specific resource"
+    grantable_permissions:
+      description: "When granting, you can optionally allow the grantee to re-grant (WITH GRANT OPTION)"
+      terraform_attribute: "permissions_with_grant_option"
+    principal_types:
+      iam_user: "arn:aws:iam::ACCOUNT:user/USER-NAME"
+      iam_role: "arn:aws:iam::ACCOUNT:role/ROLE-NAME"
+      iam_group: "arn:aws:iam::ACCOUNT:group/GROUP-NAME"  # not recommended
+      external_account: "ACCOUNT-ID"
+      organization: "arn:aws:organizations::ACCOUNT:organization/ORG-ID"
+      ou: "arn:aws:organizations::ACCOUNT:ou/ORG-ID/OU-ID"
+      iam_allowed_principals: "IAM_ALLOWED_PRINCIPALS"  # special: all IAM principals
+      saml: "arn:aws:iam::ACCOUNT:saml-provider/PROVIDER/ATTRIBUTE"
+    resource_types:
+      database:
+        terraform_block: "database { name = 'db_name' }"
+      table:
+        terraform_block: "table { database_name = 'db', name = 'table' }"
+        wildcard: "table { database_name = 'db', wildcard = true }"
+      table_with_columns:
+        terraform_block: "table_with_columns { database_name = 'db', name = 'table', column_names = ['col1'] }"
+        excluded_columns: "table_with_columns { ... excluded_column_names = ['secret_col'] }"
+      data_location:
+        terraform_block: "data_location { arn = 's3://bucket/path' }"
+      lf_tag:
+        terraform_block: "lf_tag { key = 'tag_key', values = ['val1', 'val2'] }"
+      lf_tag_policy:
+        terraform_block: "lf_tag_policy { resource_type = 'DATABASE', expression { key = 'k', values = ['v'] } }"
+
+  # How permissions are evaluated
+  evaluation:
+    - "Lake Formation permissions are additive — no explicit deny"
+    - "A principal needs BOTH IAM permissions (for Glue APIs) AND LF permissions (for data access)"
+    - "In hybrid mode (IAM_ALLOWED_PRINCIPALS), IAM permissions alone are sufficient"
+    - "In LF-only mode, explicit LF grants are required even if IAM allows the action"
+    - "Super permissions (ALL) grant all applicable permissions for the resource type"
+    - "Column-level permissions override table-level SELECT"
+    - "Data location permission required to create tables pointing to registered S3 locations"
+
+# -- 7. Catalog Integration --------------------------------------------------
+catalog_integration:
+  description: "Lake Formation governs access to the Glue Data Catalog"
+  glue_data_catalog:
+    description: "Single metadata catalog per AWS account per region"
+    relationship: >
+      Lake Formation sits on top of the Glue Data Catalog. Databases and tables
+      are created in the Glue Data Catalog, and Lake Formation controls who can
+      access them. Without Lake Formation, access is controlled by IAM policies
+      on Glue APIs alone.
+    terraform_resources:
+      database: "aws_glue_catalog_database"
+      table: "aws_glue_catalog_table"
+      crawler: "aws_glue_crawler"
+  catalog_databases:
+    description: "Logical grouping of tables in the data catalog"
+    default_database: "default"
+    metadata:
+      - "Name"
+      - "Description"
+      - "Location URI (S3 path)"
+      - "Parameters"
+    note: "Creating a database in the catalog does NOT create data — it only creates metadata"
+  catalog_tables:
+    description: "Metadata definitions for data stored in S3"
+    metadata:
+      - "Name, Database, Description"
+      - "Storage Descriptor (location, input/output format, SerDe, columns)"
+      - "Partition keys"
+      - "Table parameters"
+    formats_supported:
+      - "Parquet"
+      - "ORC"
+      - "Avro"
+      - "JSON"
+      - "CSV"
+      - "Text"
+      - "Hudi"
+      - "Delta Lake"
+      - "Iceberg"
+
+# -- 8. Resource Registration ------------------------------------------------
+resource_registration:
+  description: "Register S3 locations as data lake storage"
+  terraform_resource: "aws_lakeformation_resource"
+
+  purpose: >
+    Registering an S3 location tells Lake Formation to manage access to that
+    location. Once registered, access is controlled via Lake Formation permissions
+    instead of S3 bucket policies.
+
+  registration_modes:
+    service_linked_role:
+      description: "Lake Formation uses its own service-linked role to access S3"
+      terraform_config: "resource_arn = aws_s3_bucket.example.arn"
+      note: "Default mode. Lake Formation vends temporary credentials to authorized services."
+    custom_role:
+      description: "Use a specific IAM role to access S3"
+      terraform_config: "resource_arn = aws_s3_bucket.example.arn\nrole_arn = aws_iam_role.custom.arn"
+      note: "Use when the service-linked role doesn't have the required S3 permissions"
+
+  service_linked_role:
+    role_name: "AWSServiceRoleForLakeFormationDataAccess"
+    managed_policy: "AWSLakeFormationDataAccessServiceRolePolicy"
+    permissions_needed:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:DeleteObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  credential_vending:
+    description: >
+      When a service (e.g. Athena, Glue) accesses registered data, Lake Formation
+      checks permissions and vends temporary S3 credentials scoped to exactly
+      the tables/columns the principal is authorized to access. No long-lived
+      S3 permissions needed on the accessing role.
+
+  constraints:
+    - "Each S3 location can only be registered once per account"
+    - "Nested locations: child inherits parent's registration"
+    - "Deregistering returns access control to S3 bucket policies and IAM"
+
+# -- 9. Blueprints -----------------------------------------------------------
+blueprints:
+  description: "Automated data ingestion workflows"
+  types:
+    database:
+      description: "Ingest data from a JDBC source (RDS, Redshift, etc.) into the data lake"
+      creates: "Glue crawler + Glue ETL job + data catalog entries"
+    log:
+      description: "Ingest log data from CloudTrail, ELB logs, etc."
+      creates: "Glue jobs for log ingestion + catalog entries"
+  terraform_support: false       # Blueprints are not managed via Terraform
+  api_operations:
+    - "create_lake_formation_identity_center_configuration"
+    - "describe_lake_formation_identity_center_configuration"
+  note: >
+    Blueprints are a convenience feature for initial data lake setup. The pipeline
+    engine does not use blueprints — it creates Glue resources directly.
+
+# -- 10. Governed Tables ------------------------------------------------------
+governed_tables:
+  description: "ACID transactions on S3 data via Lake Formation"
+  status: "Feature available but not widely adopted — consider Apache Iceberg instead"
+  capabilities:
+    - "ACID transactions across multiple tables"
+    - "Time-travel queries"
+    - "Automatic compaction"
+    - "Row-level security via data filters"
+  terraform_support: "Limited — governed tables created via API, not Terraform"
+  note: >
+    Governed tables use Lake Formation's transaction engine. For new data lakes,
+    Apache Iceberg tables (supported by Athena, Spark, Glue) are recommended
+    as the industry standard for ACID on S3.
+
+# -- 11. LF-Tags (Tag-Based Access Control) ----------------------------------
+tags_lf:
+  description: "Tag-based access control for data lake resources"
+  terraform_resources:
+    lf_tag: "aws_lakeformation_lf_tag"
+    tag_assignment: "aws_lakeformation_resource_lf_tags"
+    tag_permissions: "aws_lakeformation_permissions (lf_tag_policy resource)"
+
+  concept: >
+    LF-Tags are key-value pairs you assign to databases and tables. Instead of
+    granting permissions on individual resources, you grant permissions based on
+    tag values. When a new table is tagged, it automatically inherits the
+    permissions associated with that tag — no manual grants needed.
+
+  example:
+    tag_key: "classification"
+    tag_values: ["public", "confidential", "restricted"]
+    grant: "Grant SELECT on all tables where classification=public to analysts role"
+    benefit: "New tables tagged 'public' are automatically accessible to analysts"
+
+  tag_inheritance:
+    - "Database tags are inherited by all tables in the database"
+    - "Table tags override inherited database tags for the same key"
+
+  max_tags_per_account: 1000
+  max_values_per_key: 1000
+  max_tags_per_resource: 50
+
+  best_practices:
+    - "Use LF-Tags for scalable permission management (100+ tables)"
+    - "Define a tag taxonomy before assigning (e.g. classification, department, sensitivity)"
+    - "Use tag inheritance from databases to reduce manual tagging"
+
+# -- 12. Data Filters --------------------------------------------------------
+data_filters:
+  description: "Column-level and row-level security for fine-grained access control"
+  terraform_resource: "aws_lakeformation_data_cells_filter"
+
+  column_level_security:
+    description: "Restrict which columns a principal can see"
+    methods:
+      include_columns: "Explicitly list allowed columns"
+      exclude_columns: "List columns to hide (include all others)"
+    terraform_block: "table_with_columns { column_names = [...] }"
+    note: "Column-level security works with Athena, Redshift Spectrum, Glue"
+
+  row_level_security:
+    description: "Restrict which rows a principal can see based on a filter expression"
+    terraform_resource: "aws_lakeformation_data_cells_filter"
+    filter_expression: "A predicate expression (e.g. department = 'engineering')"
+    note: "Row filters are evaluated at query time by the engine (Athena, Redshift Spectrum)"
+
+  cell_level_security:
+    description: "Combination of row AND column filters on the same table"
+    terraform_resource: "aws_lakeformation_data_cells_filter"
+    note: "Most restrictive — limits both which rows and columns are visible"
+
+  max_filters_per_table: 100
+
+# -- 13. Cross-Account Sharing -----------------------------------------------
+cross_account:
+  description: "Share data lake resources with other AWS accounts"
+
+  sharing_methods:
+    named_resource:
+      description: "Grant permissions to a specific external account on a specific resource"
+      terraform_block: "principal { data_lake_principal_identifier = 'ACCOUNT-ID' }"
+      steps:
+        - "Grantor grants permission to external account ID"
+        - "External account accepts the RAM invitation (if applicable)"
+        - "External account creates a resource link in their catalog"
+        - "External account grants permissions to their own principals"
+
+    lf_tag_based:
+      description: "Share based on LF-Tags — any resource matching the tag is shared"
+      terraform_block: "lf_tag_policy resource"
+      benefit: "New resources with matching tags are automatically shared"
+
+    ram_integration:
+      description: "AWS Resource Access Manager integration for organization-level sharing"
+      note: "RAM invitations auto-accepted within the same AWS Organization"
+
+  resource_links:
+    description: "Pointers in the consumer's catalog to the shared resource"
+    terraform_resource: "aws_glue_catalog_database (target_database block)"
+    note: "Consumer queries through the resource link, not directly on the shared resource"
+
+  constraints:
+    - "Cross-account sharing requires the shared resource to be registered in Lake Formation"
+    - "External accounts need CREATE_TABLE on the shared database to create resource links"
+    - "Data location permissions cannot be granted cross-account"
+    - "Max 100 cross-account grants per resource"
+
+# -- 14. Hybrid Mode ----------------------------------------------------------
+hybrid_mode:
+  description: "Coexistence of IAM and Lake Formation permission models"
+
+  modes:
+    hybrid:
+      description: "IAM_ALLOWED_PRINCIPALS has ALL on databases/tables by default"
+      behavior: >
+        Any IAM principal with Glue API permissions can access catalog resources.
+        Lake Formation permissions are effectively bypassed. This is the default
+        for backward compatibility.
+      when_to_use: "Initial setup, transitioning from IAM-only to Lake Formation"
+
+    lf_only:
+      description: "Remove IAM_ALLOWED_PRINCIPALS — require explicit LF grants"
+      behavior: >
+        Even if an IAM principal has Glue API permissions, they also need an
+        explicit Lake Formation grant to access the resource.
+      when_to_use: "Full Lake Formation governance, fine-grained access control"
+      migration_steps:
+        - "Identify all IAM principals that currently access data"
+        - "Create equivalent Lake Formation grants for each principal"
+        - "Remove IAM_ALLOWED_PRINCIPALS from default permissions"
+        - "Test access for all principals"
+
+  pipeline_engine_default: "hybrid"
+  note: >
+    The pipeline engine uses hybrid mode (IAM_ALLOWED_PRINCIPALS with ALL) for
+    maximum compatibility. This means IAM permissions are sufficient for data
+    access. To enable LF-only mode, clear the default permissions.
+
+# -- 15. Encryption -----------------------------------------------------------
+encryption:
+  data_at_rest:
+    description: "Data lake data is encrypted via S3 encryption (SSE-S3 or SSE-KMS)"
+    note: "Lake Formation does not add its own encryption — it relies on S3"
+    recommendation: "Use SSE-S3 (AES-256) for free encryption, SSE-KMS for audit trail"
+  catalog_encryption:
+    description: "Glue Data Catalog can be encrypted with KMS"
+    terraform_resource: "aws_glue_data_catalog_encryption_settings"
+    settings:
+      connection_password_encryption:
+        description: "Encrypt connection passwords in the catalog"
+        terraform_attribute: "connection_password_encryption { return_connection_password_encrypted = true, aws_kms_key_id = 'key-arn' }"
+      encryption_at_rest:
+        description: "Encrypt catalog metadata at rest"
+        terraform_attribute: "encryption_at_rest { catalog_encryption_mode = 'SSE-KMS', sse_aws_kms_key_id = 'key-arn' }"
+  credential_vending_encryption:
+    description: "Temporary credentials vended by Lake Formation are scoped and short-lived"
+    note: "No additional encryption configuration needed for credential vending"
+
+# -- 16. Monitoring -----------------------------------------------------------
+monitoring:
+  cloudtrail:
+    description: "Lake Formation API calls logged in CloudTrail"
+    key_events:
+      - "GrantPermissions"
+      - "RevokePermissions"
+      - "GetDataLakeSettings"
+      - "PutDataLakeSettings"
+      - "RegisterResource"
+      - "DeregisterResource"
+      - "CreateLFTag"
+      - "DeleteLFTag"
+      - "AddLFTagsToResource"
+      - "RemoveLFTagsFromResource"
+      - "GetTemporaryGlueTableCredentials"
+  audit_logging:
+    description: "Lake Formation audit logs for data access"
+    destination: "CloudWatch Logs"
+    log_types:
+      - "Data access audit (who queried what tables/columns)"
+      - "Permission changes audit"
+    note: "Enable via Lake Formation console or PutDataLakeSettings API"
+  cloudwatch_metrics:
+    namespace: "None"            # Lake Formation does not publish CW metrics
+    note: "Monitor via CloudTrail events and audit logs"
+  pipeline_monitoring: "none"    # metadata-only service, no runtime logs
+
+# -- 17. IAM ------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    data_lake_settings: "arn:aws:lakeformation:REGION:ACCOUNT:catalog"
+    database: "arn:aws:glue:REGION:ACCOUNT:database/DB-NAME"
+    table: "arn:aws:glue:REGION:ACCOUNT:table/DB-NAME/TABLE-NAME"
+    lf_tag: "arn:aws:lakeformation:REGION:ACCOUNT:tag/TAG-KEY"
+    registered_resource: "arn:aws:s3:::BUCKET-NAME(/PREFIX)"
+
+  # Lake Formation is not a principal — no service execution role
+  always: []
+
+  # Complete action catalog
+  actions:
+    data_lake_settings:
+      - "lakeformation:GetDataLakeSettings"
+      - "lakeformation:PutDataLakeSettings"
+    permissions_management:
+      - "lakeformation:GrantPermissions"
+      - "lakeformation:RevokePermissions"
+      - "lakeformation:BatchGrantPermissions"
+      - "lakeformation:BatchRevokePermissions"
+      - "lakeformation:ListPermissions"
+      - "lakeformation:GetEffectivePermissionsForPath"
+    resource_registration:
+      - "lakeformation:RegisterResource"
+      - "lakeformation:DeregisterResource"
+      - "lakeformation:ListResources"
+      - "lakeformation:DescribeResource"
+    lf_tags:
+      - "lakeformation:CreateLFTag"
+      - "lakeformation:DeleteLFTag"
+      - "lakeformation:UpdateLFTag"
+      - "lakeformation:GetLFTag"
+      - "lakeformation:ListLFTags"
+      - "lakeformation:AddLFTagsToResource"
+      - "lakeformation:RemoveLFTagsFromResource"
+      - "lakeformation:GetResourceLFTags"
+      - "lakeformation:SearchDatabasesByLFTags"
+      - "lakeformation:SearchTablesByLFTags"
+    data_filters:
+      - "lakeformation:CreateDataCellsFilter"
+      - "lakeformation:DeleteDataCellsFilter"
+      - "lakeformation:ListDataCellsFilter"
+    credential_vending:
+      - "lakeformation:GetTemporaryGlueTableCredentials"
+      - "lakeformation:GetTemporaryGluePartitionCredentials"
+    transactions:
+      - "lakeformation:StartTransaction"
+      - "lakeformation:CommitTransaction"
+      - "lakeformation:CancelTransaction"
+      - "lakeformation:ExtendTransaction"
+      - "lakeformation:DescribeTransaction"
+      - "lakeformation:ListTransactions"
+    table_objects:
+      - "lakeformation:GetTableObjects"
+      - "lakeformation:UpdateTableObjects"
+      - "lakeformation:DeleteObjectsOnCancel"
+    query_planning:
+      - "lakeformation:StartQueryPlanning"
+      - "lakeformation:GetQueryState"
+      - "lakeformation:GetQueryStatistics"
+      - "lakeformation:GetWorkUnits"
+      - "lakeformation:GetWorkUnitResults"
+
+  # Service-linked role
+  service_linked_role:
+    role_name: "AWSServiceRoleForLakeFormationDataAccess"
+    description: "Allows Lake Formation to access registered S3 locations"
+    s3_permissions:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:DeleteObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  # IAM permissions needed by services querying through Lake Formation
+  query_service_permissions:
+    athena:
+      - "lakeformation:GetDataAccess"
+      - "lakeformation:GetTemporaryGlueTableCredentials"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetPartitions"
+    glue:
+      - "lakeformation:GetDataAccess"
+      - "lakeformation:GetTemporaryGlueTableCredentials"
+    redshift_spectrum:
+      - "lakeformation:GetDataAccess"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetDatabase"
+    emr:
+      - "lakeformation:GetDataAccess"
+      - "lakeformation:GetTemporaryGlueTableCredentials"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}   # Lake Formation is passive — no IAM needed from sources
+  as_source_to: {}   # Lake Formation is passive — no IAM needed for targets
+
+  # Common IAM policy for Lake Formation admin
+  admin_policy_actions:
+    - "lakeformation:*"
+    - "glue:*"
+    - "s3:GetBucketLocation"
+    - "s3:ListAllMyBuckets"
+    - "iam:CreateServiceLinkedRole"
+
+# -- 18. Environment Variables ------------------------------------------------
+env_vars:
+  as_target_of: {}   # passive service
+  as_source_to: {}   # passive service
+
+# -- 19. VPC Triggers --------------------------------------------------------
+vpc_triggers: []      # Lake Formation is a control plane; no VPC needed
+
+# -- 20. Integration Wiring Ownership ----------------------------------------
+integrations:
+  lake_formation_registers_s3:
+    description: "Lake Formation registers S3 bucket as data lake location"
+    owned_by: "lake_formation"
+    terraform_resources:
+      - "aws_lakeformation_resource (arn = S3 bucket ARN)"
+    note: "Pipeline engine creates lakeformation_resource for each S3 integration"
+
+  lake_formation_governs_glue:
+    description: "Lake Formation controls access to Glue Data Catalog databases and tables"
+    owned_by: "lake_formation"
+    terraform_resources:
+      - "aws_lakeformation_permissions (grants on databases/tables)"
+    note: "Glue databases/tables created by Glue renderer; LF adds permissions on top"
+
+  athena_queries_through_lf:
+    description: "Athena queries data governed by Lake Formation"
+    owned_by: "athena"
+    note: "Athena role needs lakeformation:GetDataAccess + Glue catalog permissions"
+
+  glue_accesses_through_lf:
+    description: "Glue jobs/crawlers access data governed by Lake Formation"
+    owned_by: "glue"
+    note: "Glue role needs lakeformation:GetDataAccess for registered locations"
+
+  emr_accesses_through_lf:
+    description: "EMR accesses data governed by Lake Formation"
+    owned_by: "emr"
+    note: "EMR needs lakeformation:GetDataAccess + runtime role configuration"
+
+  redshift_spectrum_through_lf:
+    description: "Redshift Spectrum queries data governed by Lake Formation"
+    owned_by: "redshift"
+    note: "Redshift role needs lakeformation:GetDataAccess + Glue permissions"
+
+# -- 21. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_lakeformation_data_lake_settings"
+      description: "Data lake settings (admins, default permissions)"
+      always_created: true
+    - resource: "aws_lakeformation_resource"
+      description: "Register S3 locations as data lake storage"
+      always_created: true
+
+  conditional:
+    - resource: "aws_lakeformation_permissions"
+      condition: "When granting specific access to principals"
+    - resource: "aws_lakeformation_lf_tag"
+      condition: "When using tag-based access control"
+    - resource: "aws_lakeformation_resource_lf_tags"
+      condition: "When assigning LF-Tags to databases/tables"
+    - resource: "aws_lakeformation_data_cells_filter"
+      condition: "When row/column/cell-level security is needed"
+
+  created_by_others:
+    - resource: "aws_glue_catalog_database"
+      created_by: "Glue or Glue Data Catalog renderer"
+    - resource: "aws_glue_catalog_table"
+      created_by: "Glue or Glue Data Catalog renderer"
+    - resource: "aws_glue_crawler"
+      created_by: "Glue renderer"
+    - resource: "aws_s3_bucket"
+      created_by: "S3 renderer"
+
+# -- 22. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "lakeformation"
+
+  settings_operations:
+    get_data_lake_settings:
+      description: "Get data lake admin settings"
+      parameters:
+        CatalogId: {type: string, description: "AWS account ID (defaults to caller)"}
+      returns: ["DataLakeSettings.DataLakeAdmins", "DataLakeSettings.CreateDatabaseDefaultPermissions",
+                "DataLakeSettings.CreateTableDefaultPermissions", "DataLakeSettings.TrustedResourceOwners",
+                "DataLakeSettings.Parameters"]
+
+    put_data_lake_settings:
+      description: "Set data lake admin settings"
+      parameters:
+        DataLakeSettings: {type: object, required: true, description: "DataLakeAdmins, default permissions, etc."}
+        CatalogId: {type: string}
+
+  permission_operations:
+    grant_permissions:
+      description: "Grant data lake permissions to a principal"
+      parameters:
+        Principal: {type: object, required: true, description: "{'DataLakePrincipalIdentifier': 'arn:aws:iam::ACCOUNT:role/ROLE'}"}
+        Resource: {type: object, required: true, description: "Database, Table, TableWithColumns, DataLocation, LFTag, or LFTagPolicy"}
+        Permissions: {type: list, required: true, description: "['SELECT', 'DESCRIBE', 'ALTER', ...]"}
+        PermissionsWithGrantOption: {type: list, description: "Grantable permissions (WITH GRANT OPTION)"}
+        CatalogId: {type: string}
+
+    revoke_permissions:
+      description: "Revoke data lake permissions from a principal"
+      parameters:
+        Principal: {type: object, required: true}
+        Resource: {type: object, required: true}
+        Permissions: {type: list, required: true}
+        CatalogId: {type: string}
+
+    batch_grant_permissions:
+      description: "Grant multiple permissions in a single call"
+      parameters:
+        Entries: {type: list, required: true, description: "List of grant entries"}
+        CatalogId: {type: string}
+
+    batch_revoke_permissions:
+      description: "Revoke multiple permissions in a single call"
+      parameters:
+        Entries: {type: list, required: true}
+        CatalogId: {type: string}
+
+    list_permissions:
+      description: "List granted permissions"
+      parameters:
+        Principal: {type: object, description: "Filter by principal"}
+        Resource: {type: object, description: "Filter by resource"}
+        ResourceType: {type: string, description: "DATABASE, TABLE, DATA_LOCATION, LF_TAG, LF_TAG_POLICY"}
+        CatalogId: {type: string}
+      returns: ["PrincipalResourcePermissions[].Principal", "PrincipalResourcePermissions[].Resource",
+                "PrincipalResourcePermissions[].Permissions", "PrincipalResourcePermissions[].PermissionsWithGrantOption"]
+
+    get_effective_permissions_for_path:
+      description: "Get effective permissions for an S3 path"
+      parameters:
+        ResourceArn: {type: string, required: true, description: "S3 bucket ARN or path ARN"}
+        CatalogId: {type: string}
+      returns: ["Permissions"]
+
+  resource_operations:
+    register_resource:
+      description: "Register an S3 path as a data lake location"
+      parameters:
+        ResourceArn: {type: string, required: true, description: "S3 bucket or prefix ARN"}
+        UseServiceLinkedRole: {type: boolean, description: "true to use LF service-linked role (default)"}
+        RoleArn: {type: string, description: "Custom IAM role ARN (if not using SLR)"}
+
+    deregister_resource:
+      description: "Remove an S3 location from data lake registration"
+      parameters:
+        ResourceArn: {type: string, required: true}
+
+    list_resources:
+      description: "List registered data lake resources"
+      parameters:
+        FilterConditionList: {type: list}
+      returns: ["ResourceInfoList[].ResourceArn", "ResourceInfoList[].RoleArn", "ResourceInfoList[].LastModified"]
+
+    describe_resource:
+      description: "Get details of a registered resource"
+      parameters:
+        ResourceArn: {type: string, required: true}
+      returns: ["ResourceInfo.ResourceArn", "ResourceInfo.RoleArn"]
+
+  lf_tag_operations:
+    create_lf_tag:
+      description: "Create an LF-Tag key with values"
+      parameters:
+        TagKey: {type: string, required: true}
+        TagValues: {type: list, required: true}
+        CatalogId: {type: string}
+
+    delete_lf_tag:
+      description: "Delete an LF-Tag"
+      parameters:
+        TagKey: {type: string, required: true}
+        CatalogId: {type: string}
+
+    update_lf_tag:
+      description: "Update LF-Tag values"
+      parameters:
+        TagKey: {type: string, required: true}
+        TagValuesToDelete: {type: list}
+        TagValuesToAdd: {type: list}
+        CatalogId: {type: string}
+
+    get_lf_tag:
+      description: "Get an LF-Tag definition"
+      parameters:
+        TagKey: {type: string, required: true}
+        CatalogId: {type: string}
+      returns: ["TagKey", "TagValues"]
+
+    list_lf_tags:
+      description: "List all LF-Tags"
+      parameters:
+        CatalogId: {type: string}
+        ResourceShareType: {type: string, description: "ALL, FOREIGN"}
+      returns: ["LFTags[].TagKey", "LFTags[].TagValues"]
+
+    add_lf_tags_to_resource:
+      description: "Assign LF-Tags to a database, table, or column"
+      parameters:
+        Resource: {type: object, required: true}
+        LFTags: {type: list, required: true, description: "[{'TagKey': 'k', 'TagValues': ['v']}]"}
+        CatalogId: {type: string}
+
+    remove_lf_tags_from_resource:
+      description: "Remove LF-Tags from a resource"
+      parameters:
+        Resource: {type: object, required: true}
+        LFTags: {type: list, required: true}
+        CatalogId: {type: string}
+
+    get_resource_lf_tags:
+      description: "Get LF-Tags assigned to a resource"
+      parameters:
+        Resource: {type: object, required: true}
+        ShowAssignedLFTags: {type: boolean}
+        CatalogId: {type: string}
+      returns: ["LFTagOnDatabase", "LFTagsOnTable", "LFTagsOnColumns"]
+
+    search_databases_by_lf_tags:
+      description: "Find databases matching LF-Tag criteria"
+      parameters:
+        Expression: {type: list, required: true, description: "[{'TagKey': 'k', 'TagValues': ['v']}]"}
+        CatalogId: {type: string}
+      returns: ["DatabaseList[].Database", "DatabaseList[].LFTags"]
+
+    search_tables_by_lf_tags:
+      description: "Find tables matching LF-Tag criteria"
+      parameters:
+        Expression: {type: list, required: true}
+        CatalogId: {type: string}
+      returns: ["TableList[].Table", "TableList[].LFTags"]
+
+  data_filter_operations:
+    create_data_cells_filter:
+      description: "Create a row/column/cell-level filter"
+      parameters:
+        TableData: {type: object, required: true, description: "DatabaseName, TableName, Name, RowFilter, ColumnNames/ColumnWildcard"}
+
+    delete_data_cells_filter:
+      description: "Delete a data cells filter"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        Name: {type: string, required: true}
+
+    list_data_cells_filter:
+      description: "List data cells filters"
+      parameters:
+        Table: {type: object, description: "Filter by table"}
+      returns: ["DataCellsFilters[].DatabaseName", "DataCellsFilters[].TableName",
+                "DataCellsFilters[].Name", "DataCellsFilters[].RowFilter"]
+
+# -- 23. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AccessDeniedException.*lakeformation|not.*authorized.*lake"
+    category: PERMISSION
+    cause: "Lake Formation permission denied — principal lacks DESCRIBE or SELECT on table"
+    fix_type: update_permissions
+    resolution: "lakeformation.grant_permissions(Principal={DataLakePrincipalIdentifier: role_arn}, Resource={Table:{DatabaseName:db, Name:table}}, Permissions=['SELECT','DESCRIBE'])"
+
+  - pattern: "InvalidInputException.*principal"
+    category: VALIDATION
+    cause: "Invalid principal ARN in grant/revoke call"
+    fix_type: manual
+    resolution: "Check that the principal ARN is a valid IAM user, role, group, or account ID"
+
+  - pattern: "EntityNotFoundException.*database|table"
+    category: RESOURCE_NOT_FOUND
+    cause: "Database or table does not exist in Glue Data Catalog"
+    fix_type: manual
+    resolution: "Create the database/table in Glue Data Catalog first, then grant permissions"
+
+  - pattern: "AlreadyExistsException"
+    category: ALREADY_EXISTS
+    cause: "Resource (LF-Tag, data filter, etc.) already exists"
+    fix_type: none
+    resolution: "Use update operation instead of create, or delete first"
+
+  - pattern: "ResourceNotReadyException"
+    category: STATE
+    cause: "Resource is being modified by another operation"
+    fix_type: retry
+    resolution: "Wait and retry — another grant/revoke is in progress"
+
+  - pattern: "OperationTimeoutException"
+    category: TIMEOUT
+    cause: "Lake Formation API call timed out"
+    fix_type: retry
+    resolution: "Retry with exponential backoff"
+
+  - pattern: "ConcurrentModificationException"
+    category: CONCURRENCY
+    cause: "Another process is modifying the same resource"
+    fix_type: retry
+    resolution: "Retry with exponential backoff"
+
+  - pattern: "InvalidInputException.*not registered"
+    category: CONFIG
+    cause: "S3 location is not registered with Lake Formation"
+    fix_type: config_change
+    resolution: "Register the S3 location: lakeformation.register_resource(ResourceArn=s3_arn)"
+
+  - pattern: "GlueEncryptionException"
+    category: ENCRYPTION
+    cause: "Glue Data Catalog encryption settings mismatch or missing KMS permissions"
+    fix_type: update_iam
+    resolution: "Add kms:Decrypt and kms:GenerateDataKey permissions for the catalog encryption key"
+
+# -- 24. Tags (Resource Tags) ------------------------------------------------
+tags:
+  note: >
+    Lake Formation resources themselves have limited tagging support. LF-Tags
+    (section 11) are a separate concept — they are data governance tags for
+    access control, not AWS resource tags.
+  resource_tags:
+    lf_tag_resource: "Not taggable with AWS resource tags"
+    data_lake_settings: "Not taggable"
+    permissions: "Not taggable"
+    registered_resources: "Not taggable"
+  note_for_pipeline: >
+    Lake Formation renderer does not use _tags_block(bp) because the primary
+    resources (lakeformation_resource, lakeformation_data_lake_settings) do
+    not support AWS resource tags. Tags are applied to the S3 buckets and
+    Glue resources that Lake Formation governs.
+
+# -- 25. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: lakeformation
+  description: >
+    Lake Formation permissions via grant_permissions()/revoke_permissions().
+    Resource registration (S3 paths) via register_resource(). Data lake settings
+    (admins, default permissions) via put_data_lake_settings().
+  config_update:
+    client: lakeformation
+    operation: grant_permissions
+    note: "Grant/revoke access to databases/tables for specific IAM principals"
+  code_update_steps:
+    - "lf = boto3.client('lakeformation', region_name=region)"
+    - "settings = lf.get_data_lake_settings()['DataLakeSettings']"
+    - "resources = lf.list_resources()['ResourceInfoList']"
+    - "perms = lf.list_permissions()['PrincipalResourcePermissions']"
+    - "lf.grant_permissions(Principal={'DataLakePrincipalIdentifier': role_arn}, Resource={'Table': {'DatabaseName': db, 'Name': table}}, Permissions=['SELECT', 'DESCRIBE'])"
+  discovery_ops:
+    - op: get_data_lake_settings
+      returns: ["DataLakeSettings.DataLakeAdmins", "DataLakeSettings.CreateDatabaseDefaultPermissions", "DataLakeSettings.CreateTableDefaultPermissions"]
+    - op: list_resources
+      returns: ["ResourceInfoList[].ResourceArn", "ResourceInfoList[].RoleArn"]
+    - op: list_permissions
+      returns: ["PrincipalResourcePermissions[].Principal", "PrincipalResourcePermissions[].Resource", "PrincipalResourcePermissions[].Permissions"]
+    - op: list_lf_tags
+      returns: ["LFTags[].TagKey", "LFTags[].TagValues"]

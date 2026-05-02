@@ -1,0 +1,1173 @@
+# ============================================================================
+# Step Functions Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Step Functions knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/stepfunctions.yaml with
+# exhaustive coverage of ASL, state types, service integrations, error handling,
+# IAM, and the complete 15-way dispatch logic in the renderer.
+#
+# Structure:
+#   1. identity              - service metadata & Terraform mapping
+#   2. naming                - resource name constraints
+#   3. defaults              - Terraform attribute defaults
+#   4. quotas                - AWS service limits
+#   5. state_machine_types   - STANDARD vs EXPRESS comparison
+#   6. amazon_states_language - ASL structure, top-level fields
+#   7. states                - all 8 state types with fields
+#   8. service_integrations  - 15-way dispatch (THE critical section)
+#   9. error_handling        - retries, catches, error codes
+#  10. patterns              - request-response, .sync, .waitForTaskToken, Map, Parallel
+#  11. input_output          - InputPath, OutputPath, ResultPath, ResultSelector, Parameters
+#  12. logging               - CloudWatch logging configuration
+#  13. encryption            - at rest encryption
+#  14. iam                   - complete action catalog, integration graph rules
+#  15. env_vars              - auto-wired environment variables
+#  16. vpc_triggers          - VPC placement rules
+#  17. integrations          - wiring ownership with all connected services
+#  18. terraform_resources   - all TF resource types
+#  19. boto3_operations      - complete API reference
+#  20. runtime_diagnostics   - error patterns & auto-fix rules
+#  21. tags                  - tagging constraints
+#  22. code_update           - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity ---------------------------------------------------------------
+identity:
+  service_type: stepfunctions
+  aws_service_name: "AWS Step Functions"
+  is_principal: true             # Step Functions has an IAM execution role
+  terraform_resource: aws_sfn_state_machine
+  description: >
+    Serverless workflow orchestration service that coordinates AWS services using
+    visual workflows defined in Amazon States Language (ASL). Step Functions manages
+    state, checkpoints, and retries for distributed applications.
+  free_tier:
+    status: always_free
+    details: "4,000 state transitions/month for Standard workflows. Express: no free tier."
+  pricing_model: per_state_transition  # Standard: $0.025/1000 transitions; Express: per request + duration
+
+# -- 2. Naming -----------------------------------------------------------------
+naming:
+  resource_name_limit: 80        # state machine name max
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_-"
+  rules:
+    - "State machine names must be unique within an account and region"
+    - "Names can contain letters, digits, hyphens, and underscores"
+    - "Engine uses naming.py resource_name() which produces lowercase-hyphenated names"
+  terraform_label_limit: 64
+  state_name_limit: 80           # individual state name max within ASL
+
+# -- 3. Defaults ----------------------------------------------------------------
+defaults:
+  type: "STANDARD"               # STANDARD or EXPRESS
+  # Logging enabled by default in our renderer
+  logging_level: "ALL"           # OFF, ALL, ERROR, FATAL
+  include_execution_data: true
+  # No X-Ray tracing by default (costs extra)
+  tracing_enabled: false
+
+# -- 4. Quotas -----------------------------------------------------------------
+quotas:
+  max_state_machines_per_region: 10000    # adjustable
+  max_execution_history_events: 25000     # STANDARD only; triggers ExecutionHistoryLimitExceeded
+  max_open_executions_per_sm: 1000000     # STANDARD; EXPRESS has no limit
+  max_execution_time: "365 days"          # STANDARD
+  express_max_execution_time: "5 minutes" # EXPRESS
+  max_input_size: "256 KB"               # UTF-8 string
+  max_output_size: "256 KB"
+  max_definition_size: "1 MB"            # ASL JSON
+  max_state_name_length: 80
+  max_states_per_machine: 10000
+  max_activities_per_region: 10000
+  max_concurrent_task_tokens: 1000
+  map_state_max_concurrency: 10000        # per Map state execution
+  distributed_map_max_concurrency: 10000
+  distributed_map_max_items: 100000000    # 100 million
+  api_throttle:
+    StartExecution: "1000/sec per account"
+    Express_StartExecution: "unlimited (up to regional limit)"
+    DescribeExecution: "300/sec"
+    GetExecutionHistory: "20/sec"
+
+# -- 5. State Machine Types -----------------------------------------------------
+state_machine_types:
+  STANDARD:
+    description: "Exactly-once execution with full execution history"
+    max_duration: "365 days"
+    pricing: "$0.025 per 1,000 state transitions"
+    execution_semantics: "exactly-once"
+    features:
+      - "Full execution history (up to 25,000 events)"
+      - "Start execution from API, console, EventBridge, Lambda"
+      - "Supports .sync and .waitForTaskToken patterns"
+      - "Human approval workflows"
+      - "Long-running workflows (up to 1 year)"
+    free_tier: "4,000 state transitions/month"
+    use_cases:
+      - "ETL pipeline orchestration"
+      - "Multi-step data processing"
+      - "Human-in-the-loop workflows"
+      - "Long-running batch jobs"
+
+  EXPRESS:
+    description: "At-least-once execution, high throughput, short duration"
+    max_duration: "5 minutes"
+    pricing: "Per request ($1/million) + per GB-second duration"
+    execution_semantics: "at-least-once"
+    features:
+      - "High throughput (unlimited concurrent executions)"
+      - "No execution history API (use CloudWatch Logs)"
+      - "Cannot use .sync or .waitForTaskToken"
+      - "Cannot be started by EventBridge rules"
+    use_cases:
+      - "IoT data ingestion"
+      - "Real-time event processing"
+      - "Microservice orchestration"
+      - "High-volume API backends"
+    subtypes:
+      SYNCHRONOUS:
+        description: "Caller waits for completion"
+        api: "StartSyncExecution"
+        max_duration: "5 minutes"
+      ASYNCHRONOUS:
+        description: "Fire-and-forget"
+        api: "StartExecution"
+        max_duration: "5 minutes"
+
+# -- 6. Amazon States Language (ASL) --------------------------------------------
+amazon_states_language:
+  description: >
+    JSON-based language for defining state machine workflows. Each state machine
+    has a top-level object with Comment, StartAt, and States fields.
+  top_level_fields:
+    Comment: {type: string, optional: true, description: "Human-readable description"}
+    StartAt: {type: string, required: true, description: "Name of the first state to execute"}
+    States: {type: object, required: true, description: "Map of state name -> state definition"}
+    TimeoutSeconds: {type: integer, optional: true, description: "Max execution time"}
+    Version: {type: string, optional: true, description: "ASL version, always '1.0'"}
+
+  # The renderer builds ASL from the integration graph:
+  renderer_behavior: >
+    _build_state_machine_definition() walks bp.integrations_as_source, creates one
+    Task state per outgoing integration, chains them sequentially (Next/End), and
+    picks the correct ASL Resource ARN based on the target service type. If there
+    are no outgoing integrations, it creates a single PassState.
+
+# -- 7. States ------------------------------------------------------------------
+states:
+  Task:
+    description: "Execute work — call an AWS service, activity, or Lambda"
+    fields:
+      Type: "Task"
+      Resource: "ARN of the service integration or activity"
+      Parameters: "Input parameters (can use JsonPath with .$ suffix)"
+      ResultPath: "Where to place the result in the state output"
+      ResultSelector: "Transform the result before placing it"
+      TimeoutSeconds: "Max seconds to wait for completion"
+      HeartbeatSeconds: "Seconds between heartbeats (for activities)"
+      Retry: "Retry configuration array"
+      Catch: "Error handler array"
+      Next: "Next state (mutually exclusive with End)"
+      End: "Boolean — true if this is the terminal state"
+    note: "This is the most important state type — used for ALL service integrations"
+
+  Pass:
+    description: "Pass input to output, optionally injecting data"
+    fields:
+      Type: "Pass"
+      Result: "Static data to inject"
+      ResultPath: "Where to place Result"
+      Parameters: "Transform input"
+      Next: "or End"
+    use_cases:
+      - "Inject static data into the workflow"
+      - "Transform state between steps"
+      - "Debug/placeholder during development"
+
+  Choice:
+    description: "Branch based on input conditions"
+    fields:
+      Type: "Choice"
+      Choices: "Array of {Variable, Comparison, Next} rules"
+      Default: "Default state if no choice matches"
+    comparison_operators:
+      string: ["StringEquals", "StringLessThan", "StringGreaterThan", "StringMatches"]
+      numeric: ["NumericEquals", "NumericLessThan", "NumericGreaterThan",
+                "NumericLessThanEquals", "NumericGreaterThanEquals"]
+      boolean: ["BooleanEquals"]
+      timestamp: ["TimestampEquals", "TimestampLessThan", "TimestampGreaterThan"]
+      null_check: ["IsNull", "IsPresent", "IsNumeric", "IsString", "IsBoolean", "IsTimestamp"]
+      logical: ["And", "Or", "Not"]
+
+  Wait:
+    description: "Pause execution for a specified time"
+    fields:
+      Type: "Wait"
+      Seconds: "Fixed wait duration"
+      Timestamp: "ISO 8601 timestamp to wait until"
+      SecondsPath: "JsonPath to seconds value"
+      TimestampPath: "JsonPath to timestamp value"
+      Next: "or End"
+
+  Succeed:
+    description: "Terminal success state"
+    fields:
+      Type: "Succeed"
+    note: "No Next or End field — always terminal"
+
+  Fail:
+    description: "Terminal failure state"
+    fields:
+      Type: "Fail"
+      Error: "Error name string"
+      Cause: "Human-readable error cause"
+
+  Parallel:
+    description: "Execute multiple branches concurrently"
+    fields:
+      Type: "Parallel"
+      Branches: "Array of state machine definitions (each with StartAt + States)"
+      ResultPath: "Where to place array of branch results"
+      Retry: "Retry configuration"
+      Catch: "Error handler"
+      Next: "or End"
+    note: "Output is an array of results, one per branch, in order"
+
+  Map:
+    description: "Iterate over an array, running a sub-workflow for each element"
+    fields:
+      Type: "Map"
+      ItemsPath: "JsonPath to the input array (default: $)"
+      ItemSelector: "Transform each item before passing to iterator (replaces Parameters)"
+      ItemProcessor: "The sub-workflow definition"
+      MaxConcurrency: "Max parallel iterations (0 = unlimited)"
+      ResultPath: "Where to place results array"
+      Retry: "Retry configuration"
+      Catch: "Error handler"
+      Next: "or End"
+    modes:
+      INLINE:
+        description: "Process items within the parent execution"
+        max_items: 40
+        max_concurrency: 40
+      DISTRIBUTED:
+        description: "Process items as child executions (massive scale)"
+        max_items: 100000000
+        max_concurrency: 10000
+        terraform_attribute: "N/A (defined in ASL, not TF)"
+
+# -- 8. Service Integrations (15-way Dispatch) ----------------------------------
+# THIS IS THE CRITICAL SECTION — mirrors _build_state_machine_definition() in
+# hcl_renderer.py exactly. Each entry corresponds to one branch of the
+# if/elif chain in the renderer.
+service_integrations:
+  description: >
+    The renderer's _build_state_machine_definition() function dispatches on
+    target service type to create the correct ASL Task state. Each integration
+    has a specific Resource ARN pattern and Parameters structure.
+
+  # Integration patterns
+  patterns:
+    request_response:
+      description: "Call the service and immediately proceed (don't wait for completion)"
+      resource_suffix: ""
+      note: "Default pattern if no suffix is specified"
+    sync:
+      description: "Call the service and wait for completion before proceeding"
+      resource_suffix: ".sync"
+      note: "Only available for STANDARD state machines"
+    wait_for_task_token:
+      description: "Pause until an external process sends a task token"
+      resource_suffix: ".waitForTaskToken"
+      note: "Only available for STANDARD state machines"
+
+  # === 15 service type dispatches ===
+
+  lambda:
+    renderer_branch: "tgt.type == 'lambda'"
+    asl_resource: "arn:aws:states:::lambda:invoke"
+    pattern: "request-response (Lambda handles sync natively)"
+    parameters:
+      "FunctionName.$": "$.function_name"
+      "Payload.$": "$"
+    iam_required:
+      - "lambda:InvokeFunction"
+    note: >
+      Lambda invocations are synchronous by default. The result is available
+      immediately. No .sync needed.
+
+  glue:
+    renderer_branch: "tgt.type == 'glue'"
+    asl_resource: "arn:aws:states:::glue:startJobRun.sync"
+    pattern: "sync (wait for Glue job to complete)"
+    parameters:
+      "JobName": "{target_service_name}"
+    iam_required:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:GetJobRuns"
+      - "glue:BatchStopJobRun"
+    note: "The .sync suffix makes Step Functions poll until the Glue job completes."
+
+  dynamodb:
+    renderer_branch: "tgt.type == 'dynamodb'"
+    asl_resource: "arn:aws:states:::dynamodb:putItem"
+    pattern: "request-response"
+    parameters:
+      "TableName": "{target_service_name}"
+      "Item":
+        "id":
+          "S.$": "$.id"
+    iam_required:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:DeleteItem"
+    note: >
+      The renderer defaults to putItem. Other DynamoDB operations available:
+      getItem, updateItem, deleteItem, query, scan. Each has its own Resource ARN.
+    all_operations:
+      - "arn:aws:states:::dynamodb:putItem"
+      - "arn:aws:states:::dynamodb:getItem"
+      - "arn:aws:states:::dynamodb:updateItem"
+      - "arn:aws:states:::dynamodb:deleteItem"
+      - "arn:aws:states:::dynamodb:query"
+      - "arn:aws:states:::dynamodb:scan"
+
+  sqs:
+    renderer_branch: "tgt.type == 'sqs'"
+    asl_resource: "arn:aws:states:::sqs:sendMessage"
+    pattern: "request-response"
+    parameters:
+      "QueueUrl.$": "$.queue_url"
+      "MessageBody.$": "$"
+    iam_required:
+      - "sqs:SendMessage"
+
+  sns:
+    renderer_branch: "tgt.type == 'sns'"
+    asl_resource: "arn:aws:states:::sns:publish"
+    pattern: "request-response"
+    parameters:
+      "TopicArn.$": "$.topic_arn"
+      "Message.$": "$"
+    iam_required:
+      - "sns:Publish"
+
+  s3:
+    renderer_branch: "tgt.type == 's3'"
+    asl_resource: "arn:aws:states:::aws-sdk:s3:putObject"
+    pattern: "request-response (AWS SDK integration)"
+    parameters:
+      "Bucket.$": "$.bucket"
+      "Key.$": "$.key"
+      "Body.$": "$.body"
+    iam_required:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    note: >
+      Uses the AWS SDK integration pattern (arn:aws:states:::aws-sdk:*) rather
+      than an optimized integration. This allows any S3 API call.
+    all_operations:
+      - "arn:aws:states:::aws-sdk:s3:putObject"
+      - "arn:aws:states:::aws-sdk:s3:getObject"
+      - "arn:aws:states:::aws-sdk:s3:listObjectsV2"
+      - "arn:aws:states:::aws-sdk:s3:deleteObject"
+      - "arn:aws:states:::aws-sdk:s3:copyObject"
+
+  emr_serverless:
+    renderer_branch: "tgt.type == 'emr_serverless'"
+    asl_resource: "arn:aws:states:::emr-serverless:startJobRun.sync"
+    pattern: "sync (wait for job to complete)"
+    parameters:
+      "ApplicationId.$": "$.application_id"
+      "ExecutionRoleArn.$": "$.execution_role_arn"
+      "JobDriver":
+        "SparkSubmit":
+          "EntryPoint.$": "$.entry_point"
+    iam_required:
+      - "emr-serverless:StartJobRun"
+      - "emr-serverless:GetJobRun"
+      - "emr-serverless:CancelJobRun"
+      - "iam:PassRole"
+    note: >
+      The .sync suffix makes Step Functions poll the job run status until
+      completion. iam:PassRole is needed because the execution role ARN is
+      passed to EMR Serverless.
+
+  emr:
+    renderer_branch: "tgt.type == 'emr'"
+    asl_resource: "arn:aws:states:::elasticmapreduce:addStep.sync"
+    pattern: "sync (wait for EMR step to complete)"
+    parameters:
+      "ClusterId.$": "$.cluster_id"
+      "Step":
+        "Name": "{target_service_name}"
+        "ActionOnFailure": "CONTINUE"
+        "HadoopJarStep":
+          "Jar": "command-runner.jar"
+          "Args.$": "$.step_args"
+    iam_required:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:CancelSteps"
+      - "iam:PassRole"
+    note: >
+      The .sync suffix makes Step Functions poll the step status. iam:PassRole
+      is needed for the EMR service role.
+
+  sagemaker:
+    renderer_branch: "tgt.type == 'sagemaker'"
+    asl_resource: "arn:aws:states:::sagemaker:createTransformJob.sync"
+    pattern: "sync (wait for transform job to complete)"
+    parameters:
+      "TransformJobName.$": "$.job_name"
+      "ModelName.$": "$.model_name"
+      "TransformInput":
+        "DataSource":
+          "S3DataSource":
+            "S3DataType": "S3Prefix"
+            "S3Uri.$": "$.input_uri"
+        "ContentType": "text/csv"
+      "TransformOutput":
+        "S3OutputPath.$": "$.output_uri"
+      "TransformResources":
+        "InstanceCount": 1
+        "InstanceType": "ml.m5.large"
+    iam_required:
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+      - "sagemaker:StopTransformJob"
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:StopTrainingJob"
+      - "iam:PassRole"
+    note: >
+      The renderer defaults to createTransformJob. Other SageMaker operations:
+      createTrainingJob.sync, createProcessingJob.sync, createEndpoint.sync.
+    all_operations:
+      - "arn:aws:states:::sagemaker:createTransformJob.sync"
+      - "arn:aws:states:::sagemaker:createTrainingJob.sync"
+      - "arn:aws:states:::sagemaker:createProcessingJob.sync"
+      - "arn:aws:states:::sagemaker:createEndpoint"
+      - "arn:aws:states:::sagemaker:createModel"
+
+  athena:
+    renderer_branch: "tgt.type == 'athena'"
+    asl_resource: "arn:aws:states:::athena:startQueryExecution.sync"
+    pattern: "sync (wait for query to complete)"
+    parameters:
+      "QueryString.$": "$.query"
+      "WorkGroup": "{target_service_name}"
+    iam_required:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+    note: >
+      After the query completes, use getQueryResults to retrieve the data.
+      Athena writes results to S3 automatically.
+
+  eventbridge:
+    renderer_branch: "tgt.type == 'eventbridge'"
+    asl_resource: "arn:aws:states:::events:putEvents"
+    pattern: "request-response"
+    parameters:
+      "Entries":
+        - "Source": "stepfunctions.{service_name}"
+          "DetailType": "StepFunctionOutput"
+          "Detail.$": "$"
+    iam_required:
+      - "events:PutEvents"
+    note: "Sends a custom event to the default EventBridge bus."
+
+  kinesis_streams:
+    renderer_branch: "N/A (covered by spec IAM, not renderer dispatch)"
+    asl_resource: "arn:aws:states:::aws-sdk:kinesis:putRecord"
+    pattern: "request-response (AWS SDK integration)"
+    iam_required:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  redshift:
+    renderer_branch: "N/A (covered by spec IAM, not renderer dispatch)"
+    asl_resource: "arn:aws:states:::aws-sdk:redshift-data:executeStatement"
+    pattern: "request-response (AWS SDK integration)"
+    iam_required:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+
+  fallback:
+    renderer_branch: "else (unknown service type)"
+    asl_resource: "arn:aws:states:::aws-sdk:{type}:invoke"
+    pattern: "request-response (generic AWS SDK)"
+    parameters: {}
+    note: >
+      For service types not explicitly handled by the renderer, it generates
+      a generic AWS SDK integration resource. The parameters are empty and
+      must be customized by the user.
+
+  # === Additional integrations NOT in renderer but supported by ASL ===
+  additional_integrations:
+    ecs:
+      asl_resource: "arn:aws:states:::ecs:runTask.sync"
+      note: "Run ECS/Fargate tasks"
+    codebuild:
+      asl_resource: "arn:aws:states:::codebuild:startBuild.sync"
+    batch:
+      asl_resource: "arn:aws:states:::batch:submitJob.sync"
+    bedrock:
+      asl_resource: "arn:aws:states:::bedrock:invokeModel"
+    mediaconvert:
+      asl_resource: "arn:aws:states:::mediaconvert:createJob.sync"
+
+# -- 9. Error Handling ----------------------------------------------------------
+error_handling:
+  retry:
+    description: "Automatic retry on task failure"
+    fields:
+      ErrorEquals: "List of error names to match"
+      IntervalSeconds: "Initial delay between retries (default 1)"
+      MaxAttempts: "Max retries (default 3, set 0 to disable)"
+      BackoffRate: "Multiplier for delay each attempt (default 2.0)"
+      MaxDelaySeconds: "Cap on delay (optional)"
+      JitterStrategy: "FULL or NONE (optional)"
+    example:
+      - ErrorEquals: ["States.TaskFailed", "States.Timeout"]
+        IntervalSeconds: 5
+        MaxAttempts: 3
+        BackoffRate: 2.0
+
+  catch:
+    description: "Redirect to a fallback state on error"
+    fields:
+      ErrorEquals: "List of error names to match"
+      Next: "State to transition to"
+      ResultPath: "Where to place error info (default: replaces output)"
+    example:
+      - ErrorEquals: ["States.ALL"]
+        Next: "HandleError"
+        ResultPath: "$.error"
+
+  predefined_errors:
+    "States.ALL": "Matches any error"
+    "States.Timeout": "Task exceeded TimeoutSeconds"
+    "States.TaskFailed": "Task returned a failure"
+    "States.Permissions": "Insufficient IAM permissions"
+    "States.ResultPathMatchFailure": "ResultPath does not match state output"
+    "States.ParameterPathFailure": "JsonPath in Parameters is invalid"
+    "States.BranchFailed": "A Parallel or Map branch failed"
+    "States.NoChoiceMatched": "No Choice rule matched and no Default"
+    "States.IntrinsicFailure": "Intrinsic function call failed"
+    "States.ExceedToleratedFailureThreshold": "Distributed Map exceeded failure threshold"
+    "States.ItemReaderFailed": "Distributed Map item reader failed"
+    "States.HeartbeatTimeout": "Activity did not send heartbeat in time"
+    "States.DataLimitExceeded": "Input or output exceeded 256 KB"
+
+  service_errors:
+    "Lambda.ServiceException": "Lambda service error"
+    "Lambda.AWSLambdaException": "Lambda internal error"
+    "Lambda.SdkClientException": "SDK client error calling Lambda"
+    "Lambda.TooManyRequestsException": "Lambda throttled"
+    "Glue.EntityNotFoundException": "Glue job not found"
+    "DynamoDB.ConditionalCheckFailedException": "DynamoDB condition not met"
+    "SQS.NonExistentQueue": "SQS queue not found"
+
+# -- 10. Patterns ---------------------------------------------------------------
+patterns:
+  sequential_chain:
+    description: "Linear sequence of tasks"
+    renderer_default: true
+    note: "The renderer chains all integration targets sequentially using Next/End"
+
+  parallel_execution:
+    description: "Execute multiple branches concurrently"
+    asl_type: "Parallel"
+    note: "Not currently generated by renderer — user must customize ASL"
+
+  map_iteration:
+    description: "Process an array of items with a sub-workflow"
+    asl_type: "Map"
+    modes: ["INLINE (up to 40 items)", "DISTRIBUTED (up to 100M items)"]
+    note: "Not currently generated by renderer — user must customize ASL"
+
+  choice_branching:
+    description: "Conditional branching based on data"
+    asl_type: "Choice"
+    note: "Not currently generated by renderer — user must customize ASL"
+
+  wait_for_human:
+    description: "Pause workflow until human approval"
+    pattern: ".waitForTaskToken"
+    note: "Only for STANDARD type. Not generated by renderer."
+
+  saga_pattern:
+    description: "Compensating transactions using Catch + rollback states"
+    note: "Common pattern for distributed transactions. Must be hand-crafted in ASL."
+
+# -- 11. Input/Output Processing -------------------------------------------------
+input_output:
+  description: >
+    Step Functions provides 5 fields for transforming data between states.
+    They are applied in this order: InputPath -> Parameters -> (Task execution)
+    -> ResultSelector -> ResultPath -> OutputPath
+  fields:
+    InputPath:
+      description: "JsonPath to select a subset of the state input"
+      default: "$"
+      example: "$.data"
+    Parameters:
+      description: "Construct new JSON to pass to the task. Use .$ suffix for JsonPath."
+      example: '{"TableName": "my-table", "Key.$": "$.id"}'
+    ResultSelector:
+      description: "Transform the task result before applying ResultPath"
+      example: '{"status.$": "$.SdkHttpMetadata.HttpStatusCode"}'
+    ResultPath:
+      description: "Where to place the result in the original input"
+      default: "$"
+      special: "null to discard result"
+      example: "$.taskResult"
+    OutputPath:
+      description: "JsonPath to select output for the next state"
+      default: "$"
+
+  intrinsic_functions:
+    - "States.Format('template', args...)"
+    - "States.StringToJson(string)"
+    - "States.JsonToString(json)"
+    - "States.Array(values...)"
+    - "States.ArrayPartition(array, chunk_size)"
+    - "States.ArrayContains(array, value)"
+    - "States.ArrayRange(start, end, step)"
+    - "States.ArrayGetItem(array, index)"
+    - "States.ArrayLength(array)"
+    - "States.ArrayUnique(array)"
+    - "States.Base64Encode(data)"
+    - "States.Base64Decode(data)"
+    - "States.Hash(data, algorithm)"
+    - "States.JsonMerge(json1, json2, deep)"
+    - "States.MathRandom(start, end)"
+    - "States.MathAdd(num1, num2)"
+    - "States.StringSplit(string, delimiter)"
+    - "States.UUID()"
+
+# -- 12. Logging ----------------------------------------------------------------
+logging:
+  cloudwatch:
+    description: "Step Functions can log execution events to CloudWatch Logs"
+    terraform_block: "logging_configuration"
+    attributes:
+      log_destination: "CloudWatch Log Group ARN (with :* suffix)"
+      include_execution_data: "true/false — include input/output in logs"
+      level: "OFF, ALL, ERROR, FATAL"
+    renderer_defaults:
+      log_group_pattern: "/aws/vendedlogs/states/{resource_name}"
+      include_execution_data: true
+      level: "ALL"
+    note: >
+      The renderer creates a CloudWatch Log Group and configures ALL-level logging.
+      The :* suffix on the ARN is required by Step Functions.
+  x_ray:
+    description: "Optional X-Ray distributed tracing"
+    terraform_block: "tracing_configuration { enabled = true }"
+    note: "Not enabled by default to avoid extra cost"
+
+# -- 13. Encryption -------------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Step Functions encrypts data at rest using AWS-managed keys by default"
+    custom_kms:
+      description: "Optional customer-managed KMS key"
+      terraform_attribute: "encryption_configuration { type = 'CUSTOMER_MANAGED_KMS_KEY', kms_key_id = ARN }"
+    note: "Encryption in transit is always TLS"
+
+# -- 14. IAM -------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    state_machine: "arn:aws:states:REGION:ACCOUNT:stateMachine:NAME"
+    execution: "arn:aws:states:REGION:ACCOUNT:execution:SM-NAME:EXEC-NAME"
+    activity: "arn:aws:states:REGION:ACCOUNT:activity:NAME"
+
+  # Execution role
+  roles:
+    execution_role:
+      description: "Role assumed by the state machine to invoke integrated services"
+      trust_principal: "states.amazonaws.com"
+      terraform_attribute: "role_arn"
+      note: >
+        The execution role needs permissions for ALL services the state machine
+        invokes. The spec builder computes these from the integration graph.
+
+  # Complete IAM action catalog
+  actions:
+    state_machine_management:
+      - "states:CreateStateMachine"
+      - "states:UpdateStateMachine"
+      - "states:DeleteStateMachine"
+      - "states:DescribeStateMachine"
+      - "states:ListStateMachines"
+      - "states:DescribeStateMachineForExecution"
+    execution_management:
+      - "states:StartExecution"
+      - "states:StartSyncExecution"    # EXPRESS synchronous only
+      - "states:StopExecution"
+      - "states:DescribeExecution"
+      - "states:ListExecutions"
+      - "states:GetExecutionHistory"
+      - "states:RedriveExecution"       # re-run from failed state
+    activity_management:
+      - "states:CreateActivity"
+      - "states:DeleteActivity"
+      - "states:DescribeActivity"
+      - "states:ListActivities"
+      - "states:GetActivityTask"
+      - "states:SendTaskSuccess"
+      - "states:SendTaskFailure"
+      - "states:SendTaskHeartbeat"
+    tagging:
+      - "states:TagResource"
+      - "states:UntagResource"
+      - "states:ListTagsForResource"
+    map_run:
+      - "states:DescribeMapRun"
+      - "states:UpdateMapRun"
+      - "states:ListMapRuns"
+
+  # Integration graph IAM rules (used by spec_builder)
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    # Also needs logs:CreateLogDelivery, logs:PutResourcePolicy for
+    # vendedlogs, but these are typically covered by service-linked role
+  as_target_of:
+    lambda:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    eventbridge:
+      - "states:StartExecution"
+    cloudwatch:
+      - "states:StartExecution"
+  as_source_to:
+    lambda:
+      - "lambda:InvokeFunction"
+    glue:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:GetJobRuns"
+      - "glue:BatchStopJobRun"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:DeleteItem"
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    sqs:
+      - "sqs:SendMessage"
+    sns:
+      - "sns:Publish"
+    emr_serverless:
+      - "emr-serverless:StartJobRun"
+      - "emr-serverless:GetJobRun"
+      - "emr-serverless:CancelJobRun"
+      - "iam:PassRole"
+    emr:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:CancelSteps"
+      - "iam:PassRole"
+    sagemaker:
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:StopTrainingJob"
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+      - "iam:PassRole"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    eventbridge:
+      - "events:PutEvents"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+    redshift:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+
+  # Condition keys
+  condition_keys:
+    - "states:StateMachineArn"
+    - "aws:RequestTag/${TagKey}"
+    - "aws:ResourceTag/${TagKey}"
+    - "aws:TagKeys"
+
+# -- 15. Environment Variables --------------------------------------------------
+env_vars:
+  as_source_to:
+    lambda:
+      pattern: "{PEER_UPPER}_FUNCTION_ARN"
+      ref: "aws_lambda_function.{peer_label}.arn"
+    sqs:
+      pattern: "{PEER_UPPER}_QUEUE_URL"
+      ref: "aws_sqs_queue.{peer_label}.url"
+    sns:
+      pattern: "{PEER_UPPER}_TOPIC_ARN"
+      ref: "aws_sns_topic.{peer_label}.arn"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    emr_serverless:
+      - pattern: "{PEER_UPPER}_APPLICATION_ID"
+        ref: "aws_emrserverless_application.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_EXECUTION_ROLE_ARN"
+        ref: "aws_iam_role.{peer_label}_role.arn"
+    emr:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_emr_cluster.{peer_label}.id"
+    glue:
+      - pattern: "{PEER_UPPER}_CRAWLER_NAME"
+        ref: "aws_glue_crawler.{peer_label}.name"
+    athena:
+      - pattern: "{PEER_UPPER}_WORKGROUP"
+        ref: "aws_athena_workgroup.{peer_label}.name"
+    sagemaker:
+      - pattern: "{PEER_UPPER}_ENDPOINT_NAME"
+        ref: "aws_sagemaker_endpoint.{peer_label}.name"
+    redshift:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_redshift_cluster.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_DATABASE"
+        ref: "aws_redshift_cluster.{peer_label}.database_name"
+
+# -- 16. VPC Triggers -----------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - redshift
+
+# -- 17. Integration Wiring Ownership ------------------------------------------
+integrations:
+  lambda_to_stepfunctions:
+    description: "Lambda starts Step Functions execution"
+    owned_by: "lambda"
+    iam_on_caller:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+
+  eventbridge_to_stepfunctions:
+    description: "EventBridge rule triggers Step Functions execution"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_target (arn = state machine ARN)"
+      - "aws_iam_role (for EventBridge to assume, with states:StartExecution)"
+
+  cloudwatch_to_stepfunctions:
+    description: "CloudWatch scheduled rule triggers Step Functions"
+    owned_by: "cloudwatch"
+    terraform_resources:
+      - "aws_cloudwatch_event_target"
+
+  stepfunctions_to_lambda:
+    description: "State machine invokes Lambda function"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::lambda:invoke"
+
+  stepfunctions_to_glue:
+    description: "State machine starts Glue job run"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::glue:startJobRun.sync"
+
+  stepfunctions_to_dynamodb:
+    description: "State machine reads/writes DynamoDB"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::dynamodb:putItem"
+
+  stepfunctions_to_sqs:
+    description: "State machine sends message to SQS"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::sqs:sendMessage"
+
+  stepfunctions_to_sns:
+    description: "State machine publishes to SNS"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::sns:publish"
+
+  stepfunctions_to_s3:
+    description: "State machine puts object to S3"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::aws-sdk:s3:putObject"
+
+  stepfunctions_to_emr_serverless:
+    description: "State machine starts EMR Serverless job run"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::emr-serverless:startJobRun.sync"
+
+  stepfunctions_to_emr:
+    description: "State machine adds step to EMR cluster"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::elasticmapreduce:addStep.sync"
+
+  stepfunctions_to_sagemaker:
+    description: "State machine runs SageMaker job"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::sagemaker:createTransformJob.sync"
+
+  stepfunctions_to_athena:
+    description: "State machine runs Athena query"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::athena:startQueryExecution.sync"
+
+  stepfunctions_to_eventbridge:
+    description: "State machine emits EventBridge event"
+    owned_by: "stepfunctions (ASL definition)"
+    asl_resource: "arn:aws:states:::events:putEvents"
+
+# -- 18. Terraform Resources ----------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_sfn_state_machine"
+      description: "The state machine"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group at /aws/vendedlogs/states/{resource_name}"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Execution role (trust: states.amazonaws.com)"
+      always_created: true
+      label_suffix: "_role"
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy"
+      always_created: true
+      label_suffix: "_policy"
+
+  renderer_details:
+    definition_handling: >
+      The renderer builds the ASL definition as a Python dict via
+      _build_state_machine_definition(), then double-encodes it with
+      json.dumps(json.dumps(definition)) for Terraform's HCL string escaping.
+    logging_block: >
+      logging_configuration block with log_destination = "${log_group_arn}:*",
+      include_execution_data = true, level = "ALL"
+
+# -- 19. Boto3 Operations -------------------------------------------------------
+boto3_operations:
+  client: "stepfunctions"
+  state_machine_operations:
+    create_state_machine:
+      description: "Create a new state machine"
+      parameters:
+        name: {type: string, required: true}
+        definition: {type: string, required: true, description: "ASL JSON string"}
+        roleArn: {type: string, required: true}
+        type: {type: string, description: "STANDARD or EXPRESS"}
+        tags: {type: list}
+        loggingConfiguration: {type: object}
+        tracingConfiguration: {type: object}
+      returns: ["stateMachineArn", "creationDate"]
+    update_state_machine:
+      description: "Update definition, role, logging, or tracing"
+      parameters:
+        stateMachineArn: {type: string, required: true}
+        definition: {type: string}
+        roleArn: {type: string}
+        loggingConfiguration: {type: object}
+        tracingConfiguration: {type: object}
+      note: "Cannot change type (STANDARD/EXPRESS) after creation"
+    describe_state_machine:
+      description: "Get state machine details"
+      parameters:
+        stateMachineArn: {type: string, required: true}
+      returns: ["name", "stateMachineArn", "definition", "roleArn", "type",
+                "status", "loggingConfiguration", "creationDate", "updateDate"]
+    list_state_machines:
+      description: "List all state machines"
+      parameters:
+        maxResults: {type: integer}
+        nextToken: {type: string}
+      returns: ["stateMachines[].stateMachineArn", "stateMachines[].name", "stateMachines[].type"]
+    delete_state_machine:
+      description: "Delete a state machine"
+      parameters:
+        stateMachineArn: {type: string, required: true}
+    tag_resource:
+      description: "Add tags to a state machine"
+      parameters:
+        resourceArn: {type: string, required: true}
+        tags: {type: list, required: true}
+
+  execution_operations:
+    start_execution:
+      description: "Start a new execution"
+      parameters:
+        stateMachineArn: {type: string, required: true}
+        name: {type: string, description: "Unique execution name (auto-generated if omitted)"}
+        input: {type: string, description: "JSON string input (max 256 KB)"}
+      returns: ["executionArn", "startDate"]
+    start_sync_execution:
+      description: "Start synchronous execution (EXPRESS only)"
+      parameters:
+        stateMachineArn: {type: string, required: true}
+        name: {type: string}
+        input: {type: string}
+      returns: ["executionArn", "status", "output", "error", "cause"]
+    describe_execution:
+      description: "Get execution status"
+      parameters:
+        executionArn: {type: string, required: true}
+      returns: ["executionArn", "status", "input", "output", "startDate",
+                "stopDate", "error", "cause", "stateMachineArn"]
+    list_executions:
+      description: "List executions"
+      parameters:
+        stateMachineArn: {type: string, required: true}
+        statusFilter: {type: string, description: "RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED"}
+        maxResults: {type: integer}
+      returns: ["executions[].executionArn", "executions[].status", "executions[].startDate", "executions[].stopDate"]
+    stop_execution:
+      description: "Stop a running execution"
+      parameters:
+        executionArn: {type: string, required: true}
+        error: {type: string}
+        cause: {type: string}
+    get_execution_history:
+      description: "Get event history"
+      parameters:
+        executionArn: {type: string, required: true}
+        maxResults: {type: integer}
+        reverseOrder: {type: boolean}
+      returns: ["events[].timestamp", "events[].type", "events[].id",
+                "events[].previousEventId", "events[].taskSucceededEventDetails"]
+    redrive_execution:
+      description: "Re-run execution from the point of failure"
+      parameters:
+        executionArn: {type: string, required: true}
+      returns: ["redriveDate"]
+      note: "Only for STANDARD type. Restarts from the failed state."
+
+# -- 20. Runtime Diagnostics ----------------------------------------------------
+runtime_diagnostics:
+  - pattern: "States.TaskFailed|Task.*failed"
+    category: CONFIG
+    cause: "A task state failed — check the downstream service logs for the actual error"
+    fix_type: check_downstream
+    resolution: "Look at the logs of the task's target service (Lambda, Glue, EMR) for the root cause"
+
+  - pattern: "AccessDenied|not authorized|iam:PassRole"
+    category: PERMISSION
+    cause: "Step Functions IAM role is missing a permission — often iam:PassRole for EMR/SageMaker"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={statement})"
+
+  - pattern: "States.Timeout"
+    category: TIMEOUT
+    cause: "Task exceeded TimeoutSeconds or state machine exceeded TimeoutSeconds"
+    fix_type: update_config
+    resolution: "Increase TimeoutSeconds in the ASL definition or optimize the task"
+
+  - pattern: "States.DataLimitExceeded"
+    category: SIZE_LIMIT
+    cause: "Input or output exceeded 256 KB limit"
+    fix_type: code_change
+    resolution: "Use S3 to pass large payloads. Store data in S3 and pass the S3 key through the workflow."
+
+  - pattern: "ExecutionAlreadyExists"
+    category: NAME_CONFLICT
+    cause: "Execution name already used (names must be unique per state machine)"
+    fix_type: code_change
+    resolution: "Use unique execution names or omit the name parameter for auto-generation"
+
+  - pattern: "ExecutionDoesNotExist"
+    category: RESOURCE_NOT_FOUND
+    cause: "Execution ARN is invalid or execution has been purged"
+    fix_type: manual
+    resolution: "Check execution ARN. STANDARD executions are retained for 90 days."
+
+  - pattern: "InvalidDefinition"
+    category: VALIDATION
+    cause: "ASL JSON definition has syntax or semantic errors"
+    fix_type: update_config
+    resolution: "Validate ASL in Step Functions console or via create_state_machine dry run"
+
+  - pattern: "States.NoChoiceMatched"
+    category: CONFIG
+    cause: "No Choice rule matched and no Default state specified"
+    fix_type: update_config
+    resolution: "Add a Default state to the Choice state in the ASL definition"
+
+  - pattern: "ExecutionHistoryLimitExceeded"
+    category: QUOTA
+    cause: "Execution exceeded 25,000 history events (STANDARD only)"
+    fix_type: architecture
+    resolution: "Break workflow into child executions (StartExecution from a Task state) or use Distributed Map"
+
+  - pattern: "StateMachineDoesNotExist"
+    category: RESOURCE_NOT_FOUND
+    cause: "State machine was deleted"
+    fix_type: manual
+    resolution: "Re-run terraform apply to recreate the state machine"
+
+# -- 21. Tags -------------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 22. Code Update (Developer Agent) ------------------------------------------
+code_update:
+  method: sfn_definition
+  boto3_client: stepfunctions
+  description: >
+    State machine definition is JSON stored in AWS. Get via describe_state_machine(),
+    modify the definition dict (Python json.loads/dumps), update via update_state_machine().
+    Cannot change type (STANDARD/EXPRESS) after creation.
+  config_update:
+    client: stepfunctions
+    operation: update_state_machine
+    id_param: stateMachineArn
+    note: "stateMachineArn from list_state_machines() filtering by name matching resource_name"
+    updatable: [definition, roleArn, loggingConfiguration, tracingConfiguration]
+  code_update_steps:
+    - "sfn = boto3.client('stepfunctions', region_name=region)"
+    - "machines = sfn.list_state_machines()['stateMachines']"
+    - "arn = next(m['stateMachineArn'] for m in machines if resource_name in m['name'])"
+    - "desc = sfn.describe_state_machine(stateMachineArn=arn)"
+    - "defn = json.loads(desc['definition'])  # modify this dict"
+    - "sfn.update_state_machine(stateMachineArn=arn, definition=json.dumps(defn), roleArn=desc['roleArn'])"
+  discovery_ops:
+    - op: list_state_machines
+      returns: ["stateMachines[].stateMachineArn", "stateMachines[].name", "stateMachines[].type"]
+    - op: describe_state_machine
+      id_param: stateMachineArn
+      returns: ["definition", "roleArn", "status", "loggingConfiguration"]
+    - op: list_executions
+      id_param: stateMachineArn
+      returns: ["executions[].executionArn", "executions[].status", "executions[].startDate"]
+
+# -- Pipeline Monitoring -------------------------------------------------------
+pipeline_monitoring:
+  method: cloudwatch_logs
+  log_group_pattern: "/aws/vendedlogs/states/{resource_name}"
+  terraform_resource: "aws_cloudwatch_log_group"
+  log_aggregator_mappings:
+    service_to_tf: "aws_sfn_state_machine"
+    tf_name_attr: "name"

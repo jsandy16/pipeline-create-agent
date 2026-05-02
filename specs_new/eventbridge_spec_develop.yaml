@@ -1,0 +1,1040 @@
+# ============================================================================
+# EventBridge Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL EventBridge knowledge needed
+# by the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/eventbridge.yaml with exhaustive
+# coverage of EventBridge capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - rule/bus naming rules & constraints
+#   3. defaults          - Terraform attribute defaults (free-tier safe)
+#   4. quotas            - AWS service limits
+#   5. event_buses       - default, custom, partner, cross-account
+#   6. rules             - event pattern rules, schedule rules
+#   7. targets           - all supported target types and config
+#   8. event_patterns    - pattern syntax and matching semantics
+#   9. schedules         - rate/cron expressions, Scheduler vs rules
+#  10. pipes             - EventBridge Pipes source-to-target
+#  11. archive_replay    - event archiving and replay
+#  12. schemas           - schema registry and discovery
+#  13. encryption        - encryption at rest and in transit
+#  14. iam               - complete action catalog, ARN formats
+#  15. env_vars          - auto-wired environment variables
+#  16. vpc_triggers      - VPC placement rules
+#  17. integrations      - wiring ownership with all connected services
+#  18. terraform_resources - all TF resource types
+#  19. boto3_operations  - complete API operation reference
+#  20. runtime_diagnostics - error patterns & auto-fix rules
+#  21. tags              - tagging constraints
+#  22. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: eventbridge
+  aws_service_name: "Amazon EventBridge"
+  is_principal: false          # EventBridge has no execution role of its own
+  terraform_resource: aws_cloudwatch_event_rule
+  description: >
+    Serverless event bus service for building event-driven architectures.
+    Routes events from AWS services, SaaS applications, and custom sources
+    to targets using rules with event patterns or schedules. Formerly known
+    as CloudWatch Events.
+  free_tier:
+    status: always_free
+    details: >
+      All state-change events published by AWS services are free.
+      Custom events: $1.00 per million events. Cross-region events:
+      $1.00 per million. Third-party events and archive replay have
+      separate charges. Schema discovery free for 5 million ingested
+      events per month during first year.
+  pricing_model: pay_per_use   # per-event for custom events; AWS service events free
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  rule_name:
+    max_length: 64
+    valid_characters: "a-zA-Z0-9._-"
+    rules:
+      - "Must contain at least one character"
+      - "Letters, digits, periods, hyphens, underscores only"
+      - "Cannot start with a period or hyphen"
+  event_bus_name:
+    max_length: 256
+    valid_characters: "a-zA-Z0-9/._-"
+    rules:
+      - "Custom bus names: letters, digits, periods, hyphens, underscores, slashes"
+      - "'default' is the built-in event bus name"
+      - "Partner bus names have format: aws.partner/PARTNER/EVENT_NAMESPACE"
+  target_id:
+    max_length: 64
+    valid_characters: "a-zA-Z0-9._-"
+  archive_name:
+    max_length: 48
+  connection_name:
+    max_length: 64
+  api_destination_name:
+    max_length: 64
+
+# -- 3. Defaults (free-tier / minimum-cost safe) -----------------------------
+defaults:
+  event_bus_name: "default"
+  state: "ENABLED"
+  # Optional: schedule_expression or event_pattern (one or the other)
+  # schedule_expression: "rate(1 hour)"
+  # event_pattern: {}
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  rules_per_event_bus: 300               # adjustable via Service Quotas
+  targets_per_rule: 5                    # hard limit
+  event_buses_per_account: 100           # adjustable
+  max_event_size: "256 KB"               # per event entry
+  max_entries_per_put_events: 10         # PutEvents batch limit
+  max_event_pattern_length: 2048         # characters
+  invocations_per_second: 10000          # default soft limit per region (adjustable)
+  throttle_limit_put_events: 10000       # TPS for PutEvents (adjustable)
+  throttle_limit_put_partner_events: 1400 # TPS for partner events
+  archives_per_event_bus: 20
+  connections_per_account: 3000
+  api_destinations_per_account: 3000
+  pipes_per_account: 500                 # EventBridge Pipes
+  max_retry_attempts: 185                # per target (0-185)
+  max_event_age_hours: 24                # maximum retry window
+  dead_letter_queue_config: "Optional SQS queue for failed invocations"
+  schemas_per_registry: 2000
+  schema_versions_per_schema: 100
+
+# -- 5. Event Buses ----------------------------------------------------------
+event_buses:
+  types:
+    default:
+      description: "Built-in bus. Receives all AWS service events for the account."
+      name: "default"
+      receives_aws_events: true
+      custom_events: true
+      terraform_resource: null  # implicit, no resource needed
+    custom:
+      description: "User-created bus for application-specific events."
+      receives_aws_events: false
+      custom_events: true
+      terraform_resource: "aws_cloudwatch_event_bus"
+      use_cases:
+        - "Isolate application events from AWS service events"
+        - "Multi-tenant event routing"
+        - "Cross-account event sharing"
+    partner:
+      description: "Events from SaaS partners (Datadog, Auth0, Zendesk, etc.)"
+      receives_aws_events: false
+      custom_events: false
+      terraform_resource: "aws_cloudwatch_event_bus"
+      name_format: "aws.partner/PARTNER/EVENT_NAMESPACE"
+      setup: "Partner must create event source; you accept via console or API"
+
+  cross_account:
+    description: "Share events between AWS accounts"
+    mechanism: "Resource-based policy on event bus"
+    terraform_resource: "aws_cloudwatch_event_bus_policy"
+    permissions:
+      sender_needs: "events:PutEvents on target account's bus"
+      receiver_needs: "Resource policy allowing sender account's principal"
+    pattern: |
+      Source account creates rule with target = destination account bus ARN.
+      Destination account bus has resource policy allowing source account.
+
+  cross_region:
+    description: "Route events to another AWS region"
+    mechanism: "EventBridge rule with target in another region"
+    cost: "$1.00 per million cross-region events"
+    note: "Events are delivered at-least-once with eventual consistency"
+
+# -- 6. Rules ----------------------------------------------------------------
+rules:
+  types:
+    event_pattern:
+      description: "Match events by content (source, detail-type, detail fields)"
+      terraform_attribute: "event_pattern"
+      format: "JSON event pattern"
+    schedule:
+      description: "Trigger on a time-based schedule"
+      terraform_attribute: "schedule_expression"
+      formats:
+        rate: "rate(VALUE UNIT)"  # rate(5 minutes), rate(1 hour), rate(7 days)
+        cron: "cron(MIN HOUR DOM MON DOW YEAR)"  # cron(0 12 * * ? *) = daily noon UTC
+      note: "EventBridge Scheduler is recommended for new scheduled workloads"
+
+  states:
+    ENABLED: "Rule is active and matching events"
+    DISABLED: "Rule exists but does not match events"
+    ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS: "Special state for CloudTrail rules"
+
+  managed_rules:
+    description: "Rules created by AWS services (e.g., AWS Health, Config)"
+    prefix: "aws."
+    note: "Cannot be modified or deleted by users"
+
+  evaluation:
+    - "Rules are evaluated independently and concurrently"
+    - "An event can match multiple rules on the same bus"
+    - "Matching is content-based, not ordered"
+    - "Rule evaluation is free for AWS service events"
+
+# -- 7. Targets --------------------------------------------------------------
+targets:
+  max_per_rule: 5    # hard limit
+  supported_targets:
+    lambda:
+      description: "Invoke Lambda function synchronously"
+      terraform_target_type: "arn"
+      input_transform: true
+      retry: true
+      dlq: true
+      permissions: "events.amazonaws.com must have lambda:InvokeFunction"
+      terraform_permission: "aws_lambda_permission"
+    sqs:
+      description: "Send message to SQS queue"
+      terraform_target_type: "arn"
+      input_transform: true
+      retry: true
+      dlq: true
+      permissions: "SQS queue policy must allow events.amazonaws.com SendMessage"
+      terraform_permission: "aws_sqs_queue_policy"
+      fifo_supported: false
+    sns:
+      description: "Publish to SNS topic"
+      terraform_target_type: "arn"
+      input_transform: true
+      retry: true
+      dlq: true
+      permissions: "SNS topic policy must allow events.amazonaws.com Publish"
+    kinesis_streams:
+      description: "Put record to Kinesis Data Stream"
+      terraform_target_type: "arn"
+      requires_role: true
+      partition_key: "Specified in target config or extracted from event"
+      permissions: "IAM role with kinesis:PutRecord"
+    kinesis_firehose:
+      description: "Put record to Kinesis Firehose delivery stream"
+      terraform_target_type: "arn"
+      requires_role: true
+      permissions: "IAM role with firehose:PutRecord"
+    step_functions:
+      description: "Start Step Functions state machine execution"
+      terraform_target_type: "arn"
+      requires_role: true
+      permissions: "IAM role with states:StartExecution"
+    ecs_task:
+      description: "Run an ECS task (Fargate or EC2)"
+      terraform_target_type: "arn"
+      requires_role: true
+      ecs_parameters: ["task_definition_arn", "launch_type", "network_configuration"]
+      permissions: "IAM role with ecs:RunTask, iam:PassRole"
+    codebuild:
+      description: "Start CodeBuild project build"
+      terraform_target_type: "arn"
+      requires_role: true
+      permissions: "IAM role with codebuild:StartBuild"
+    codepipeline:
+      description: "Start CodePipeline execution"
+      terraform_target_type: "arn"
+      requires_role: true
+      permissions: "IAM role with codepipeline:StartPipelineExecution"
+    batch:
+      description: "Submit AWS Batch job"
+      terraform_target_type: "arn"
+      requires_role: true
+      batch_parameters: ["job_definition", "job_name"]
+      permissions: "IAM role with batch:SubmitJob"
+    ssm_run_command:
+      description: "Run Systems Manager command on EC2 instances"
+      requires_role: true
+      run_command_parameters: ["document_name", "targets"]
+    cloudwatch_logs:
+      description: "Put log event to CloudWatch Logs group"
+      terraform_target_type: "arn"
+      permissions: "Log group resource policy allowing events.amazonaws.com"
+    api_destination:
+      description: "Call external HTTP API (SaaS webhooks, custom APIs)"
+      terraform_resource: "aws_cloudwatch_event_api_destination"
+      requires_connection: true
+      http_parameters: ["method", "path", "query_string", "headers"]
+    event_bus:
+      description: "Send event to another event bus (cross-account or cross-region)"
+      terraform_target_type: "arn"
+      requires_role: true
+      permissions: "IAM role with events:PutEvents on target bus"
+    redshift:
+      description: "Execute Redshift Data API SQL statement"
+      requires_role: true
+      redshift_parameters: ["database", "sql", "db_user"]
+    sagemaker_pipeline:
+      description: "Start SageMaker pipeline execution"
+      requires_role: true
+      permissions: "IAM role with sagemaker:StartPipelineExecution"
+
+  input_transformation:
+    description: "Transform event before delivering to target"
+    options:
+      matched_event: "Deliver the entire matched event (default)"
+      constant_json: "Deliver a fixed JSON string (Input parameter)"
+      input_path: "Extract a portion of the event using JSONPath"
+      input_transformer: "Template-based transformation with input_paths_map + input_template"
+    terraform_attributes:
+      input: "Constant JSON string"
+      input_path: "JSONPath expression"
+      input_transformer:
+        input_paths: "Map of variable names to JSONPath expressions"
+        input_template: "Template string with <variable> placeholders"
+
+  retry_policy:
+    max_retry_attempts: "0-185 (default: 185)"
+    max_event_age_seconds: "60-86400 (default: 86400 = 24 hours)"
+    terraform_block: "retry_policy"
+
+  dead_letter_config:
+    description: "SQS queue for events that fail all retries"
+    terraform_block: "dead_letter_config"
+    terraform_attribute: "arn"
+    note: "Target service must grant events.amazonaws.com sqs:SendMessage"
+
+# -- 8. Event Patterns -------------------------------------------------------
+event_patterns:
+  structure:
+    description: "JSON object that defines which events match a rule"
+    top_level_fields:
+      source: "Event source (e.g., 'aws.s3', 'aws.ec2', 'com.myapp')"
+      detail-type: "Event type description"
+      detail: "Event-specific payload fields"
+      account: "AWS account ID"
+      region: "AWS region"
+      resources: "ARN(s) of involved resources"
+      time: "Event timestamp"
+      id: "Event ID"
+      version: "Event version"
+
+  matching_rules:
+    exact_match:
+      description: "Value must exactly equal"
+      example: '{"source": ["aws.s3"]}'
+    prefix_match:
+      description: "Value must start with prefix"
+      example: '{"detail": {"key": [{"prefix": "logs/"}]}}'
+    suffix_match:
+      description: "Value must end with suffix"
+      example: '{"detail": {"key": [{"suffix": ".csv"}]}}'
+    anything_but:
+      description: "Value must NOT match"
+      example: '{"detail": {"state": [{"anything-but": "terminated"}]}}'
+    numeric:
+      description: "Numeric comparison"
+      operators: [">", ">=", "<", "<=", "="]
+      example: '{"detail": {"count": [{"numeric": [">", 0, "<=", 100]}]}}'
+    ip_address:
+      description: "CIDR match for IP addresses"
+      example: '{"detail": {"sourceIPAddress": [{"cidr": "10.0.0.0/8"}]}}'
+    exists:
+      description: "Field exists or does not exist"
+      example: '{"detail": {"error": [{"exists": true}]}}'
+    wildcard:
+      description: "Wildcard matching with * character"
+      example: '{"detail": {"key": [{"wildcard": "*.json"}]}}'
+    equals_ignore_case:
+      description: "Case-insensitive string match"
+      example: '{"detail": {"status": [{"equals-ignore-case": "success"}]}}'
+
+  combining:
+    - "Multiple values in an array = OR logic"
+    - "Multiple fields at same level = AND logic"
+    - "Nested objects allow matching on nested event fields"
+    - "Empty event pattern matches ALL events (dangerous!)"
+
+  common_aws_patterns:
+    s3_object_created:
+      source: ["aws.s3"]
+      detail-type: ["Object Created"]
+      detail:
+        bucket:
+          name: ["my-bucket"]
+    ec2_state_change:
+      source: ["aws.ec2"]
+      detail-type: ["EC2 Instance State-change Notification"]
+      detail:
+        state: ["running", "stopped"]
+    console_sign_in:
+      source: ["aws.signin"]
+      detail-type: ["AWS Console Sign In via CloudTrail"]
+    guardduty_finding:
+      source: ["aws.guardduty"]
+      detail-type: ["GuardDuty Finding"]
+    codepipeline_state:
+      source: ["aws.codepipeline"]
+      detail-type: ["CodePipeline Pipeline Execution State Change"]
+      detail:
+        state: ["FAILED"]
+    health_event:
+      source: ["aws.health"]
+      detail-type: ["AWS Health Event"]
+
+# -- 9. Schedules ------------------------------------------------------------
+schedules:
+  eventbridge_rules:
+    description: "Schedule expressions on EventBridge rules (legacy approach)"
+    rate_expression:
+      format: "rate(VALUE UNIT)"
+      units: ["minute", "minutes", "hour", "hours", "day", "days"]
+      examples:
+        - "rate(5 minutes)"
+        - "rate(1 hour)"
+        - "rate(7 days)"
+      constraints:
+        - "Value must be positive integer"
+        - "Singular unit for value=1 (rate(1 hour) not rate(1 hours))"
+    cron_expression:
+      format: "cron(MINUTES HOURS DAY-OF-MONTH MONTH DAY-OF-WEEK YEAR)"
+      fields:
+        minutes: "0-59"
+        hours: "0-23"
+        day_of_month: "1-31, ?, *, L, W"
+        month: "1-12 or JAN-DEC"
+        day_of_week: "1-7 or SUN-SAT, ?, *, L, #"
+        year: "1970-2199 or *"
+      examples:
+        - "cron(0 12 * * ? *)"     # Daily at noon UTC
+        - "cron(0 0 1 * ? *)"      # First day of each month at midnight
+        - "cron(0/15 * * * ? *)"    # Every 15 minutes
+        - "cron(0 8 ? * MON-FRI *)" # Weekdays at 8 AM UTC
+      constraints:
+        - "Cannot specify both day-of-month AND day-of-week (one must be ?)"
+        - "All times are UTC"
+        - "Minimum granularity: 1 minute"
+
+  eventbridge_scheduler:
+    description: "Amazon EventBridge Scheduler (recommended for new schedules)"
+    terraform_resource: "aws_scheduler_schedule"
+    advantages:
+      - "Higher throughput and scalability"
+      - "One-time schedules (at() expression)"
+      - "Flexible time windows"
+      - "Built-in timezone support"
+      - "More target types supported"
+    at_expression:
+      format: "at(YYYY-MM-DDTHH:MM:SS)"
+      description: "One-time schedule at specific UTC time"
+    group:
+      terraform_resource: "aws_scheduler_schedule_group"
+      description: "Organize schedules into groups for management"
+
+# -- 10. Pipes ---------------------------------------------------------------
+pipes:
+  description: "Point-to-point integrations connecting sources to targets"
+  terraform_resource: "aws_pipes_pipe"
+  components:
+    source:
+      description: "Event source (pull-based)"
+      supported:
+        - "DynamoDB Streams"
+        - "Kinesis Data Streams"
+        - "Amazon SQS"
+        - "Amazon MSK / Self-managed Kafka"
+        - "Amazon MQ (ActiveMQ, RabbitMQ)"
+    filtering:
+      description: "Optional event pattern filter between source and enrichment"
+      max_patterns: 5
+    enrichment:
+      description: "Optional transformation step"
+      supported:
+        - "Lambda function"
+        - "Step Functions state machine"
+        - "API Gateway"
+        - "API destination"
+    target:
+      description: "Event destination"
+      supported: "Same as EventBridge rule targets + more"
+
+  advantages_over_rules:
+    - "No event bus needed (direct source-to-target)"
+    - "Built-in batching"
+    - "Ordering guarantees (FIFO sources)"
+    - "Reduced latency (no bus hop)"
+
+# -- 11. Archive and Replay --------------------------------------------------
+archive_replay:
+  archive:
+    description: "Store events for later replay"
+    terraform_resource: "aws_cloudwatch_event_archive"
+    attributes:
+      event_source_arn: "Event bus ARN to archive from"
+      event_pattern: "Optional pattern to filter which events are archived"
+      retention_days: "0 = indefinite, or number of days"
+    cost: "Charged per GB archived per month"
+    max_per_bus: 20
+
+  replay:
+    description: "Re-deliver archived events to an event bus"
+    terraform_resource: null  # no TF resource; API only
+    boto3_operation: "start_replay"
+    constraints:
+      - "Replayed events have replay-name in the event metadata"
+      - "Rules can filter for or against replayed events"
+      - "Maximum replay rate is limited by region throughput"
+      - "Replay delivers to the SAME bus the events were archived from"
+
+# -- 12. Schemas --------------------------------------------------------------
+schemas:
+  description: "Schema registry for event structure discovery and code generation"
+  registry:
+    terraform_resource: "aws_schemas_registry"
+    built_in:
+      - "aws.events" # All AWS service event schemas
+  schema:
+    terraform_resource: "aws_schemas_schema"
+    formats: ["OpenAPI 3.0", "JSONSchema Draft 4"]
+  discoverer:
+    terraform_resource: "aws_schemas_discoverer"
+    description: "Auto-discover schemas from events on an event bus"
+    cost: "$0.10 per million ingested events (first 5M free/month for 12 months)"
+
+# -- 13. Encryption -----------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Events encrypted at rest by default with AWS-owned keys"
+    customer_managed_key:
+      terraform_resource: "aws_cloudwatch_event_bus" # kms_key_identifier attribute
+      note: "Only for custom event buses. Default bus uses AWS-owned key."
+  in_transit:
+    description: "All EventBridge API calls use TLS 1.2+"
+    note: "Events between EventBridge and targets are encrypted in transit"
+
+# -- 14. IAM -----------------------------------------------------------------
+iam:
+  arn_formats:
+    rule: "arn:aws:events:REGION:ACCOUNT:rule/[BUS_NAME/]RULE_NAME"
+    event_bus: "arn:aws:events:REGION:ACCOUNT:event-bus/BUS_NAME"
+    archive: "arn:aws:events:REGION:ACCOUNT:archive/ARCHIVE_NAME"
+    connection: "arn:aws:events:REGION:ACCOUNT:connection/CONNECTION_NAME"
+    api_destination: "arn:aws:events:REGION:ACCOUNT:api-destination/DEST_NAME"
+    pipe: "arn:aws:pipes:REGION:ACCOUNT:pipe/PIPE_NAME"
+    schema: "arn:aws:schemas:REGION:ACCOUNT:schema/REGISTRY/SCHEMA"
+    registry: "arn:aws:schemas:REGION:ACCOUNT:registry/REGISTRY"
+    scheduler: "arn:aws:scheduler:REGION:ACCOUNT:schedule/GROUP/SCHEDULE_NAME"
+
+  # EventBridge is not a principal (no execution role); always is empty
+  always: []
+
+  # Complete action catalog
+  actions:
+    rules:
+      - "events:PutRule"
+      - "events:DeleteRule"
+      - "events:DescribeRule"
+      - "events:EnableRule"
+      - "events:DisableRule"
+      - "events:ListRules"
+      - "events:ListRuleNamesByTarget"
+    targets:
+      - "events:PutTargets"
+      - "events:RemoveTargets"
+      - "events:ListTargetsByRule"
+    event_buses:
+      - "events:CreateEventBus"
+      - "events:DeleteEventBus"
+      - "events:DescribeEventBus"
+      - "events:ListEventBuses"
+      - "events:PutPermission"
+      - "events:RemovePermission"
+      - "events:UpdateEventBus"
+    events:
+      - "events:PutEvents"
+      - "events:PutPartnerEvents"
+      - "events:TestEventPattern"
+    archives:
+      - "events:CreateArchive"
+      - "events:DeleteArchive"
+      - "events:DescribeArchive"
+      - "events:ListArchives"
+      - "events:UpdateArchive"
+    replay:
+      - "events:StartReplay"
+      - "events:CancelReplay"
+      - "events:DescribeReplay"
+      - "events:ListReplays"
+    connections:
+      - "events:CreateConnection"
+      - "events:DeleteConnection"
+      - "events:DescribeConnection"
+      - "events:UpdateConnection"
+      - "events:ListConnections"
+      - "events:DeauthorizeConnection"
+    api_destinations:
+      - "events:CreateApiDestination"
+      - "events:DeleteApiDestination"
+      - "events:DescribeApiDestination"
+      - "events:UpdateApiDestination"
+      - "events:ListApiDestinations"
+    schemas:
+      - "schemas:CreateRegistry"
+      - "schemas:CreateSchema"
+      - "schemas:CreateDiscoverer"
+      - "schemas:DeleteRegistry"
+      - "schemas:DeleteSchema"
+      - "schemas:DeleteDiscoverer"
+      - "schemas:DescribeRegistry"
+      - "schemas:DescribeSchema"
+      - "schemas:DescribeDiscoverer"
+      - "schemas:ListRegistries"
+      - "schemas:ListSchemas"
+      - "schemas:ListSchemaVersions"
+      - "schemas:SearchSchemas"
+      - "schemas:GetDiscoveredSchema"
+      - "schemas:GetCodeBindingSource"
+      - "schemas:PutCodeBinding"
+      - "schemas:StartDiscoverer"
+      - "schemas:StopDiscoverer"
+    pipes:
+      - "pipes:CreatePipe"
+      - "pipes:DeletePipe"
+      - "pipes:DescribePipe"
+      - "pipes:ListPipes"
+      - "pipes:StartPipe"
+      - "pipes:StopPipe"
+      - "pipes:UpdatePipe"
+    scheduler:
+      - "scheduler:CreateSchedule"
+      - "scheduler:DeleteSchedule"
+      - "scheduler:GetSchedule"
+      - "scheduler:ListSchedules"
+      - "scheduler:UpdateSchedule"
+      - "scheduler:CreateScheduleGroup"
+      - "scheduler:DeleteScheduleGroup"
+      - "scheduler:GetScheduleGroup"
+      - "scheduler:ListScheduleGroups"
+    tagging:
+      - "events:TagResource"
+      - "events:UntagResource"
+      - "events:ListTagsForResource"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}  # EventBridge is passive - it receives events, callers use PutEvents
+  as_source_to: {}  # EventBridge is passive - targets are invoked via rule, not IAM on EB
+
+  # IAM roles for targets that require them
+  target_execution_roles:
+    description: >
+      Some targets require an IAM role that EventBridge assumes to invoke the target.
+      Lambda, SQS, SNS use resource-based policies instead.
+    role_required_targets:
+      - "kinesis_streams"
+      - "kinesis_firehose"
+      - "step_functions"
+      - "ecs_task"
+      - "codebuild"
+      - "codepipeline"
+      - "batch"
+      - "ssm_run_command"
+      - "event_bus"  # cross-account/cross-region
+      - "redshift"
+      - "sagemaker_pipeline"
+    resource_policy_targets:
+      - "lambda"     # aws_lambda_permission
+      - "sqs"        # aws_sqs_queue_policy
+      - "sns"        # aws_sns_topic_policy
+      - "cloudwatch_logs"  # log group resource policy
+
+  condition_keys:
+    - "events:creatorAccount"
+    - "events:source"
+    - "events:detail-type"
+    - "events:EventBusName"
+    - "events:ManagedBy"
+    - "aws:ResourceTag/${TagKey}"
+
+# -- 15. Environment Variables ------------------------------------------------
+env_vars:
+  as_target_of: {}  # EventBridge is passive
+  as_source_to: {}  # EventBridge is passive
+
+# -- 16. VPC Triggers --------------------------------------------------------
+vpc_triggers: []     # EventBridge does not need VPC placement
+
+# -- 17. Integration Wiring Ownership ----------------------------------------
+integrations:
+  eventbridge_to_lambda:
+    description: "EventBridge rule triggers Lambda function"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule (event_pattern or schedule_expression)"
+      - "aws_cloudwatch_event_target (Lambda ARN)"
+      - "aws_lambda_permission (principal: events.amazonaws.com, source_arn: rule ARN)"
+    notes:
+      - "statement_id includes source rule label to avoid collisions"
+      - "Two different EB rules invoking the same Lambda need distinct statement_ids"
+
+  eventbridge_to_sqs:
+    description: "EventBridge rule sends message to SQS queue"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target (SQS ARN)"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows events.amazonaws.com SendMessage)"
+    notes:
+      - "FIFO queues are NOT supported as EventBridge targets"
+
+  eventbridge_to_sns:
+    description: "EventBridge rule publishes to SNS topic"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target (SNS ARN)"
+    sns_side:
+      - "SNS topic policy allowing events.amazonaws.com Publish"
+
+  eventbridge_to_step_functions:
+    description: "EventBridge rule starts Step Functions execution"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target (state machine ARN + role_arn)"
+      - "aws_iam_role + aws_iam_role_policy (states:StartExecution)"
+
+  eventbridge_to_kinesis:
+    description: "EventBridge rule puts record to Kinesis stream"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target (stream ARN + role_arn)"
+      - "aws_iam_role + aws_iam_role_policy (kinesis:PutRecord)"
+
+  s3_to_eventbridge:
+    description: "S3 sends events to EventBridge (all event types)"
+    owned_by: "s3"
+    mechanism: "aws_s3_bucket_notification with eventbridge = true"
+    notes:
+      - "When enabled, ALL S3 events go to EventBridge (filtering done via rules)"
+      - "Used for fan-out when multiple Lambda targets need the same event type"
+
+  eventbridge_schedule_trigger:
+    description: "EventBridge schedule triggers downstream service"
+    owned_by: "eventbridge"
+    pattern: "Schedule expression on rule + target pointing to service"
+    common_schedules:
+      - "rate(5 minutes) - frequent polling"
+      - "rate(1 hour) - hourly batch"
+      - "cron(0 0 * * ? *) - daily midnight UTC"
+
+# -- 18. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_cloudwatch_event_rule"
+      description: "Event rule with pattern or schedule"
+      always_created: true
+    - resource: "aws_cloudwatch_event_target"
+      description: "Target for a rule (one per target service)"
+      always_created: true  # at least one target per rule
+
+  conditional:
+    - resource: "aws_lambda_permission"
+      condition: "When target is Lambda (principal: events.amazonaws.com)"
+    - resource: "aws_cloudwatch_event_bus"
+      condition: "When using custom event bus (not 'default')"
+    - resource: "aws_cloudwatch_event_bus_policy"
+      condition: "When cross-account event sharing is needed"
+    - resource: "aws_cloudwatch_event_archive"
+      condition: "When event archiving is enabled"
+    - resource: "aws_cloudwatch_event_connection"
+      condition: "When API destinations are used"
+    - resource: "aws_cloudwatch_event_api_destination"
+      condition: "When external HTTP API targets are used"
+    - resource: "aws_pipes_pipe"
+      condition: "When EventBridge Pipes are used"
+    - resource: "aws_scheduler_schedule"
+      condition: "When EventBridge Scheduler is used instead of rule schedules"
+    - resource: "aws_schemas_registry"
+      condition: "When custom schema registry is needed"
+    - resource: "aws_schemas_schema"
+      condition: "When explicit schema definition is needed"
+    - resource: "aws_schemas_discoverer"
+      condition: "When auto-discovery of event schemas is enabled"
+
+  created_by_others:
+    - resource: "aws_sqs_queue_policy"
+      created_by: "sqs renderer"
+      condition: "When EventBridge targets SQS"
+    - resource: "aws_s3_bucket_notification"
+      created_by: "s3 renderer"
+      condition: "When S3 events are routed via EventBridge"
+
+# -- 19. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "events"
+  rule_operations:
+    put_rule:
+      description: "Create or update an EventBridge rule (upsert semantics)"
+      parameters:
+        Name: {type: string, required: true}
+        EventBusName: {type: string, description: "Bus name or ARN (default: 'default')"}
+        ScheduleExpression: {type: string, description: "rate() or cron() expression"}
+        EventPattern: {type: string, description: "JSON event pattern"}
+        State: {type: string, description: "ENABLED or DISABLED"}
+        Description: {type: string}
+        RoleArn: {type: string, description: "IAM role for targets that need it"}
+        Tags: {type: list}
+      returns: ["RuleArn"]
+    delete_rule:
+      description: "Delete a rule (must remove all targets first)"
+      parameters:
+        Name: {type: string, required: true}
+        EventBusName: {type: string}
+    describe_rule:
+      description: "Get details of a rule"
+      parameters:
+        Name: {type: string, required: true}
+        EventBusName: {type: string}
+      returns: ["Name", "Arn", "EventPattern", "ScheduleExpression", "State", "Description", "RoleArn", "ManagedBy", "EventBusName"]
+    list_rules:
+      description: "List rules on an event bus"
+      parameters:
+        EventBusName: {type: string}
+        NamePrefix: {type: string}
+        NextToken: {type: string}
+        Limit: {type: integer}
+      returns: ["Rules[].Name", "Rules[].Arn", "Rules[].State", "NextToken"]
+    enable_rule:
+      description: "Enable a disabled rule"
+      parameters:
+        Name: {type: string, required: true}
+        EventBusName: {type: string}
+    disable_rule:
+      description: "Disable an active rule"
+      parameters:
+        Name: {type: string, required: true}
+        EventBusName: {type: string}
+
+  target_operations:
+    put_targets:
+      description: "Add targets to a rule (up to 5)"
+      parameters:
+        Rule: {type: string, required: true}
+        EventBusName: {type: string}
+        Targets:
+          type: list
+          required: true
+          description: >
+            List of target dicts. Each must have 'Id' and 'Arn'.
+            Optional: Input, InputPath, InputTransformer, RoleArn,
+            RetryPolicy, DeadLetterConfig, SqsParameters, KinesisParameters,
+            EcsParameters, BatchParameters, HttpParameters.
+      returns: ["FailedEntryCount", "FailedEntries"]
+    remove_targets:
+      description: "Remove targets from a rule"
+      parameters:
+        Rule: {type: string, required: true}
+        EventBusName: {type: string}
+        Ids: {type: list, required: true}
+    list_targets_by_rule:
+      description: "List all targets for a rule"
+      parameters:
+        Rule: {type: string, required: true}
+        EventBusName: {type: string}
+      returns: ["Targets[].Id", "Targets[].Arn", "Targets[].Input", "Targets[].InputPath", "Targets[].RoleArn"]
+
+  event_operations:
+    put_events:
+      description: "Send custom events to an event bus (max 10 entries per call)"
+      parameters:
+        Entries:
+          type: list
+          required: true
+          description: >
+            List of event entries. Each entry: Source (string),
+            DetailType (string), Detail (JSON string), EventBusName (optional),
+            Resources (list of ARN strings), Time (datetime).
+      returns: ["FailedEntryCount", "Entries[].EventId", "Entries[].ErrorCode", "Entries[].ErrorMessage"]
+    test_event_pattern:
+      description: "Test whether an event matches a pattern (no side effects)"
+      parameters:
+        EventPattern: {type: string, required: true}
+        Event: {type: string, required: true}
+      returns: ["Result (boolean)"]
+
+  bus_operations:
+    create_event_bus:
+      description: "Create a custom event bus"
+      parameters:
+        Name: {type: string, required: true}
+        EventSourceName: {type: string, description: "For partner event sources"}
+        Tags: {type: list}
+      returns: ["EventBusArn"]
+    delete_event_bus:
+      description: "Delete a custom event bus"
+      parameters:
+        Name: {type: string, required: true}
+    describe_event_bus:
+      description: "Get event bus details"
+      parameters:
+        Name: {type: string}
+      returns: ["Name", "Arn", "Policy"]
+    list_event_buses:
+      description: "List event buses"
+      parameters:
+        NamePrefix: {type: string}
+      returns: ["EventBuses[].Name", "EventBuses[].Arn"]
+    put_permission:
+      description: "Add permission to event bus for cross-account access"
+      parameters:
+        EventBusName: {type: string}
+        Action: {type: string, description: "events:PutEvents"}
+        Principal: {type: string, description: "AWS account ID or *"}
+        StatementId: {type: string, required: true}
+        Condition: {type: object, description: "Optional condition (e.g., org ID)"}
+    remove_permission:
+      description: "Remove permission from event bus"
+      parameters:
+        EventBusName: {type: string}
+        StatementId: {type: string, required: true}
+
+  archive_operations:
+    create_archive:
+      description: "Create an event archive"
+      parameters:
+        ArchiveName: {type: string, required: true}
+        EventSourceArn: {type: string, required: true, description: "Event bus ARN"}
+        EventPattern: {type: string, description: "Optional pattern filter"}
+        RetentionDays: {type: integer, description: "0 = indefinite"}
+    describe_archive:
+      description: "Get archive details"
+      parameters:
+        ArchiveName: {type: string, required: true}
+      returns: ["ArchiveName", "ArchiveArn", "EventSourceArn", "State", "EventCount", "SizeBytes"]
+    start_replay:
+      description: "Start replaying archived events"
+      parameters:
+        ReplayName: {type: string, required: true}
+        EventSourceArn: {type: string, required: true}
+        EventStartTime: {type: datetime, required: true}
+        EventEndTime: {type: datetime, required: true}
+        Destination: {type: object, required: true, description: "{'Arn': 'event-bus-arn'}"}
+
+  tagging_operations:
+    tag_resource:
+      description: "Add tags to an EventBridge resource"
+      parameters:
+        ResourceARN: {type: string, required: true}
+        Tags: {type: list, required: true}
+    untag_resource:
+      description: "Remove tags from an EventBridge resource"
+      parameters:
+        ResourceARN: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+    list_tags_for_resource:
+      description: "List tags on an EventBridge resource"
+      parameters:
+        ResourceARN: {type: string, required: true}
+      returns: ["Tags"]
+
+# -- 20. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "ResourceNotFoundException.*events|rule.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "EventBridge rule not found"
+    fix_type: manual
+    resolution: "Verify rule name. Run put_rule() to recreate if deleted."
+
+  - pattern: "ResourceAlreadyExistsException"
+    category: ALREADY_EXISTS
+    cause: "EventBridge resource already exists"
+    fix_type: none
+    resolution: "Use put_rule() which has upsert semantics. No action needed."
+
+  - pattern: "InvalidEventPatternException|invalid.*event.*pattern"
+    category: VALIDATION
+    cause: "Event pattern JSON is invalid or uses unsupported operators"
+    fix_type: update_config
+    resolution: >
+      Fix event pattern JSON. Use events.test_event_pattern() to validate.
+      Common issues: missing quotes, invalid field names, wrong nesting.
+
+  - pattern: "ManagedRuleException"
+    category: PERMISSION
+    cause: "Attempting to modify a managed rule (prefix: aws.)"
+    fix_type: manual
+    resolution: "Managed rules are owned by AWS services and cannot be modified."
+
+  - pattern: "LimitExceededException.*targets"
+    category: QUOTA
+    cause: "Exceeding 5 targets per rule limit"
+    fix_type: manual
+    resolution: "Split into multiple rules, or use SNS/SQS fan-out pattern."
+
+  - pattern: "LimitExceededException.*rules"
+    category: QUOTA
+    cause: "Exceeding 300 rules per event bus (adjustable)"
+    fix_type: manual
+    resolution: "Request quota increase via Service Quotas, or consolidate rules."
+
+  - pattern: "AccessDeniedException.*events"
+    category: PERMISSION
+    cause: "Caller lacks required events: permissions"
+    fix_type: update_iam
+    resolution: "Add events:PutRule, events:PutTargets, etc. to caller's IAM policy."
+
+  - pattern: "InternalException"
+    category: TRANSIENT
+    cause: "EventBridge internal error"
+    fix_type: retry
+    resolution: "Retry with exponential backoff."
+
+  - pattern: "PolicyLengthExceededException"
+    category: QUOTA
+    cause: "Event bus policy exceeds maximum size"
+    fix_type: manual
+    resolution: "Reduce policy size. Use aws:PrincipalOrgID condition instead of listing individual accounts."
+
+# -- 21. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  supported_resources:
+    - "aws_cloudwatch_event_rule"
+    - "aws_cloudwatch_event_bus"
+    - "aws_pipes_pipe"
+    - "aws_scheduler_schedule"
+    - "aws_schemas_registry"
+    - "aws_schemas_schema"
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 22. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: events
+  description: >
+    EventBridge rules updated via put_rule() (upsert). Targets via put_targets().
+    Custom event buses via create_event_bus()/update_event_bus().
+    Rules list via list_rules(EventBusName=bus_name).
+    Send custom events via put_events(). Test patterns via test_event_pattern().
+  config_update:
+    client: events
+    operation: put_rule
+    id_param: Name
+    note: "put_rule() upserts -- updates schedule or event pattern if rule already exists"
+  discovery_ops:
+    - op: describe_rule
+      id_param: Name
+      returns: ["Arn", "ScheduleExpression", "EventPattern", "State"]
+    - op: list_targets_by_rule
+      id_param: Rule
+      returns: ["Targets[].Id", "Targets[].Arn", "Targets[].Input"]
+    - op: list_rules
+      id_param: EventBusName
+      returns: ["Rules[].Name", "Rules[].Arn", "Rules[].State", "Rules[].ScheduleExpression"]
+    - op: describe_event_bus
+      id_param: Name
+      returns: ["Name", "Arn", "Policy"]
+    - op: list_archives
+      id_param: EventSourceArn
+      returns: ["Archives[].ArchiveName", "Archives[].State", "Archives[].EventCount"]

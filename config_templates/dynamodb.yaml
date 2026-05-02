@@ -1,0 +1,20 @@
+templates:
+  on_demand:
+    display_name: "On-Demand Billing"
+    description: "Pay-per-request mode, no capacity planning needed (not free tier)"
+    config:
+      billing_mode: "PAY_PER_REQUEST"
+
+  high_throughput:
+    display_name: "High Throughput"
+    description: "25 RCU / 25 WCU provisioned capacity (free tier maximum)"
+    config:
+      billing_mode: "PROVISIONED"
+      read_capacity: 25
+      write_capacity: 25
+
+  numeric_key:
+    display_name: "Numeric Partition Key"
+    description: "Use a numeric partition key instead of string"
+    config:
+      hash_key_type: "N"

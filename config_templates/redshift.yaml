@@ -1,0 +1,14 @@
+templates:
+  single_node:
+    display_name: "Single Node"
+    description: "Single dc2.large node for development"
+    config:
+      node_type: "dc2.large"
+      number_of_nodes: 1
+
+  multi_node:
+    display_name: "Multi-Node Cluster"
+    description: "3-node ra3.xlplus cluster for production"
+    config:
+      node_type: "ra3.xlplus"
+      number_of_nodes: 3

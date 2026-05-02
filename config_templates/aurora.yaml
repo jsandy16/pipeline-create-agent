@@ -1,0 +1,14 @@
+templates:
+  mysql:
+    display_name: "Aurora MySQL"
+    description: "Aurora MySQL-compatible engine"
+    config:
+      engine: "aurora-mysql"
+      engine_version: "3.04.0"
+
+  high_capacity:
+    display_name: "High Capacity"
+    description: "Aurora Serverless v2 with up to 32 ACU"
+    config:
+      min_capacity: 2
+      max_capacity: 32

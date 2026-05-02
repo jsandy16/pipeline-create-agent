@@ -1,0 +1,84 @@
+service: glue
+boto3_client: glue
+description: "AWS Glue — ETL jobs, crawlers, and data catalog"
+
+operations:
+  create_job:
+    description: "Create a new Glue ETL job"
+    parameters:
+      Name: {type: string, required: true}
+      Role: {type: string, required: true}
+      Command: {type: object, required: true, description: "ScriptLocation, Name (glueetl/pythonshell)"}
+      DefaultArguments: {type: object}
+      GlueVersion: {type: string}
+      NumberOfWorkers: {type: integer}
+      WorkerType: {type: string}
+
+  start_job_run:
+    description: "Start an execution of a Glue job"
+    parameters:
+      JobName: {type: string, required: true}
+      Arguments: {type: object}
+
+  create_crawler:
+    description: "Create a crawler to catalog data"
+    parameters:
+      Name: {type: string, required: true}
+      Role: {type: string, required: true}
+      DatabaseName: {type: string, required: true}
+      Targets: {type: object, required: true, description: "S3Targets, JdbcTargets, etc."}
+      Schedule: {type: string}
+
+  start_crawler:
+    description: "Start a crawler run"
+    parameters:
+      Name: {type: string, required: true}
+
+  create_database:
+    description: "Create a database in the Glue Data Catalog"
+    parameters:
+      DatabaseInput: {type: object, required: true, description: "Name, Description, LocationUri"}
+      CatalogId: {type: string}
+
+  create_table:
+    description: "Create a table in the Glue Data Catalog"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableInput: {type: object, required: true, description: "Name, StorageDescriptor, PartitionKeys"}
+      CatalogId: {type: string}
+
+  update_table:
+    description: "Update a table definition"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableInput: {type: object, required: true}
+
+  create_partition:
+    description: "Create a partition in a table"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableName: {type: string, required: true}
+      PartitionInput: {type: object, required: true}
+
+  batch_create_partition:
+    description: "Create multiple partitions at once"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableName: {type: string, required: true}
+      PartitionInputList: {type: list, required: true}
+
+  get_tables:
+    description: "List tables in a database"
+    parameters:
+      DatabaseName: {type: string, required: true}
+
+  get_job:
+    description: "Get details of a Glue job"
+    parameters:
+      JobName: {type: string, required: true}
+
+  update_job:
+    description: "Update Glue job configuration"
+    parameters:
+      JobName: {type: string, required: true}
+      JobUpdate: {type: object, required: true}

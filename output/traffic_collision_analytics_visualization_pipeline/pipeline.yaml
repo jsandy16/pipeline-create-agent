@@ -1,0 +1,157 @@
+pipeline_name: traffic_collision_analytics_visualization_pipeline
+business_unit: engineering
+cost_center: cc001
+region: us-east-1
+
+services:
+  - name: traffic_collision_raw
+    type: s3
+    config:
+      purpose: stores incoming raw traffic collision data files
+      prefixes:
+        - collision/
+        - party/
+        - victim/
+        - case/
+
+  - name: collision_preprocessor
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 512
+      timeout: 300
+      purpose: preprocesses collision data in parallel
+
+  - name: victim_preprocessor
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 512
+      timeout: 300
+      purpose: preprocesses victim data in parallel
+
+  - name: party_preprocessor
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 512
+      timeout: 300
+      purpose: preprocesses party data in parallel
+
+  - name: case_preprocessor
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 512
+      timeout: 300
+      purpose: preprocesses case data in parallel
+
+  - name: preprocessing_queue
+    type: sqs
+    config:
+      purpose: triggers EMR Serverless jobs after preprocessing completes
+      visibility_timeout: 900
+
+  - name: emr_serverless_clean_transform
+    type: emr_serverless
+    config:
+      purpose: clean and transform processed traffic data
+      job_type: spark
+
+  - name: traffic_collision_staging
+    type: s3
+    config:
+      purpose: stores processed and staged data ready for cataloging
+      prefixes:
+        - collision/
+        - party/
+        - victim/
+        - case/
+
+  - name: glue_data_catalog
+    type: glue
+    config:
+      purpose: creates tables and metadata for staged data
+
+  - name: athena_query_tables
+    type: athena
+    config:
+      purpose: query tables for traffic collision analysis
+      tables:
+        - collision_tbl
+        - party_tbl
+        - victim_tbl
+        - case_tbl
+
+  - name: analyst_business_notebook
+    type: sagemaker_notebook
+    config:
+      purpose: user review and visualization for analysts and business users
+      instance_type: ml.t3.medium
+
+  - name: persistence_handson_notebook
+    type: sagemaker_notebook
+    config:
+      purpose: persistence and hands-on data exploration
+      instance_type: ml.t3.medium
+
+integrations:
+  - source: traffic_collision_raw
+    target: collision_preprocessor
+    event: "s3:ObjectCreated:*"
+
+  - source: traffic_collision_raw
+    target: victim_preprocessor
+    event: "s3:ObjectCreated:*"
+
+  - source: traffic_collision_raw
+    target: party_preprocessor
+    event: "s3:ObjectCreated:*"
+
+  - source: traffic_collision_raw
+    target: case_preprocessor
+    event: "s3:ObjectCreated:*"
+
+  - source: collision_preprocessor
+    target: preprocessing_queue
+    event: send_message
+
+  - source: victim_preprocessor
+    target: preprocessing_queue
+    event: send_message
+
+  - source: party_preprocessor
+    target: preprocessing_queue
+    event: send_message
+
+  - source: case_preprocessor
+    target: preprocessing_queue
+    event: send_message
+
+  - source: preprocessing_queue
+    target: emr_serverless_clean_transform
+    event: sqs_trigger
+
+  - source: emr_serverless_clean_transform
+    target: traffic_collision_staging
+    event: write
+
+  - source: traffic_collision_staging
+    target: glue_data_catalog
+    event: crawl
+
+  - source: glue_data_catalog
+    target: athena_query_tables
+    event: catalog_creation
+
+  - source: athena_query_tables
+    target: analyst_business_notebook
+    event: query_results
+
+  - source: analyst_business_notebook
+    target: persistence_handson_notebook
+    event: data_export

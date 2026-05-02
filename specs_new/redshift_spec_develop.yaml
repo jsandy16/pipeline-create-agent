@@ -1,0 +1,1030 @@
+# ============================================================================
+# Redshift Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Redshift knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/redshift.yaml with exhaustive
+# coverage of Redshift capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1.  identity              - service metadata & Terraform mapping
+#   2.  naming                - cluster naming rules & constraints
+#   3.  defaults              - Terraform attribute defaults (minimum-cost)
+#   4.  quotas                - AWS service limits
+#   5.  node_types            - RA3, DC2 specs and recommendations
+#   6.  cluster_architecture  - leader node, compute nodes, slices
+#   7.  spectrum              - Redshift Spectrum for S3 queries
+#   8.  serverless            - Redshift Serverless
+#   9.  data_operations       - COPY, UNLOAD, Data API
+#  10.  concurrency_scaling   - automatic scaling for read queries
+#  11.  workload_management   - WLM configuration
+#  12.  snapshots             - automated, manual, cross-region
+#  13.  encryption            - at rest, in transit, HSM
+#  14.  vpc_config            - VPC, enhanced VPC routing, endpoints
+#  15.  parameter_groups      - cluster parameter groups
+#  16.  iam                   - complete action catalog & integration graph rules
+#  17.  env_vars              - auto-wired environment variables
+#  18.  vpc_triggers          - VPC placement rules
+#  19.  integrations          - wiring ownership with all connected services
+#  20.  terraform_resources   - all TF resource types
+#  21.  boto3_operations      - complete API operation reference
+#  22.  runtime_diagnostics   - error patterns & auto-fix rules
+#  23.  tags                  - tagging constraints
+#  24.  code_update           - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: redshift
+  aws_service_name: "Amazon Redshift"
+  is_principal: true           # Redshift has an IAM execution role (for Spectrum, COPY, UNLOAD)
+  terraform_resource: aws_redshift_cluster
+  description: >
+    Fully managed, petabyte-scale data warehouse with columnar storage,
+    massively parallel processing (MPP), and Redshift Spectrum for direct
+    S3 queries via external tables.
+  free_tier:
+    status: never_free
+    details: "Redshift has a 2-month free trial for dc2.large. No perpetual free tier."
+    warning: true
+  pricing_model: on_demand     # per-node-hour (provisioned) or per-RPU-hour (Serverless)
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  cluster_identifier:
+    limit: 63
+    valid_characters: "a-z0-9-"  # lowercase letters, digits, hyphens
+    rules:
+      - "Must begin with a letter"
+      - "Cannot end with a hyphen"
+      - "Cannot contain consecutive hyphens"
+      - "Must be unique within an AWS account per region"
+  database_name:
+    limit: 64
+    valid_characters: "a-z0-9_"  # lowercase letters, digits, underscores
+    rules:
+      - "Must begin with a letter or underscore"
+      - "Default database name: dev"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  node_type: "dc2.large"
+  number_of_nodes: 1
+  database_name: "dev"
+  master_username: "admin"
+  skip_final_snapshot: true
+  publicly_accessible: false
+  encrypted: true
+  automated_snapshot_retention_period: 1  # days
+  enhanced_vpc_routing: false
+  # Logging enabled by default in renderer
+  logging_enabled: true
+  log_exports: ["connectionlog", "useractivitylog", "userlog"]
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  cluster:
+    max_nodes_per_account_per_region: 200  # adjustable
+    max_dc2_nodes_per_cluster: 128         # adjustable
+    max_ra3_nodes_per_cluster: 128         # adjustable
+    max_concurrency_scaling_clusters: 10   # adjustable
+  database:
+    max_databases_per_cluster: 60
+    max_schemas_per_database: 9900
+    max_stored_procedures_per_database: 10000
+  tables:
+    dc2_large: 9900
+    dc2_8xlarge: 200000
+    ra3_xlplus_single_node: 9900
+    ra3_xlplus_multi_node: 20000
+    ra3_4xlarge: 200000
+    ra3_16xlarge: 200000
+    serverless: 200000
+    note: "Includes permanent, temporary, datashare tables, and materialized views"
+  connections:
+    dc2_large: 500
+    dc2_8xlarge: 2000
+    ra3_all: 2000
+    serverless: 2000
+  query:
+    max_concurrent_queries_manual_wlm: 50  # query slots
+    idle_session_timeout: "4 hours (cluster), 1 hour (Serverless)"
+    idle_transaction_timeout: "6 hours"
+    serverless_query_timeout: "86399 seconds (24 hours)"
+    max_row_size_copy: "4 MB"
+  spectrum:
+    max_external_table_columns: 1600  # 1597 with pseudocolumns
+    max_string_value_ion_json: "16 KB"
+    max_partitions_per_alter_table: 100
+    data_region_constraint: "S3 data must be in same region as cluster"
+  snapshots:
+    max_per_account_per_region: 700   # adjustable
+    max_authorized_accounts_per_snapshot: 20
+    max_authorized_accounts_per_kms_key: 100
+  management:
+    max_parameter_groups: 20
+    max_security_groups: 20           # adjustable
+    max_subnet_groups: 50             # adjustable
+    max_subnets_per_subnet_group: 20  # adjustable
+    max_event_subscriptions: 20       # adjustable
+    max_iam_roles_per_cluster: 50
+    max_redshift_roles_per_cluster: 1000  # adjustable
+    max_vpc_endpoints_per_cluster: 30     # adjustable
+  data_api:
+    batch_execute_statement_tps: 20
+    execute_statement_tps: 30
+    get_statement_result_tps: 20
+    describe_statement_tps: 100
+    cancel_statement_tps: 3
+    list_tables_tps: 3
+    describe_table_tps: 3
+  tags:
+    max_per_resource: 50
+    key_max_length: 128
+    value_max_length: 256
+  serverless:
+    max_workgroups_per_account: 25    # adjustable
+    max_namespaces_per_account: 25    # adjustable
+    rms_storage_4_rpu: "32 TB"
+    rms_storage_8_plus_rpu: "128 TB"
+
+# -- 5. Node Types ------------------------------------------------------------
+node_types:
+  ra3:
+    description: "Managed storage — independent compute/storage scaling. Recommended for growing data."
+    variants:
+      ra3.xlplus:
+        vcpu: 4
+        ram_gib: 32
+        default_slices: 2
+        managed_storage_single_node: "4 TB"
+        managed_storage_multi_node: "32 TB per node"
+        node_range_single: 1
+        node_range_multi: "2-32"
+      ra3.4xlarge:
+        vcpu: 12
+        ram_gib: 96
+        default_slices: 4
+        managed_storage: "128 TB per node"
+        node_range: "2-32 (create), up to 64 (resize)"
+      ra3.16xlarge:
+        vcpu: 48
+        ram_gib: 384
+        default_slices: 16
+        managed_storage: "128 TB per node"
+        node_range: "2-128"
+    features:
+      - "High-performance SSD for local cache"
+      - "Amazon S3 for long-term durable storage"
+      - "Automatic tiering between SSD and S3"
+      - "Must run in VPC"
+  dc2:
+    description: "Dense compute — local SSD storage. Best for datasets under 1 TB compressed."
+    variants:
+      dc2.large:
+        vcpu: 2
+        ram_gib: 15
+        default_slices: 2
+        storage: "160 GB NVMe-SSD"
+        node_range: "1-32"
+        total_capacity: "5.12 TB"
+      dc2.8xlarge:
+        vcpu: 32
+        ram_gib: 244
+        default_slices: 16
+        storage: "2.56 TB NVMe-SSD"
+        node_range: "2-128"
+        total_capacity: "326 TB"
+    features:
+      - "Compute-intensive with local SSD"
+      - "Storage grows only by adding nodes"
+      - "Must run in VPC"
+  ds2:
+    description: "DEPRECATED — no longer available for new clusters"
+    deprecated: true
+  recommendation: >
+    Use RA3 for growing data and independent compute/storage scaling.
+    Use DC2 for datasets under 1 TB compressed with highest price/performance.
+
+# -- 6. Cluster Architecture --------------------------------------------------
+cluster_architecture:
+  leader_node:
+    description: >
+      Receives client queries, parses SQL, develops execution plans,
+      coordinates parallel execution across compute nodes, aggregates
+      intermediate results, returns final results to client.
+    note: "In multi-node clusters, leader is separate from compute nodes"
+  compute_nodes:
+    description: "Execute query plans in parallel, exchange data, send results to leader"
+    note: "Only compute nodes are billed"
+  single_node:
+    description: "One node serves as both leader and compute"
+    terraform_cluster_type: "single-node"
+    note: "Not recommended for production"
+  multi_node:
+    description: "Separate leader + 2 or more compute nodes"
+    terraform_cluster_type: "multi-node"
+    min_compute_nodes: 2
+    data_mirroring: "Data mirrored across compute nodes for fault tolerance"
+  slices:
+    description: "Each compute node is divided into slices for parallel processing"
+    note: "Number of slices depends on node type"
+
+# -- 7. Spectrum --------------------------------------------------------------
+spectrum:
+  description: >
+    Query data directly in Amazon S3 using external tables without loading
+    into Redshift. Uses separate Spectrum compute layer (pay per TB scanned).
+  requirements:
+    - "Cluster must have an IAM role with S3 read permissions"
+    - "External schema in AWS Glue Data Catalog or Hive metastore"
+    - "S3 data must be in the same region as the Redshift cluster"
+  terraform:
+    schema_creation: "Via SQL: CREATE EXTERNAL SCHEMA ... FROM DATA CATALOG"
+    iam_role: "Cluster IAM role needs glue:GetDatabase, glue:GetTable, glue:GetPartition, s3:GetObject, s3:ListBucket"
+  supported_formats:
+    - "Parquet"
+    - "ORC"
+    - "JSON"
+    - "CSV"
+    - "Avro"
+    - "Ion"
+    - "Text"
+    - "Grok"
+    - "OpenCSV"
+    - "Regex"
+  pricing: "Per TB of data scanned (compressed)"
+  limits:
+    max_columns: 1600
+    max_string_size: "16 KB (ION/JSON)"
+    max_partitions_per_alter: 100
+
+# -- 8. Serverless ------------------------------------------------------------
+serverless:
+  description: >
+    Automatic resource provisioning with intelligent scaling. Pay-per-use with
+    no charges when idle. Zero administration.
+  terraform_resources:
+    namespace: "aws_redshiftserverless_namespace"
+    workgroup: "aws_redshiftserverless_workgroup"
+    endpoint_access: "aws_redshiftserverless_endpoint_access"
+  capacity:
+    unit: "RPU (Redshift Processing Unit)"
+    min: 8
+    max: 512
+    base_per_account: "Greater of 3,200 or 1.5x previous 6-month max"
+  storage:
+    rms_4_rpu: "32 TB"
+    rms_8_plus_rpu: "128 TB"
+  quotas:
+    max_workgroups: 25
+    max_namespaces: 25
+    max_databases: 100
+    max_tables: 200000
+    max_connections: 2000
+
+# -- 9. Data Operations -------------------------------------------------------
+data_operations:
+  copy:
+    description: "Bulk load data from S3, DynamoDB, EMR, or remote host into Redshift tables"
+    syntax: "COPY table FROM 's3://bucket/prefix' IAM_ROLE 'arn:...' FORMAT AS PARQUET;"
+    sources:
+      - "Amazon S3 (CSV, JSON, Parquet, ORC, Avro, etc.)"
+      - "Amazon DynamoDB"
+      - "Amazon EMR (HDFS)"
+      - "Remote host (SSH)"
+    max_row_size: "4 MB"
+    iam_permissions:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+    best_practices:
+      - "Split files into multiples of number of slices"
+      - "Use compressed files (gzip, lzo, bzip2, zstd)"
+      - "Use manifest files for precise control"
+      - "Use COMPUPDATE OFF for pre-compressed columns"
+  unload:
+    description: "Export query results from Redshift to S3"
+    syntax: "UNLOAD ('SELECT ...') TO 's3://bucket/prefix' IAM_ROLE 'arn:...' PARQUET;"
+    iam_permissions:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:AbortMultipartUpload"
+    formats: ["CSV", "JSON", "Parquet"]
+    best_practices:
+      - "Use PARALLEL ON for faster exports"
+      - "Use PARTITION BY for Hive-compatible partitioning"
+  data_api:
+    description: "Execute SQL via HTTP API without persistent connections"
+    boto3_client: "redshift-data"
+    operations:
+      execute_statement:
+        description: "Execute a SQL statement asynchronously"
+        parameters:
+          ClusterIdentifier: {type: string}
+          WorkgroupName: {type: string, description: "For Serverless"}
+          Database: {type: string, required: true}
+          Sql: {type: string, required: true}
+          DbUser: {type: string}
+          SecretArn: {type: string}
+        returns: ["Id"]
+        note: "Poll describe_statement until Status is FINISHED or FAILED"
+      batch_execute_statement:
+        description: "Execute multiple SQL statements"
+        parameters:
+          ClusterIdentifier: {type: string}
+          Database: {type: string, required: true}
+          Sqls: {type: list, required: true}
+          DbUser: {type: string}
+        returns: ["Id"]
+      describe_statement:
+        description: "Check execution status"
+        parameters:
+          Id: {type: string, required: true}
+        returns: ["Status", "Error", "Duration", "ResultRows", "ResultSize"]
+      get_statement_result:
+        description: "Get query results (after FINISHED)"
+        parameters:
+          Id: {type: string, required: true}
+        returns: ["Records", "ColumnMetadata", "TotalNumRows"]
+      list_tables:
+        description: "List tables in a database"
+        parameters:
+          ClusterIdentifier: {type: string}
+          Database: {type: string, required: true}
+          SchemaPattern: {type: string}
+      list_schemas:
+        description: "List schemas in a database"
+        parameters:
+          ClusterIdentifier: {type: string}
+          Database: {type: string, required: true}
+      describe_table:
+        description: "Get column details"
+        parameters:
+          ClusterIdentifier: {type: string}
+          Database: {type: string, required: true}
+          Table: {type: string, required: true}
+          Schema: {type: string}
+    rate_limits:
+      execute_statement: "30 TPS"
+      batch_execute_statement: "20 TPS"
+      get_statement_result: "20 TPS"
+      describe_statement: "100 TPS"
+
+# -- 10. Concurrency Scaling -------------------------------------------------
+concurrency_scaling:
+  description: >
+    Automatically adds transient clusters to handle bursts of read queries.
+    Up to 10 concurrency scaling clusters per account.
+  pricing: "1 hour free per day per main cluster; then per-second billing"
+  configuration:
+    terraform: "Via WLM parameter group configuration"
+    max_clusters: 10
+  note: "Only for read queries; write queries always go to main cluster"
+
+# -- 11. Workload Management (WLM) -------------------------------------------
+workload_management:
+  description: "Control query prioritization, memory allocation, and concurrency"
+  modes:
+    automatic:
+      description: "Redshift manages memory and concurrency automatically"
+      note: "Recommended for most workloads"
+    manual:
+      description: "User defines queues with concurrency, memory, and timeout settings"
+      max_concurrent_queries: 50
+  terraform: "Via aws_redshift_parameter_group"
+
+# -- 12. Snapshots ------------------------------------------------------------
+snapshots:
+  automated:
+    description: "Automatic incremental snapshots, retained 1-35 days"
+    terraform_attribute: "automated_snapshot_retention_period"
+    default_retention: 1
+    max_retention: 35
+  manual:
+    description: "User-initiated snapshots, retained until deleted"
+    max_per_account_per_region: 700
+  cross_region:
+    description: "Copy snapshots to another region for disaster recovery"
+    terraform_resources:
+      - "aws_redshift_snapshot_copy_grant"
+      - "aws_redshift_snapshot_schedule"
+    encryption: "Re-encrypted with destination region KMS key"
+  restore:
+    description: "Restore cluster from snapshot (creates new cluster)"
+    note: "Can restore to different node type; slice count may change"
+
+# -- 13. Encryption -----------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Encrypt cluster data, snapshots, and backups"
+    terraform_attribute: "encrypted"
+    key_options:
+      aws_managed: "AWS-managed KMS key (aws/redshift)"
+      customer_managed: "Customer-managed CMK via kms_key_id"
+      hsm: "Hardware Security Module (CloudHSM)"
+    note: "Can enable/disable encryption on existing cluster (causes brief unavailability)"
+  in_transit:
+    description: "SSL/TLS for client connections"
+    terraform_attribute: "Via parameter group: require_ssl = true"
+    default: "Connections use SSL by default"
+  key_rotation:
+    description: "Automatic key rotation for KMS-encrypted clusters"
+    terraform: "Managed by KMS key rotation policy"
+
+# -- 14. VPC Configuration ---------------------------------------------------
+vpc_config:
+  description: "Redshift clusters run in VPC"
+  terraform_resources:
+    subnet_group: "aws_redshift_subnet_group"
+    security_group: "aws_security_group"
+  enhanced_vpc_routing:
+    description: "Forces all COPY/UNLOAD traffic through VPC (no public internet)"
+    terraform_attribute: "enhanced_vpc_routing"
+    default: false
+    use_cases:
+      - "Security compliance"
+      - "Use VPC endpoints for S3 access"
+      - "Network monitoring and logging"
+  endpoint_access:
+    description: "Redshift-managed VPC endpoints for cross-VPC access"
+    terraform_resource: "aws_redshift_endpoint_access"
+    max_per_cluster: 30
+  publicly_accessible:
+    terraform_attribute: "publicly_accessible"
+    default: false
+    note: "Set to false for security; use VPC endpoints for external access"
+  port:
+    default: 5439
+    terraform_attribute: "port"
+
+# -- 15. Parameter Groups ----------------------------------------------------
+parameter_groups:
+  description: "Control cluster behavior via parameter settings"
+  terraform_resource: "aws_redshift_parameter_group"
+  max_per_account: 20
+  key_parameters:
+    - name: "require_ssl"
+      description: "Enforce SSL for all connections"
+      values: ["true", "false"]
+    - name: "enable_user_activity_logging"
+      description: "Log all SQL statements"
+      values: ["true", "false"]
+    - name: "max_concurrency_scaling_clusters"
+      description: "Max concurrency scaling clusters"
+      values: ["0-10"]
+    - name: "wlm_json_configuration"
+      description: "Workload management queue configuration"
+      type: "JSON"
+    - name: "auto_analyze"
+      description: "Automatic ANALYZE after load"
+      values: ["true", "false"]
+    - name: "statement_timeout"
+      description: "Max execution time for a statement (ms)"
+      default: 0  # no limit
+
+# -- 16. IAM -----------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    cluster: "arn:aws:redshift:REGION:ACCOUNT:cluster:CLUSTER-NAME"
+    dbname: "arn:aws:redshift:REGION:ACCOUNT:dbname:CLUSTER-NAME/DB-NAME"
+    dbuser: "arn:aws:redshift:REGION:ACCOUNT:dbuser:CLUSTER-NAME/DB-USER"
+    dbgroup: "arn:aws:redshift:REGION:ACCOUNT:dbgroup:CLUSTER-NAME/DB-GROUP"
+    snapshot: "arn:aws:redshift:REGION:ACCOUNT:snapshot:CLUSTER-NAME/SNAPSHOT-NAME"
+    parametergroup: "arn:aws:redshift:REGION:ACCOUNT:parametergroup:PG-NAME"
+    subnetgroup: "arn:aws:redshift:REGION:ACCOUNT:subnetgroup:SUBGRP-NAME"
+    namespace: "arn:aws:redshift:REGION:ACCOUNT:namespace:CLUSTER-NAMESPACE"
+
+  # Redshift IS a principal (has IAM execution role for Spectrum, COPY, UNLOAD)
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "glue:GetDatabase"
+    - "glue:GetTable"
+    - "glue:GetPartition"
+
+  # Complete action catalog
+  actions:
+    cluster_management:
+      - "redshift:CreateCluster"
+      - "redshift:DeleteCluster"
+      - "redshift:ModifyCluster"
+      - "redshift:DescribeClusters"
+      - "redshift:ResizeCluster"
+      - "redshift:RebootCluster"
+      - "redshift:PauseCluster"
+      - "redshift:ResumeCluster"
+    credentials:
+      - "redshift:GetClusterCredentials"
+      - "redshift:GetClusterCredentialsWithIAM"
+      - "redshift:CreateClusterUser"
+      - "redshift:JoinGroup"
+    snapshot_management:
+      - "redshift:CreateClusterSnapshot"
+      - "redshift:DeleteClusterSnapshot"
+      - "redshift:CopyClusterSnapshot"
+      - "redshift:RestoreFromClusterSnapshot"
+      - "redshift:DescribeClusterSnapshots"
+      - "redshift:ModifyClusterSnapshot"
+      - "redshift:AuthorizeSnapshotAccess"
+      - "redshift:RevokeSnapshotAccess"
+      - "redshift:RestoreTableFromClusterSnapshot"
+    snapshot_scheduling:
+      - "redshift:CreateSnapshotSchedule"
+      - "redshift:ModifySnapshotSchedule"
+      - "redshift:DeleteSnapshotSchedule"
+      - "redshift:DescribeSnapshotSchedules"
+      - "redshift:EnableSnapshotCopy"
+      - "redshift:DisableSnapshotCopy"
+      - "redshift:ModifySnapshotCopyRetentionPeriod"
+    parameter_groups:
+      - "redshift:CreateClusterParameterGroup"
+      - "redshift:DeleteClusterParameterGroup"
+      - "redshift:ModifyClusterParameterGroup"
+      - "redshift:DescribeClusterParameterGroups"
+      - "redshift:DescribeClusterParameters"
+      - "redshift:ResetClusterParameterGroup"
+    subnet_groups:
+      - "redshift:CreateClusterSubnetGroup"
+      - "redshift:DeleteClusterSubnetGroup"
+      - "redshift:ModifyClusterSubnetGroup"
+      - "redshift:DescribeClusterSubnetGroups"
+    security:
+      - "redshift:CreateClusterSecurityGroup"
+      - "redshift:DeleteClusterSecurityGroup"
+      - "redshift:AuthorizeClusterSecurityGroupIngress"
+      - "redshift:RevokeClusterSecurityGroupIngress"
+      - "redshift:DescribeClusterSecurityGroups"
+      - "redshift:ModifyClusterIamRoles"
+      - "redshift:RotateEncryptionKey"
+    data_sharing:
+      - "redshift:AuthorizeDataShare"
+      - "redshift:DeauthorizeDataShare"
+      - "redshift:AssociateDataShareConsumer"
+      - "redshift:DisassociateDataShareConsumer"
+      - "redshift:DescribeDataShares"
+    logging:
+      - "redshift:EnableLogging"
+      - "redshift:DisableLogging"
+      - "redshift:DescribeLoggingStatus"
+    events:
+      - "redshift:CreateEventSubscription"
+      - "redshift:DeleteEventSubscription"
+      - "redshift:ModifyEventSubscription"
+      - "redshift:DescribeEventSubscriptions"
+      - "redshift:DescribeEvents"
+    scheduled_actions:
+      - "redshift:CreateScheduledAction"
+      - "redshift:ModifyScheduledAction"
+      - "redshift:DeleteScheduledAction"
+      - "redshift:DescribeScheduledActions"
+    tagging:
+      - "redshift:CreateTags"
+      - "redshift:DeleteTags"
+      - "redshift:DescribeTags"
+    usage_limits:
+      - "redshift:CreateUsageLimit"
+      - "redshift:ModifyUsageLimit"
+      - "redshift:DeleteUsageLimit"
+      - "redshift:DescribeUsageLimits"
+    endpoint_access:
+      - "redshift:CreateEndpointAccess"
+      - "redshift:DeleteEndpointAccess"
+      - "redshift:ModifyEndpointAccess"
+      - "redshift:DescribeEndpointAccess"
+      - "redshift:AuthorizeEndpointAccess"
+      - "redshift:RevokeEndpointAccess"
+    zero_etl:
+      - "redshift:CreateIntegration"
+      - "redshift:DeleteIntegration"
+      - "redshift:ModifyIntegration"
+      - "redshift:DescribeIntegrations"
+      - "redshift:CreateInboundIntegration"
+      - "redshift:AuthorizeInboundIntegration"
+    data_api:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:BatchExecuteStatement"
+      - "redshift-data:DescribeStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:CancelStatement"
+      - "redshift-data:ListDatabases"
+      - "redshift-data:ListSchemas"
+      - "redshift-data:ListTables"
+      - "redshift-data:ListStatements"
+      - "redshift-data:DescribeTable"
+    console_query:
+      - "redshift:ExecuteQuery"
+      - "redshift:FetchResults"
+      - "redshift:CancelQuery"
+      - "redshift:CancelQuerySession"
+      - "redshift:ViewQueriesFromConsole"
+      - "redshift:ViewQueriesInConsole"
+    resource_policy:
+      - "redshift:PutResourcePolicy"
+      - "redshift:GetResourcePolicy"
+      - "redshift:DeleteResourcePolicy"
+    information:
+      - "redshift:DescribeClusterDbRevisions"
+      - "redshift:DescribeClusterVersions"
+      - "redshift:DescribeNodeConfigurationOptions"
+      - "redshift:DescribeOrderableClusterOptions"
+      - "redshift:DescribeResize"
+      - "redshift:DescribeStorage"
+      - "redshift:DescribeAccountAttributes"
+      - "redshift:ListRecommendations"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    kinesis_firehose:
+      - "redshift:CopyFromS3"
+    dms:
+      - "redshift:CopyFromS3"
+    lambda:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+    glue:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+    emr:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+    stepfunctions:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:PutObject"
+      - "s3:AbortMultipartUpload"
+    lambda:
+      - "lambda:InvokeFunction"
+
+  # Condition keys
+  condition_keys:
+    - "redshift:DbName"
+    - "redshift:DbUser"
+    - "redshift:DurationSeconds"
+    - "redshift:AllowWrites"
+    - "redshift:ConsumerArn"
+    - "redshift:ConsumerIdentifier"
+    - "redshift:InboundIntegrationArn"
+    - "redshift:IntegrationSourceArn"
+    - "redshift:IntegrationTargetArn"
+
+# -- 17. Environment Variables -----------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+# -- 18. VPC Triggers -------------------------------------------------------
+vpc_triggers:
+  - lambda
+  - ec2
+  - emr
+
+# -- 19. Integration Wiring Ownership ---------------------------------------
+integrations:
+  redshift_copy_from_s3:
+    description: "Redshift COPY command loads data from S3"
+    owned_by: "redshift"
+    iam_permissions_on_role:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+    note: "IAM role attached to cluster via iam_roles attribute"
+
+  redshift_unload_to_s3:
+    description: "Redshift UNLOAD exports query results to S3"
+    owned_by: "redshift"
+    iam_permissions_on_role:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:AbortMultipartUpload"
+
+  redshift_spectrum:
+    description: "Redshift Spectrum queries S3 data via external tables"
+    owned_by: "redshift"
+    iam_permissions_on_role:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+      - "glue:GetTables"
+      - "glue:GetPartitions"
+      - "glue:BatchGetPartition"
+
+  lambda_queries_redshift:
+    description: "Lambda queries Redshift via Data API"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:DescribeStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift:GetClusterCredentials"
+
+  stepfunctions_queries_redshift:
+    description: "Step Functions queries Redshift via Data API SDK integration"
+    owned_by: "stepfunctions"
+    iam_permissions_on_caller:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:DescribeStatement"
+      - "redshift-data:GetStatementResult"
+
+  glue_reads_redshift:
+    description: "Glue ETL job reads/writes Redshift via JDBC connection"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+    note: "Requires VPC connectivity and security group access"
+
+  emr_reads_redshift:
+    description: "EMR reads/writes Redshift via JDBC"
+    owned_by: "emr"
+    iam_permissions_on_caller:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+
+  kinesis_firehose_to_redshift:
+    description: "Kinesis Firehose delivers records to Redshift via S3 staging"
+    owned_by: "kinesis_firehose"
+    note: "Firehose writes to S3, then issues COPY command to Redshift"
+
+  dms_replicates_redshift:
+    description: "DMS uses Redshift as target for data migration"
+    owned_by: "dms"
+    note: "DMS writes via S3 staging + COPY command"
+
+  redshift_invokes_lambda:
+    description: "Redshift invokes Lambda from SQL (CREATE EXTERNAL FUNCTION)"
+    owned_by: "redshift"
+    iam_permissions_on_role:
+      - "lambda:InvokeFunction"
+
+  redshift_zero_etl_from_aurora:
+    description: "Zero-ETL integration from Aurora to Redshift"
+    owned_by: "redshift"
+    terraform_resource: "aws_redshift_integration (or via Aurora rds_integration)"
+
+  redshift_zero_etl_from_dynamodb:
+    description: "Zero-ETL integration from DynamoDB to Redshift"
+    owned_by: "redshift"
+
+# -- 20. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_redshift_cluster"
+      description: "Redshift cluster"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for Redshift audit logs"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "IAM role for Spectrum/COPY/UNLOAD"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "IAM policy for the Redshift role"
+      always_created: true
+    - resource: "random_password"
+      description: "Random master password"
+      always_created: true
+  conditional:
+    - resource: "aws_redshift_subnet_group"
+      condition: "VPC deployment (most cases)"
+    - resource: "aws_redshift_parameter_group"
+      condition: "Custom parameter settings"
+    - resource: "aws_redshift_snapshot_schedule"
+      condition: "Custom snapshot schedules"
+    - resource: "aws_redshift_snapshot_copy_grant"
+      condition: "Cross-region snapshot copies"
+    - resource: "aws_redshift_event_subscription"
+      condition: "SNS notifications for cluster events"
+    - resource: "aws_redshift_scheduled_action"
+      condition: "Scheduled pause/resume or resize"
+    - resource: "aws_redshift_endpoint_access"
+      condition: "Cross-VPC endpoint access"
+    - resource: "aws_redshift_usage_limit"
+      condition: "Usage limits for cost control"
+  serverless:
+    - resource: "aws_redshiftserverless_namespace"
+      description: "Serverless namespace (database, users, schemas)"
+    - resource: "aws_redshiftserverless_workgroup"
+      description: "Serverless workgroup (compute, networking)"
+    - resource: "aws_redshiftserverless_endpoint_access"
+      description: "Serverless VPC endpoint"
+
+# -- 21. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  data_api_client: "redshift-data"
+  management_client: "redshift"
+  data_api_operations:
+    execute_statement:
+      description: "Execute a SQL statement against a Redshift cluster"
+      parameters:
+        ClusterIdentifier: {type: string, description: "For provisioned clusters"}
+        WorkgroupName: {type: string, description: "For Serverless"}
+        Database: {type: string, required: true}
+        Sql: {type: string, required: true}
+        DbUser: {type: string}
+        SecretArn: {type: string}
+      returns: ["Id"]
+    batch_execute_statement:
+      description: "Execute multiple SQL statements"
+      parameters:
+        ClusterIdentifier: {type: string}
+        Database: {type: string, required: true}
+        Sqls: {type: list, required: true}
+        DbUser: {type: string}
+      returns: ["Id"]
+    describe_statement:
+      description: "Get the status of a SQL statement execution"
+      parameters:
+        Id: {type: string, required: true}
+      returns: ["Status", "Error", "Duration", "ResultRows", "ResultSize", "HasResultSet"]
+    get_statement_result:
+      description: "Get the results of a completed SQL query"
+      parameters:
+        Id: {type: string, required: true}
+      returns: ["Records", "ColumnMetadata", "TotalNumRows", "NextToken"]
+    list_tables:
+      description: "List tables in a database"
+      parameters:
+        ClusterIdentifier: {type: string}
+        Database: {type: string, required: true}
+        SchemaPattern: {type: string}
+        TablePattern: {type: string}
+      returns: ["Tables"]
+    list_schemas:
+      description: "List schemas in a database"
+      parameters:
+        ClusterIdentifier: {type: string}
+        Database: {type: string, required: true}
+        SchemaPattern: {type: string}
+      returns: ["Schemas"]
+    describe_table:
+      description: "Get column details for a table"
+      parameters:
+        ClusterIdentifier: {type: string}
+        Database: {type: string, required: true}
+        Table: {type: string, required: true}
+        Schema: {type: string}
+      returns: ["ColumnList"]
+  management_operations:
+    describe_clusters:
+      description: "Get cluster details"
+      parameters:
+        ClusterIdentifier: {type: string}
+      returns: ["Clusters[].ClusterIdentifier", "Clusters[].ClusterStatus", "Clusters[].DBName", "Clusters[].Endpoint.Address", "Clusters[].Endpoint.Port", "Clusters[].NodeType", "Clusters[].NumberOfNodes", "Clusters[].IamRoles"]
+    modify_cluster:
+      description: "Modify cluster settings"
+      parameters:
+        ClusterIdentifier: {type: string, required: true}
+        NumberOfNodes: {type: integer}
+        NodeType: {type: string}
+        MasterUserPassword: {type: string}
+        AutomatedSnapshotRetentionPeriod: {type: integer}
+        ClusterParameterGroupName: {type: string}
+        EnhancedVpcRouting: {type: boolean}
+    resize_cluster:
+      description: "Resize cluster (elastic or classic)"
+      parameters:
+        ClusterIdentifier: {type: string, required: true}
+        ClusterType: {type: string}
+        NodeType: {type: string}
+        NumberOfNodes: {type: integer}
+        Classic: {type: boolean}
+    pause_cluster:
+      description: "Pause cluster (suspends billing)"
+      parameters:
+        ClusterIdentifier: {type: string, required: true}
+    resume_cluster:
+      description: "Resume paused cluster"
+      parameters:
+        ClusterIdentifier: {type: string, required: true}
+    create_cluster_snapshot:
+      description: "Create manual snapshot"
+      parameters:
+        ClusterIdentifier: {type: string, required: true}
+        SnapshotIdentifier: {type: string, required: true}
+        Tags: {type: list}
+    get_cluster_credentials:
+      description: "Get temporary database credentials"
+      parameters:
+        ClusterIdentifier: {type: string, required: true}
+        DbUser: {type: string, required: true}
+        DbName: {type: string}
+        DurationSeconds: {type: integer}
+        AutoCreate: {type: boolean}
+      returns: ["DbUser", "DbPassword", "Expiration"]
+
+# -- 22. Runtime Diagnostics -------------------------------------------------
+runtime_diagnostics:
+  - pattern: "ClusterNotFound|cluster.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Redshift cluster not found or not yet available"
+    fix_type: wait
+    resolution: "redshift.describe_clusters(ClusterIdentifier=resource_name) to check status"
+
+  - pattern: "InsufficientClusterCapacity"
+    category: QUOTA
+    cause: "Requested node type/count not available in this AZ"
+    fix_type: manual
+    resolution: "Try a different node type or AZ in modify_cluster()"
+
+  - pattern: "AccessDenied.*redshift|redshift.*AccessDenied"
+    category: PERMISSION
+    cause: "Caller IAM role lacks required Redshift permissions"
+    fix_type: update_iam
+    resolution: "Add missing redshift:* or redshift-data:* actions to the caller's IAM role."
+
+  - pattern: "InvalidClusterState"
+    category: STATE
+    cause: "Cluster is in a state that does not allow the requested operation"
+    fix_type: wait
+    resolution: "Wait for cluster to reach 'available' status. Check describe_clusters for current state."
+
+  - pattern: "ClusterAlreadyExists"
+    category: ALREADY_EXISTS
+    cause: "Cluster identifier already in use"
+    fix_type: rename
+    resolution: "Choose a different cluster identifier."
+
+  - pattern: "NumberOfNodesQuotaExceeded"
+    category: QUOTA
+    cause: "Node count would exceed account quota"
+    fix_type: manual
+    resolution: "Request quota increase or reduce number of nodes."
+
+  - pattern: "UnauthorizedAccess.*COPY|COPY.*Permission denied"
+    category: PERMISSION
+    cause: "Redshift cluster IAM role lacks S3 read permissions for COPY"
+    fix_type: update_iam
+    resolution: "Add s3:GetObject and s3:ListBucket to the cluster IAM role."
+
+  - pattern: "S3ServiceException.*Forbidden"
+    category: PERMISSION
+    cause: "Redshift cannot access S3 bucket (bucket policy or IAM role)"
+    fix_type: update_iam
+    resolution: "Check cluster IAM role has S3 permissions and bucket policy allows the role."
+
+  - pattern: "disk full|No space left|storage-full"
+    category: STORAGE
+    cause: "Cluster storage is full"
+    fix_type: manual
+    resolution: "Resize to larger nodes, add nodes, or delete unused data. Consider RA3 for managed storage."
+
+  - pattern: "Connection timed out|could not connect"
+    category: NETWORK
+    cause: "Cannot connect to Redshift — check security group allows port 5439"
+    fix_type: update_sg
+    resolution: "Add inbound rule for TCP 5439 from caller security group/CIDR."
+
+# -- 23. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 24. Code Update (Developer Agent) --------------------------------------
+code_update:
+  method: sql
+  boto3_client: redshift-data
+  description: >
+    Schema/table/procedure changes via redshift-data.execute_statement().
+    Cluster config (node count, type) via redshift.modify_cluster().
+    Data loads via COPY command through execute_statement().
+  config_update:
+    client: redshift
+    operation: modify_cluster
+    id_param: ClusterIdentifier
+    updatable: [NumberOfNodes, NodeType, MasterUserPassword, AutomatedSnapshotRetentionPeriod, ClusterParameterGroupName, EnhancedVpcRouting]
+  code_update_steps:
+    - "rd = boto3.client('redshift-data', region_name=region)"
+    - "resp = rd.execute_statement(ClusterIdentifier=resource_name, Database='dev', DbUser='admin', Sql='SELECT 1')"
+    - "Poll rd.describe_statement(Id=resp['Id'])['Status'] until 'FINISHED' or 'FAILED'"
+    - "results = rd.get_statement_result(Id=resp['Id'])"
+  discovery_ops:
+    - op: describe_clusters
+      filter_by: "ClusterIdentifier=resource_name"
+      returns: ["Clusters[].ClusterIdentifier", "Clusters[].ClusterStatus", "Clusters[].DBName", "Clusters[].Endpoint.Address", "Clusters[].Endpoint.Port", "Clusters[].NodeType", "Clusters[].NumberOfNodes"]
+    - op: list_tables
+      parameters: ["ClusterIdentifier", "Database"]
+      returns: ["Tables[].name", "Tables[].schema", "Tables[].type"]
+    - op: list_schemas
+      parameters: ["ClusterIdentifier", "Database"]
+      returns: ["Schemas"]

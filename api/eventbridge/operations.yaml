@@ -1,0 +1,49 @@
+service: eventbridge
+boto3_client: events
+description: "Amazon EventBridge — serverless event bus for event-driven architectures"
+
+operations:
+  put_rule:
+    description: "Create or update an EventBridge rule"
+    parameters:
+      Name: {type: string, required: true}
+      EventBusName: {type: string}
+      ScheduleExpression: {type: string}
+      EventPattern: {type: string}
+      State: {type: string}
+
+  put_targets:
+    description: "Add targets to a rule"
+    parameters:
+      Rule: {type: string, required: true}
+      Targets: {type: list, required: true}
+      EventBusName: {type: string}
+
+  create_event_bus:
+    description: "Create a custom event bus"
+    parameters:
+      Name: {type: string, required: true}
+      Tags: {type: list}
+
+  put_events:
+    description: "Send custom events to an event bus"
+    parameters:
+      Entries: {type: list, required: true, description: "List of event entries with Source, DetailType, Detail"}
+
+  describe_rule:
+    description: "Get details of a rule"
+    parameters:
+      Name: {type: string, required: true}
+      EventBusName: {type: string}
+
+  list_rules:
+    description: "List rules on an event bus"
+    parameters:
+      EventBusName: {type: string}
+      NamePrefix: {type: string}
+
+  tag_resource:
+    description: "Add tags to an EventBridge resource"
+    parameters:
+      ResourceARN: {type: string, required: true}
+      Tags: {type: list, required: true}

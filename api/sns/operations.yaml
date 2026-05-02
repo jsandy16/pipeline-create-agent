@@ -1,0 +1,50 @@
+service: sns
+boto3_client: sns
+description: "Amazon SNS — pub/sub messaging and notifications"
+
+operations:
+  publish:
+    description: "Publish a message to a topic"
+    parameters:
+      TopicArn: {type: string, required: true}
+      Message: {type: string, required: true}
+      Subject: {type: string}
+      MessageAttributes: {type: object}
+
+  subscribe:
+    description: "Subscribe an endpoint (SQS, Lambda, email, HTTP) to a topic"
+    parameters:
+      TopicArn: {type: string, required: true}
+      Protocol: {type: string, required: true, description: "sqs, lambda, email, https, etc."}
+      Endpoint: {type: string, required: true}
+      Attributes: {type: object}
+
+  unsubscribe:
+    description: "Remove a subscription"
+    parameters:
+      SubscriptionArn: {type: string, required: true}
+
+  create_topic:
+    description: "Create a new SNS topic"
+    parameters:
+      Name: {type: string, required: true}
+      Attributes: {type: object, description: "FifoTopic, Policy, etc."}
+      Tags: {type: list}
+
+  set_topic_attributes:
+    description: "Set topic attributes (policy, delivery retry)"
+    parameters:
+      TopicArn: {type: string, required: true}
+      AttributeName: {type: string, required: true}
+      AttributeValue: {type: string}
+
+  list_subscriptions_by_topic:
+    description: "List all subscriptions for a topic"
+    parameters:
+      TopicArn: {type: string, required: true}
+
+  tag_resource:
+    description: "Add tags to an SNS topic"
+    parameters:
+      ResourceArn: {type: string, required: true}
+      Tags: {type: list, required: true}

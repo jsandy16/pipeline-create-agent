@@ -1,0 +1,150 @@
+service: sagemaker
+boto3_client: sagemaker
+description: "Amazon SageMaker — managed ML platform for training, hosting, and invoking models"
+
+operations:
+  create_model:
+    description: "Register a model definition (container image + S3 model artefacts)"
+    parameters:
+      ModelName: {type: string, required: true}
+      ExecutionRoleArn: {type: string, required: true, description: "IAM role ARN for SageMaker"}
+      PrimaryContainer: {type: object, required: true, description: "Image, ModelDataUrl, Environment"}
+      Containers: {type: list, description: "For multi-container/pipeline models"}
+      Tags: {type: list}
+
+  describe_model:
+    description: "Get details of a registered model"
+    parameters:
+      ModelName: {type: string, required: true}
+
+  delete_model:
+    description: "Delete a model definition"
+    parameters:
+      ModelName: {type: string, required: true}
+
+  create_endpoint_config:
+    description: "Create an endpoint configuration specifying instance type and model"
+    parameters:
+      EndpointConfigName: {type: string, required: true}
+      ProductionVariants: {type: list, required: true, description: "List of variant configs with ModelName, InstanceType, InitialInstanceCount"}
+      DataCaptureConfig: {type: object, description: "Enable data capture to S3"}
+      Tags: {type: list}
+
+  describe_endpoint_config:
+    description: "Get details of an endpoint configuration"
+    parameters:
+      EndpointConfigName: {type: string, required: true}
+
+  delete_endpoint_config:
+    description: "Delete an endpoint configuration"
+    parameters:
+      EndpointConfigName: {type: string, required: true}
+
+  create_endpoint:
+    description: "Deploy a model endpoint using an endpoint configuration"
+    parameters:
+      EndpointName: {type: string, required: true}
+      EndpointConfigName: {type: string, required: true}
+      Tags: {type: list}
+
+  update_endpoint:
+    description: "Update a live endpoint to use a new configuration (rolling update)"
+    parameters:
+      EndpointName: {type: string, required: true}
+      EndpointConfigName: {type: string, required: true}
+
+  describe_endpoint:
+    description: "Get the status and ARN of an endpoint"
+    parameters:
+      EndpointName: {type: string, required: true}
+
+  delete_endpoint:
+    description: "Delete a deployed endpoint (stops billing immediately)"
+    parameters:
+      EndpointName: {type: string, required: true}
+
+  list_endpoints:
+    description: "List all SageMaker endpoints"
+    parameters:
+      StatusEquals: {type: string, description: "Filter: InService, Creating, Updating, Failed"}
+      MaxResults: {type: integer}
+      NextToken: {type: string}
+
+  create_training_job:
+    description: "Start a model training job"
+    parameters:
+      TrainingJobName: {type: string, required: true}
+      AlgorithmSpecification: {type: object, required: true, description: "TrainingImage and TrainingInputMode"}
+      RoleArn: {type: string, required: true}
+      InputDataConfig: {type: list, required: true, description: "List of channel configs pointing to S3"}
+      OutputDataConfig: {type: object, required: true, description: "S3OutputPath for model artefacts"}
+      ResourceConfig: {type: object, required: true, description: "InstanceType, InstanceCount, VolumeSizeInGB"}
+      StoppingCondition: {type: object, required: true, description: "MaxRuntimeInSeconds"}
+      HyperParameters: {type: object}
+      Tags: {type: list}
+
+  describe_training_job:
+    description: "Get the status and metrics of a training job"
+    parameters:
+      TrainingJobName: {type: string, required: true}
+
+  stop_training_job:
+    description: "Stop a running training job"
+    parameters:
+      TrainingJobName: {type: string, required: true}
+
+  list_training_jobs:
+    description: "List training jobs with optional status filter"
+    parameters:
+      StatusEquals: {type: string, description: "InProgress, Completed, Failed, Stopped"}
+      MaxResults: {type: integer}
+      NextToken: {type: string}
+
+  create_processing_job:
+    description: "Run a data processing or model evaluation script"
+    parameters:
+      ProcessingJobName: {type: string, required: true}
+      ProcessingResources: {type: object, required: true, description: "ClusterConfig with InstanceType and InstanceCount"}
+      AppSpecification: {type: object, required: true, description: "ImageUri and ContainerArguments"}
+      RoleArn: {type: string, required: true}
+      ProcessingInputs: {type: list, description: "S3 input locations"}
+      ProcessingOutputConfig: {type: object, description: "S3 output locations"}
+      StoppingCondition: {type: object, description: "MaxRuntimeInSeconds"}
+      Tags: {type: list}
+
+  describe_processing_job:
+    description: "Get the status of a processing job"
+    parameters:
+      ProcessingJobName: {type: string, required: true}
+
+  stop_processing_job:
+    description: "Stop a running processing job"
+    parameters:
+      ProcessingJobName: {type: string, required: true}
+
+  create_transform_job:
+    description: "Run batch inference on a dataset in S3"
+    parameters:
+      TransformJobName: {type: string, required: true}
+      ModelName: {type: string, required: true}
+      TransformInput: {type: object, required: true, description: "DataSource pointing to S3"}
+      TransformOutput: {type: object, required: true, description: "S3OutputPath for predictions"}
+      TransformResources: {type: object, required: true, description: "InstanceType and InstanceCount"}
+      BatchStrategy: {type: string, description: "MultiRecord or SingleRecord"}
+      Tags: {type: list}
+
+  describe_transform_job:
+    description: "Get the status of a batch transform job"
+    parameters:
+      TransformJobName: {type: string, required: true}
+
+  stop_transform_job:
+    description: "Stop a running transform job"
+    parameters:
+      TransformJobName: {type: string, required: true}
+
+  update_function_configuration:
+    description: "Update environment variables or settings on a SageMaker endpoint config"
+    parameters:
+      EndpointConfigName: {type: string, required: true}
+      ProductionVariants: {type: list, required: true}

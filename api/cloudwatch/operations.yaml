@@ -1,0 +1,59 @@
+service: cloudwatch
+boto3_client: events
+description: "Amazon CloudWatch Events / EventBridge rules — scheduling and event routing"
+
+operations:
+  put_rule:
+    description: "Create or update a CloudWatch Events rule"
+    parameters:
+      Name: {type: string, required: true}
+      ScheduleExpression: {type: string, description: "cron() or rate()"}
+      EventPattern: {type: string, description: "JSON event pattern"}
+      State: {type: string, description: "ENABLED or DISABLED"}
+
+  put_targets:
+    description: "Add targets (Lambda, SQS, etc.) to a rule"
+    parameters:
+      Rule: {type: string, required: true}
+      Targets: {type: list, required: true, description: "List of target dicts with Id, Arn"}
+
+  remove_targets:
+    description: "Remove targets from a rule"
+    parameters:
+      Rule: {type: string, required: true}
+      Ids: {type: list, required: true}
+
+  enable_rule:
+    description: "Enable a disabled rule"
+    parameters:
+      Name: {type: string, required: true}
+
+  disable_rule:
+    description: "Disable an active rule"
+    parameters:
+      Name: {type: string, required: true}
+
+  put_metric_alarm:
+    description: "Create or update a CloudWatch metric alarm"
+    parameters:
+      AlarmName: {type: string, required: true}
+      MetricName: {type: string, required: true}
+      Namespace: {type: string, required: true}
+      Statistic: {type: string}
+      Period: {type: integer}
+      Threshold: {type: number}
+      ComparisonOperator: {type: string, required: true}
+      EvaluationPeriods: {type: integer, required: true}
+      AlarmActions: {type: list}
+
+  put_metric_data:
+    description: "Publish custom metric data points"
+    parameters:
+      Namespace: {type: string, required: true}
+      MetricData: {type: list, required: true}
+
+  describe_alarms:
+    description: "List CloudWatch alarms"
+    parameters:
+      AlarmNames: {type: list}
+      StateValue: {type: string}

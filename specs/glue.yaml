@@ -1,0 +1,135 @@
+service_type: glue
+is_principal: true
+terraform_resource: aws_glue_crawler
+description: "Glue catalog database + crawler for S3-based data cataloguing"
+
+defaults:
+  database_description: "Glue Data Catalog database"
+  update_behavior: "UPDATE_IN_DATABASE"
+  delete_behavior: "LOG"
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "glue:GetDatabase"
+    - "glue:GetTable"
+    - "glue:CreateTable"
+    - "glue:UpdateTable"
+    - "glue:DeleteTable"
+    - "glue:GetPartition"
+    - "glue:CreatePartition"
+    - "glue:UpdatePartition"
+    - "glue:BatchCreatePartition"
+    - "glue:BatchDeletePartition"
+  as_target_of:
+    stepfunctions:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+    lambda:
+      - "glue:StartCrawler"
+      - "glue:GetCrawler"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    dynamodb:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+vpc_triggers:
+  - aurora
+  - redshift
+
+# Glue fragment creates:
+#   1. aws_glue_catalog_database (the database)
+#   2. aws_iam_role (for the crawler, principal = glue.amazonaws.com)
+#   3. aws_glue_crawler (targets S3 bucket from integrations)
+
+invocation:
+  description: "Glue jobs started via start_job_run(JobName=name). Crawlers via start_crawler(Name=name). Job name is the crawler name (same resource label)."
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_CRAWLER_NAME"
+      ref: "aws_glue_crawler.{self_label}.name"
+      boto3_param: "Name (for start_crawler) or JobName (for start_job_run)"
+      description: "Glue crawler/job name"
+  caller_iam:
+    - "glue:StartJobRun"
+    - "glue:GetJobRun"
+    - "glue:StartCrawler"
+    - "glue:GetCrawler"
+  passrole_required: false
+
+code_update:
+  method: s3_script
+  boto3_client: glue
+  description: >
+    Glue crawler config via glue.update_crawler(). ETL job scripts are stored in S3
+    at the ScriptLocation path; update via s3.put_object(). Get script path via
+    glue.get_job(JobName=name)['Job']['Command']['ScriptLocation'].
+  config_update:
+    client: glue
+    operation: update_crawler
+    id_param: Name
+    id_value: "{resource_name}"
+  code_update_steps:
+    - "glue_client = boto3.client('glue', region_name=region)"
+    - "job = glue_client.get_job(JobName=resource_name)['Job']"
+    - "script_loc = job['Command']['ScriptLocation']  # s3://bucket/key"
+    - "bucket, key = script_loc[5:].split('/', 1)"
+    - "script = s3.get_object(Bucket=bucket, Key=key)['Body'].read().decode()"
+    - "modified = script.replace('<old>', '<new>')"
+    - "s3.put_object(Bucket=bucket, Key=key, Body=modified.encode())"
+  discovery_ops:
+    - op: get_crawler
+      id_param: Name
+      returns: ["Crawler.Role", "Crawler.Targets", "Crawler.DatabaseName", "Crawler.State", "Crawler.LastCrawl"]
+    - op: get_job
+      id_param: JobName
+      returns: ["Job.Command.ScriptLocation", "Job.DefaultArguments", "Job.Role", "Job.MaxCapacity"]
+    - op: get_job_runs
+      id_param: JobName
+      returns: ["JobRuns[].JobRunId", "JobRuns[].JobRunState", "JobRuns[].ErrorMessage"]
+
+runtime_diagnostics:
+  - pattern: "AccessDenied.*s3|s3.*AccessDenied"
+    category: PERMISSION
+    cause: "Glue crawler/job cannot access S3 — missing s3:GetObject or s3:ListBucket on the target bucket"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={s3 permissions})"
+  - pattern: "EntityNotFoundException|database.*not found|table.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Glue Data Catalog database or table not found — crawler may not have run yet"
+    fix_type: trigger_crawler
+    resolution: "glue_client.start_crawler(Name=resource_name)"

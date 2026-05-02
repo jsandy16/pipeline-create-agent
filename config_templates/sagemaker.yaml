@@ -1,0 +1,20 @@
+templates:
+  pytorch:
+    display_name: "PyTorch Inference"
+    description: "PyTorch framework for model serving"
+    config:
+      framework: "pytorch-inference"
+      image_tag: "2.1.0-cpu-py310"
+
+  tensorflow:
+    display_name: "TensorFlow Inference"
+    description: "TensorFlow framework for model serving"
+    config:
+      framework: "tensorflow-inference"
+      image_tag: "2.13.0-cpu"
+
+  gpu_endpoint:
+    display_name: "GPU Endpoint"
+    description: "GPU-accelerated endpoint for large models"
+    config:
+      instance_type: "ml.g4dn.xlarge"

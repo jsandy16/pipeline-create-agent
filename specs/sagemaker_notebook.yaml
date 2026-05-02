@@ -1,0 +1,133 @@
+service_type: sagemaker_notebook
+is_principal: true
+terraform_resource: aws_sagemaker_notebook_instance
+description: >
+  Amazon SageMaker Notebook Instance — a managed Jupyter notebook for
+  interactive data exploration, visualization, and ML experimentation.
+  This is the simplest SageMaker resource: just an IAM role + notebook instance.
+  No model, no endpoint, no container image required.
+
+defaults:
+  # ml.t2.medium: smallest SageMaker notebook instance.
+  # Free tier: 250 hours/month for the first 2 months.
+  instance_type: "ml.t2.medium"
+  # EBS volume size in GB (minimum 5)
+  volume_size: 5
+  # Direct internet access (set to Disabled if in VPC with NAT)
+  direct_internet_access: "Enabled"
+
+iam:
+  always:
+    # CloudWatch logging
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    # SageMaker notebook needs to describe its own instance
+    - "sagemaker:DescribeNotebookInstance"
+    - "sagemaker:ListTags"
+
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:StopQueryExecution"
+      - "glue:GetTable"
+      - "glue:GetPartitions"
+      - "glue:GetDatabase"
+    dynamodb:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:BatchGetItem"
+      - "dynamodb:BatchWriteItem"
+    redshift:
+      - "redshift:GetClusterCredentials"
+      - "redshift:DescribeClusters"
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    glue:
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetPartitions"
+    glue_data_catalog:
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetPartitions"
+    sagemaker:
+      - "sagemaker:InvokeEndpoint"
+      - "sagemaker:DescribeEndpoint"
+      - "sagemaker:DescribeModel"
+    lambda:
+      - "lambda:InvokeFunction"
+    stepfunctions:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+vpc_triggers:
+  - redshift
+  - aurora
+  - rds
+
+code_update:
+  method: api_config
+  boto3_client: sagemaker
+  description: >
+    Notebook instance: stop → update (instance type, lifecycle config, volume) → start.
+    To run code on the notebook, use SSM or generate a presigned URL.
+    Instance must be Stopped before update_notebook_instance().
+  config_update:
+    client: sagemaker
+    operation: update_notebook_instance
+    id_param: NotebookInstanceName
+    note: "Must stop first: stop_notebook_instance() → poll until Stopped → update → start_notebook_instance()"
+    updatable: [InstanceType, RoleArn, LifecycleConfigName, VolumeSizeInGB, DefaultCodeRepository]
+  code_update_steps:
+    - "sm.stop_notebook_instance(NotebookInstanceName=resource_name)"
+    - "Poll sm.describe_notebook_instance(NotebookInstanceName=resource_name)['NotebookInstanceStatus'] until 'Stopped'"
+    - "sm.update_notebook_instance(NotebookInstanceName=resource_name, InstanceType='ml.t2.medium')"
+    - "sm.start_notebook_instance(NotebookInstanceName=resource_name)"
+  discovery_ops:
+    - op: describe_notebook_instance
+      id_param: NotebookInstanceName
+      returns: ["NotebookInstanceStatus", "InstanceType", "Url", "RoleArn", "VolumeSizeInGB", "DirectInternetAccess"]
+    - op: create_presigned_notebook_instance_url
+      id_param: NotebookInstanceName
+      returns: ["AuthorizedUrl"]
+      note: "Returns a one-time browser URL to access the running notebook"
+runtime_diagnostics:
+  - pattern: "NotebookInstance.*Failed|LifecycleConfig.*failed"
+    category: CONFIG
+    cause: "Notebook instance failed to start — lifecycle config script may have errored"
+    fix_type: check_logs
+    resolution: "Check /aws/sagemaker/NotebookInstances/<name>/LifecycleConfig CloudWatch log group"

@@ -1,0 +1,50 @@
+service_type: eventbridge
+is_principal: false
+terraform_resource: aws_cloudwatch_event_rule
+description: "EventBridge rule for event-pattern or schedule-based triggers"
+
+defaults:
+  event_bus_name: "default"
+  state: "ENABLED"
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+# EventBridge fragment creates:
+#   1. aws_cloudwatch_event_rule
+#   2. aws_cloudwatch_event_target (one per target service)
+#   3. aws_lambda_permission (when target is Lambda, principal=events.amazonaws.com)
+#   4. For SQS targets: SQS fragment creates the queue_policy
+
+code_update:
+  method: api_config
+  boto3_client: events
+  description: >
+    EventBridge rules updated via put_rule() (upsert). Targets via put_targets().
+    Custom event buses via update_event_bus(). Rules list via list_rules(EventBusName=bus_name).
+  config_update:
+    client: events
+    operation: put_rule
+    id_param: Name
+    note: "put_rule() upserts — updates schedule or event pattern if rule already exists"
+  discovery_ops:
+    - op: describe_rule
+      id_param: Name
+      returns: ["Arn", "ScheduleExpression", "EventPattern", "State"]
+    - op: list_targets_by_rule
+      id_param: Rule
+      returns: ["Targets[].Id", "Targets[].Arn", "Targets[].Input"]
+runtime_diagnostics:
+  - pattern: "ResourceNotFoundException.*events|rule.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "EventBridge rule not found"
+    fix_type: manual
+    resolution: "Verify rule name. Run put_rule() to recreate if deleted."

@@ -1,0 +1,84 @@
+service: emr_serverless
+boto3_client: emr-serverless
+description: "Amazon EMR Serverless — run Spark/Hive jobs without managing clusters"
+
+operations:
+  create_application:
+    description: "Create a new EMR Serverless application"
+    parameters:
+      name: {type: string, required: true, description: "Application name"}
+      releaseLabel: {type: string, required: true, description: "EMR release label e.g. emr-6.15.0"}
+      type: {type: string, required: true, description: "SPARK or HIVE"}
+      architecture: {type: string, description: "X86_64 or ARM64"}
+      initialCapacity: {type: object, description: "Pre-initialized worker capacity by type"}
+      maximumCapacity: {type: object, description: "Max vCPU, memory, disk limits"}
+      autoStartConfiguration: {type: object, description: "enabled: true/false"}
+      autoStopConfiguration: {type: object, description: "enabled + idleTimeoutMinutes"}
+      tags: {type: object}
+
+  start_application:
+    description: "Start an EMR Serverless application (moves it to STARTED state)"
+    parameters:
+      applicationId: {type: string, required: true}
+
+  stop_application:
+    description: "Stop a running application (moves it to STOPPED state)"
+    parameters:
+      applicationId: {type: string, required: true}
+
+  delete_application:
+    description: "Delete an EMR Serverless application (must be stopped first)"
+    parameters:
+      applicationId: {type: string, required: true}
+
+  get_application:
+    description: "Get details of an EMR Serverless application"
+    parameters:
+      applicationId: {type: string, required: true}
+
+  list_applications:
+    description: "List all EMR Serverless applications"
+    parameters:
+      nextToken: {type: string}
+      maxResults: {type: integer}
+      states: {type: list, description: "Filter by state e.g. STARTED, STOPPED"}
+
+  start_job_run:
+    description: "Submit a Spark or Hive job to a running application"
+    parameters:
+      applicationId: {type: string, required: true}
+      executionRoleArn: {type: string, required: true, description: "IAM role ARN for job execution"}
+      jobDriver: {type: object, required: true, description: "sparkSubmit or hive config block"}
+      configurationOverrides: {type: object, description: "Spark properties and monitoring config"}
+      name: {type: string}
+      executionTimeoutMinutes: {type: integer}
+      tags: {type: object}
+
+  get_job_run:
+    description: "Get the status and details of a job run"
+    parameters:
+      applicationId: {type: string, required: true}
+      jobRunId: {type: string, required: true}
+
+  list_job_runs:
+    description: "List job runs for an application"
+    parameters:
+      applicationId: {type: string, required: true}
+      nextToken: {type: string}
+      maxResults: {type: integer}
+      states: {type: list, description: "Filter by state e.g. RUNNING, SUCCESS, FAILED"}
+
+  cancel_job_run:
+    description: "Cancel a running job"
+    parameters:
+      applicationId: {type: string, required: true}
+      jobRunId: {type: string, required: true}
+
+  update_application:
+    description: "Update capacity or auto-stop settings of an application"
+    parameters:
+      applicationId: {type: string, required: true}
+      initialCapacity: {type: object}
+      maximumCapacity: {type: object}
+      autoStartConfiguration: {type: object}
+      autoStopConfiguration: {type: object}

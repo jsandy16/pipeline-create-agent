@@ -1,0 +1,1110 @@
+# ============================================================================
+# Amazon MSK (Managed Streaming for Apache Kafka) Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL MSK knowledge needed by the
+# pipeline engine, HCL renderer, spec builder, developer agent, and autofix
+# agent. It extends the original specs/msk.yaml with exhaustive coverage of
+# capabilities, constraints, IAM, integrations, and Terraform resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — cluster naming rules
+#   3. defaults            — Terraform attribute defaults (minimum-cost)
+#   4. quotas              — AWS service limits
+#   5. clusters            — provisioned vs serverless clusters
+#   6. broker_types        — broker instance types and sizing
+#   7. topics              — Kafka topic management
+#   8. authentication      — IAM, SASL/SCRAM, mTLS authentication
+#   9. encryption          — at-rest and in-transit encryption
+#  10. networking          — VPC, subnets, security groups, connectivity
+#  11. monitoring          — CloudWatch metrics, open monitoring, broker logs
+#  12. msk_connect         — managed Kafka Connect
+#  13. configuration       — cluster configuration (server.properties)
+#  14. storage             — EBS volumes, tiered storage
+#  15. iam                 — complete IAM action catalog & integration graph rules
+#  16. env_vars            — auto-wired environment variables
+#  17. vpc_triggers        — VPC placement rules
+#  18. integrations        — wiring ownership with all supported service types
+#  19. terraform_resources — all TF resource types this service uses
+#  20. boto3_operations    — complete API operation reference
+#  21. runtime_diagnostics — error patterns & auto-fix rules
+#  22. tags                — tagging constraints
+#  23. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: msk
+  aws_service_name: "Amazon Managed Streaming for Apache Kafka (Amazon MSK)"
+  is_principal: false            # MSK cluster does not have an execution role itself
+  terraform_resource: aws_msk_cluster
+  description: >
+    Fully managed Apache Kafka service. MSK provisions, configures, and maintains
+    Apache Kafka clusters and Apache ZooKeeper nodes. Supports Kafka versions
+    2.6.x through 3.6.x. Clients connect using standard Kafka protocols.
+    Topics, partitions, and consumer groups are managed via Kafka AdminClient
+    or kafka-topics.sh, NOT via AWS APIs.
+  free_tier:
+    status: never_free
+    details: >
+      MSK is NOT free tier eligible.
+      Provisioned: ~$0.11/broker-hour for kafka.t3.small (smallest) + EBS storage.
+      Serverless: ~$0.01/cluster-hour + $0.10/partition-hour + $0.10/GB data in + out.
+      Additional charges for inter-AZ data transfer and enhanced monitoring.
+  pricing_model: per_broker_hour_plus_storage
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 64        # max characters for cluster name
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_-"
+  rules:
+    - "1-64 characters"
+    - "Letters, digits, underscores, and hyphens"
+    - "Must be unique within an AWS account and region"
+    - "No periods (unlike Kafka topic names)"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  kafka_version: "3.5.1"
+  number_of_broker_nodes: 2         # minimum for multi-AZ
+  broker_instance_type: "kafka.t3.small"  # smallest available MSK broker
+  volume_size: 1                    # minimum EBS volume (GB); production: 100+
+  enhanced_monitoring: "DEFAULT"    # free; PER_BROKER and PER_TOPIC_PER_BROKER cost extra
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_clusters_per_account: 90       # per region, adjustable
+  max_brokers_per_cluster: 30        # per AZ, so max = 30 * 3 AZs = 90
+  min_brokers_per_cluster: 1         # minimum (but 2+ for multi-AZ)
+  max_topics_per_cluster: "depends on broker resources (no hard AWS limit)"
+  max_partitions_per_broker: 4000    # recommended limit; varies by instance type
+  max_consumer_groups: "no hard limit (depends on broker memory)"
+  max_configurations_per_account: 100
+  max_revisions_per_configuration: 50
+  ebs_storage:
+    min_volume_size_gb: 1
+    max_volume_size_gb: 16384       # 16 TiB
+    provisioned_throughput:
+      min_mb_per_sec: 250
+      max_mb_per_sec: 2375
+      volume_size_threshold: 10240   # only for volumes >= 10 TiB
+  network:
+    max_connections_per_broker: "depends on instance type"
+    max_throughput_per_broker: "depends on instance type"
+  serverless:
+    max_clusters_per_account: 10     # per region
+    max_partitions_per_cluster: 120  # default
+    max_ingress_per_partition: "5 MB/s"
+    max_egress_per_partition: "20 MB/s"
+
+# -- 5. Clusters --------------------------------------------------------------
+clusters:
+  provisioned:
+    description: >
+      Traditional MSK cluster with fixed broker instances. You choose instance
+      type, number of brokers, and EBS storage. Managed ZooKeeper included.
+      Best for predictable, steady workloads with specific throughput needs.
+    terraform_resource: "aws_msk_cluster"
+    key_attributes:
+      cluster_name: "Cluster name"
+      kafka_version: "Apache Kafka version"
+      number_of_broker_nodes: "Total broker count (multiple of AZ count)"
+      broker_node_group_info: "Instance type, subnets, security groups, storage"
+      encryption_info: "Encryption settings"
+      logging_info: "Broker log destinations"
+      open_monitoring: "Prometheus metrics export"
+      configuration_info: "Custom Kafka configuration"
+    scaling:
+      broker_count: "Add brokers via update_broker_count (must be multiple of AZ count)"
+      storage: "Increase EBS via update_broker_storage (cannot decrease)"
+      instance_type: "Change via update_broker_type (rolling restart)"
+    availability:
+      multi_az: "Recommended. Brokers distributed evenly across specified subnets."
+      min_azs: 2
+      recommended_azs: 3
+
+  serverless:
+    description: >
+      Serverless MSK cluster that auto-scales. No broker management, no capacity
+      planning. Pay per partition-hour and data throughput. Best for variable or
+      unpredictable workloads.
+    terraform_resource: "aws_msk_serverless_cluster"
+    key_attributes:
+      cluster_name: "Cluster name"
+      client_authentication: "Must be IAM (only IAM supported for serverless)"
+      vpc_config: "Subnets and security groups"
+    limitations:
+      - "IAM authentication only (no SASL/SCRAM or mTLS)"
+      - "Cannot configure broker settings"
+      - "Limited Kafka version selection"
+      - "Max 120 partitions per cluster (default)"
+      - "No ZooKeeper access"
+      - "Topic-level configs limited"
+
+  kraft:
+    description: >
+      KRaft mode eliminates ZooKeeper dependency. Available in Kafka 3.7+ on MSK.
+      Simplifies operations and improves metadata performance.
+    note: "As of 2024, MSK supports KRaft for new clusters on Kafka 3.7+"
+
+# -- 6. Broker Types ---------------------------------------------------------
+broker_types:
+  t3_family:
+    kafka.t3.small:
+      vcpu: 2
+      memory_gb: 2
+      max_partitions: 300
+      network_baseline: "Up to 5 Gbps"
+      cost_per_hour: "~$0.11"
+      use_case: "Development, testing, low-throughput"
+  m5_family:
+    kafka.m5.large:
+      vcpu: 2
+      memory_gb: 8
+      max_partitions: 1000
+      network_baseline: "Up to 10 Gbps"
+      cost_per_hour: "~$0.21"
+      use_case: "Production, moderate throughput"
+    kafka.m5.xlarge:
+      vcpu: 4
+      memory_gb: 16
+      max_partitions: 1500
+      network_baseline: "Up to 10 Gbps"
+      cost_per_hour: "~$0.42"
+    kafka.m5.2xlarge:
+      vcpu: 8
+      memory_gb: 32
+      max_partitions: 2000
+      network_baseline: "Up to 10 Gbps"
+      cost_per_hour: "~$0.84"
+    kafka.m5.4xlarge:
+      vcpu: 16
+      memory_gb: 64
+      max_partitions: 4000
+      network_baseline: "10 Gbps"
+      cost_per_hour: "~$1.68"
+    kafka.m5.8xlarge:
+      vcpu: 32
+      memory_gb: 128
+      max_partitions: 4000
+      network_baseline: "10 Gbps"
+      cost_per_hour: "~$3.36"
+    kafka.m5.12xlarge:
+      vcpu: 48
+      memory_gb: 192
+      max_partitions: 4000
+      network_baseline: "12 Gbps"
+      cost_per_hour: "~$5.04"
+    kafka.m5.16xlarge:
+      vcpu: 64
+      memory_gb: 256
+      max_partitions: 4000
+      network_baseline: "20 Gbps"
+      cost_per_hour: "~$6.72"
+    kafka.m5.24xlarge:
+      vcpu: 96
+      memory_gb: 384
+      max_partitions: 4000
+      network_baseline: "25 Gbps"
+      cost_per_hour: "~$10.08"
+  m7g_family:
+    note: "Graviton3-based, ~20% better price-performance than m5"
+    kafka.m7g.large:
+      vcpu: 2
+      memory_gb: 8
+      cost_per_hour: "~$0.19"
+    kafka.m7g.xlarge:
+      vcpu: 4
+      memory_gb: 16
+      cost_per_hour: "~$0.38"
+
+# -- 7. Topics ---------------------------------------------------------------
+topics:
+  management:
+    description: >
+      Kafka topics are NOT managed by AWS APIs. They are managed using the
+      standard Kafka AdminClient library (kafka-python, confluent-kafka) or
+      the kafka-topics.sh CLI tool connecting to the bootstrap brokers.
+    not_boto3: true
+    tools:
+      - "kafka-python: KafkaAdminClient.create_topics()"
+      - "confluent-kafka: AdminClient.create_topics()"
+      - "kafka-topics.sh --create --bootstrap-server BROKERS"
+  key_configs:
+    num.partitions: "Default partitions per topic (broker-level config)"
+    default.replication.factor: "Default replication factor"
+    retention.ms: "How long to retain messages (default 604800000 = 7 days)"
+    retention.bytes: "Max bytes per partition before deletion"
+    cleanup.policy: "delete (default) or compact"
+    compression.type: "producer, none, gzip, snappy, lz4, zstd"
+    max.message.bytes: "Max record batch size (default 1048588)"
+    min.insync.replicas: "Min ISR for acks=all (recommended: replication_factor - 1)"
+
+# -- 8. Authentication -------------------------------------------------------
+authentication:
+  iam:
+    description: >
+      IAM authentication uses AWS IAM policies and SigV4 signing. Clients connect
+      using the AWS_MSK_IAM SASL mechanism. No passwords to manage.
+    terraform_block: "client_authentication { sasl { iam = true } }"
+    port: 9098
+    bootstrap_attribute: "BootstrapBrokerStringSaslIam"
+    client_config:
+      java: "security.protocol=SASL_SSL, sasl.mechanism=AWS_MSK_IAM, sasl.jaas.config=...MSKSigV4LoginModule..."
+      python: "Uses aws-msk-iam-sasl-signer-python library"
+    best_for: "Recommended for most use cases. Simplest. No secret management."
+
+  sasl_scram:
+    description: >
+      SASL/SCRAM-SHA-512 username/password authentication via AWS Secrets Manager.
+    terraform_block: "client_authentication { sasl { scram = true } }"
+    port: 9096
+    bootstrap_attribute: "BootstrapBrokerStringSaslScram"
+    requires:
+      - "AWS Secrets Manager secret with username/password"
+      - "aws_msk_scram_secret_association resource"
+    secret_format:
+      username: "string"
+      password: "string"
+
+  mtls:
+    description: >
+      Mutual TLS client certificate authentication using AWS Private CA.
+    terraform_block: "client_authentication { tls { certificate_authority_arns = [...] } }"
+    port: 9094
+    bootstrap_attribute: "BootstrapBrokerStringTls"
+    requires:
+      - "AWS Private Certificate Authority"
+      - "Client certificates signed by the CA"
+
+  unauthenticated:
+    description: "Plaintext access without authentication (development only)"
+    terraform_block: "client_authentication { unauthenticated = true }"
+    port: 9092
+    bootstrap_attribute: "BootstrapBrokerString"
+    warning: "NOT recommended for production. No access control."
+
+# -- 9. Encryption ------------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Data stored on EBS volumes encrypted with KMS"
+    terraform_block: "encryption_info { encryption_at_rest_in_transit { ... } }"
+    terraform_attribute: "encryption_info { encryption_at_rest_data_volume_kms_key_arn }"
+    default: "AWS-managed key (aws/kafka)"
+    customer_managed: "Specify KMS key ARN"
+
+  in_transit:
+    description: "TLS encryption between clients and brokers, and between brokers"
+    terraform_block: "encryption_info { encryption_in_transit { client_broker = 'TLS' | 'TLS_PLAINTEXT' | 'PLAINTEXT' } }"
+    options:
+      TLS: "Encrypted only (recommended for production)"
+      TLS_PLAINTEXT: "Both encrypted and plaintext (migration)"
+      PLAINTEXT: "No encryption (development only)"
+    in_cluster: "TLS between brokers (always enabled, cannot disable)"
+
+# -- 10. Networking -----------------------------------------------------------
+networking:
+  vpc_required: true
+  description: >
+    MSK clusters MUST be deployed in a VPC. Brokers are placed in private subnets
+    across availability zones. A security group controls inbound/outbound traffic.
+  subnets:
+    requirement: "One subnet per AZ. Number of subnets must match number of AZs."
+    recommendation: "Use private subnets. MSK does not support public subnets."
+    terraform_attribute: "broker_node_group_info { client_subnets = [...] }"
+  security_groups:
+    terraform_attribute: "broker_node_group_info { security_groups = [...] }"
+    required_ports:
+      plaintext: 9092
+      tls: 9094
+      sasl_scram: 9096
+      iam: 9098
+      zookeeper: "2181 (internal, usually not exposed to clients)"
+    recommended_rules:
+      ingress: "TCP 9092-9098 from client security groups (Lambda, EC2, etc.)"
+      egress: "All traffic (0.0.0.0/0) for broker-to-broker and AWS service communication"
+  public_access:
+    description: "MSK can be configured for public access (since 2022)"
+    terraform_block: "broker_node_group_info { connectivity_info { public_access { type = 'DISABLED' | 'SERVICE_PROVIDED_EIPS' } } }"
+    constraint: "Requires cluster to use authentication and TLS encryption"
+  multi_vpc_connectivity:
+    description: "Cross-VPC access via AWS PrivateLink (since 2023)"
+    terraform_resource: "aws_msk_vpc_connection"
+
+# -- 11. Monitoring -----------------------------------------------------------
+monitoring:
+  cloudwatch_metrics:
+    description: "MSK publishes metrics to CloudWatch under the AWS/Kafka namespace"
+    levels:
+      DEFAULT:
+        description: "Cluster-level metrics (free)"
+        terraform_value: "DEFAULT"
+        metrics:
+          - "ActiveControllerCount"
+          - "KafkaDataLogsDiskUsed"
+          - "OfflinePartitionsCount"
+          - "ZooKeeperRequestLatencyMsMean"
+          - "GlobalPartitionCount"
+          - "GlobalTopicCount"
+      PER_BROKER:
+        description: "Per-broker metrics (additional cost)"
+        terraform_value: "PER_BROKER"
+        metrics:
+          - "BytesInPerSec"
+          - "BytesOutPerSec"
+          - "CpuUser"
+          - "CpuSystem"
+          - "FetchConsumerLocalTimeMsMean"
+          - "MemoryFree"
+          - "MessagesInPerSec"
+          - "NetworkRxPackets"
+          - "NetworkTxPackets"
+          - "ProduceLocalTimeMsMean"
+          - "RequestBytesMean"
+          - "UnderReplicatedPartitions"
+      PER_TOPIC_PER_BROKER:
+        description: "Per-topic per-broker metrics (highest cost)"
+        terraform_value: "PER_TOPIC_PER_BROKER"
+        additional_metrics:
+          - "BytesInPerSec (per topic)"
+          - "BytesOutPerSec (per topic)"
+          - "FetchMessageConversionsPerSec"
+          - "MessagesInPerSec (per topic)"
+          - "ProduceMessageConversionsPerSec"
+    terraform_attribute: "enhanced_monitoring"
+
+  broker_logs:
+    description: "Broker logs can be sent to CloudWatch Logs, S3, or Firehose"
+    terraform_block: "logging_info { broker_logs { ... } }"
+    destinations:
+      cloudwatch_logs:
+        terraform_block: "cloudwatch_logs { enabled = true, log_group = '/aws/msk/CLUSTER' }"
+        log_group_pattern: "/aws/msk/{cluster_name}"
+      s3:
+        terraform_block: "s3 { enabled = true, bucket = 'BUCKET', prefix = 'logs/msk/' }"
+      firehose:
+        terraform_block: "firehose { enabled = true, delivery_stream = 'STREAM' }"
+
+  open_monitoring:
+    description: "Export JMX and Node metrics to Prometheus"
+    terraform_block: "open_monitoring { prometheus { jmx_exporter { enabled_in_broker = true } node_exporter { enabled_in_broker = true } } }"
+    jmx_port: 11001
+    node_exporter_port: 11002
+
+# -- 12. MSK Connect ---------------------------------------------------------
+msk_connect:
+  description: >
+    Managed Kafka Connect service. Deploy and manage connectors (source and sink)
+    without managing Connect infrastructure. Supports all Kafka Connect plugins.
+  terraform_resource: "aws_mskconnect_connector"
+  key_attributes:
+    - "name"
+    - "kafkaconnect_version"
+    - "capacity (autoscaling or provisioned)"
+    - "kafka_cluster (ARN, authentication)"
+    - "plugin (custom_plugin ARN)"
+    - "service_execution_role_arn"
+  common_connectors:
+    source:
+      - "Debezium CDC (MySQL, PostgreSQL, MongoDB)"
+      - "S3 Source Connector"
+      - "JDBC Source Connector"
+    sink:
+      - "S3 Sink Connector"
+      - "Elasticsearch/OpenSearch Sink"
+      - "JDBC Sink Connector"
+      - "Redshift Sink Connector"
+  custom_plugin:
+    terraform_resource: "aws_mskconnect_custom_plugin"
+    description: "Upload connector JARs to S3, create custom plugin, reference in connector"
+  worker_configuration:
+    terraform_resource: "aws_mskconnect_worker_configuration"
+    description: "Custom worker.properties for Connect workers"
+
+# -- 13. Configuration -------------------------------------------------------
+configuration:
+  description: >
+    Custom Kafka broker configuration (server.properties). Applied via MSK
+    Configuration resource. Changes trigger rolling broker restart.
+  terraform_resource: "aws_msk_configuration"
+  key_properties:
+    auto.create.topics.enable: "false (recommended for production)"
+    default.replication.factor: "3 (for 3-AZ clusters)"
+    min.insync.replicas: "2 (for 3-AZ clusters)"
+    num.io.threads: "8"
+    num.network.threads: "5"
+    num.partitions: "1 (default)"
+    num.replica.fetchers: "2"
+    replica.lag.time.max.ms: "30000"
+    socket.receive.buffer.bytes: "102400"
+    socket.request.max.bytes: "104857600"
+    socket.send.buffer.bytes: "102400"
+    unclean.leader.election.enable: "true"
+    log.retention.hours: "168 (7 days)"
+    log.retention.bytes: "-1 (unlimited)"
+    log.segment.bytes: "1073741824 (1 GB)"
+    zookeeper.session.timeout.ms: "18000"
+  immutable_properties:
+    - "These properties CANNOT be changed after cluster creation:"
+    - "log.message.format.version"
+    - "inter.broker.protocol.version"
+  update_behavior: "Rolling restart of brokers (one at a time, no downtime for multi-AZ)"
+
+# -- 14. Storage --------------------------------------------------------------
+storage:
+  ebs:
+    description: "Each broker has an EBS volume for Kafka data and logs"
+    terraform_attribute: "broker_node_group_info { storage_info { ebs_storage_info { volume_size = N } } }"
+    min_size_gb: 1
+    max_size_gb: 16384
+    scaling: "Can only increase, never decrease. Use update_broker_storage API."
+    provisioned_throughput:
+      description: "Optional provisioned throughput for large volumes"
+      terraform_block: "provisioned_throughput { enabled = true, volume_throughput = N }"
+      min_mb_per_sec: 250
+      max_mb_per_sec: 2375
+      requirement: "Only for volumes >= 10240 GB (10 TiB)"
+
+  tiered_storage:
+    description: >
+      Tiered storage moves older log segments to cost-effective object storage
+      while keeping recent data on EBS. Available since 2023 for Kafka 2.8+.
+    terraform_attribute: "not yet in Terraform (use aws_msk_cluster lifecycle)"
+    benefits:
+      - "Virtually unlimited retention"
+      - "Lower storage costs for cold data"
+      - "Smaller EBS volumes needed"
+    limitations:
+      - "Slightly higher latency for cold reads"
+      - "Not supported for all instance types"
+
+# -- 15. IAM -----------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    cluster: "arn:aws:kafka:REGION:ACCOUNT:cluster/CLUSTER-NAME/UUID"
+    topic: "arn:aws:kafka:REGION:ACCOUNT:topic/CLUSTER-NAME/UUID/TOPIC-NAME"
+    group: "arn:aws:kafka:REGION:ACCOUNT:group/CLUSTER-NAME/UUID/GROUP-NAME"
+    transactional_id: "arn:aws:kafka:REGION:ACCOUNT:transactional-id/CLUSTER-NAME/UUID/TX-ID"
+
+  # MSK cluster itself is NOT a principal (no execution role)
+  always: []
+
+  # Complete action catalog
+  actions:
+    # Control plane (AWS API — boto3 kafka client)
+    cluster_management:
+      - "kafka:CreateCluster"
+      - "kafka:CreateClusterV2"
+      - "kafka:DeleteCluster"
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "kafka:DescribeClusterOperation"
+      - "kafka:ListClusters"
+      - "kafka:ListClustersV2"
+      - "kafka:ListClusterOperations"
+      - "kafka:UpdateBrokerCount"
+      - "kafka:UpdateBrokerStorage"
+      - "kafka:UpdateBrokerType"
+      - "kafka:UpdateClusterConfiguration"
+      - "kafka:UpdateClusterKafkaVersion"
+      - "kafka:UpdateMonitoring"
+      - "kafka:UpdateSecurity"
+      - "kafka:UpdateConnectivity"
+      - "kafka:RebootBroker"
+      - "kafka:BatchAssociateScramSecret"
+      - "kafka:BatchDisassociateScramSecret"
+    cluster_discovery:
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:GetCompatibleKafkaVersions"
+      - "kafka:ListNodes"
+    configuration:
+      - "kafka:CreateConfiguration"
+      - "kafka:DeleteConfiguration"
+      - "kafka:DescribeConfiguration"
+      - "kafka:DescribeConfigurationRevision"
+      - "kafka:ListConfigurations"
+      - "kafka:ListConfigurationRevisions"
+      - "kafka:UpdateConfiguration"
+    tagging:
+      - "kafka:TagResource"
+      - "kafka:UntagResource"
+      - "kafka:ListTagsForResource"
+    # Data plane (Kafka IAM — kafka-cluster:* actions)
+    kafka_data_plane:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeCluster"
+      - "kafka-cluster:AlterCluster"
+      - "kafka-cluster:DescribeClusterDynamicConfiguration"
+      - "kafka-cluster:AlterClusterDynamicConfiguration"
+      - "kafka-cluster:CreateTopic"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:AlterTopic"
+      - "kafka-cluster:DeleteTopic"
+      - "kafka-cluster:DescribeTopicDynamicConfiguration"
+      - "kafka-cluster:AlterTopicDynamicConfiguration"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:WriteData"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+      - "kafka-cluster:DeleteGroup"
+      - "kafka-cluster:DescribeTransactionalId"
+      - "kafka-cluster:AlterTransactionalId"
+      - "kafka-cluster:WriteDataIdempotently"
+
+  # Integration graph IAM rules (used by spec_builder)
+  # MSK is passive — clients connect to it and need their own permissions.
+  as_target_of: {}
+  as_source_to: {}
+
+  # Common permission sets for services that PRODUCE to MSK
+  common_producer_permissions:
+    - "kafka-cluster:Connect"
+    - "kafka-cluster:DescribeTopic"
+    - "kafka-cluster:WriteData"
+    - "kafka-cluster:WriteDataIdempotently"
+    - "kafka-cluster:DescribeCluster"
+
+  # Common permission sets for services that CONSUME from MSK
+  common_consumer_permissions:
+    - "kafka-cluster:Connect"
+    - "kafka-cluster:DescribeTopic"
+    - "kafka-cluster:DescribeGroup"
+    - "kafka-cluster:AlterGroup"
+    - "kafka-cluster:ReadData"
+    - "kafka-cluster:DescribeCluster"
+
+  # Common permission sets for services that ADMIN MSK
+  common_admin_permissions:
+    - "kafka-cluster:Connect"
+    - "kafka-cluster:DescribeCluster"
+    - "kafka-cluster:AlterCluster"
+    - "kafka-cluster:CreateTopic"
+    - "kafka-cluster:DescribeTopic"
+    - "kafka-cluster:AlterTopic"
+    - "kafka-cluster:DeleteTopic"
+
+  # Condition keys
+  condition_keys:
+    - "kafka:ResourceTag/${TagKey}"
+    - "aws:ResourceTag/${TagKey}"
+
+# -- 16. Environment Variables ------------------------------------------------
+env_vars:
+  as_target_of: {}    # MSK is passive
+  as_source_to: {}    # MSK is passive
+
+# -- 17. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - lambda
+  - ec2
+  - emr
+
+# -- 18. Integration Wiring Ownership ----------------------------------------
+integrations:
+  lambda_reads_msk:
+    description: "Lambda event source mapping reads from MSK topic"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping (event_source_arn = MSK cluster ARN)"
+    iam_on_lambda:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+      - "kafka-cluster:ReadData"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "ec2:CreateNetworkInterface"
+      - "ec2:DescribeNetworkInterfaces"
+      - "ec2:DescribeVpcs"
+      - "ec2:DescribeSubnets"
+      - "ec2:DescribeSecurityGroups"
+      - "ec2:DeleteNetworkInterface"
+    event_source_mapping_config:
+      batch_size: "1-10000 (default 100)"
+      starting_position: "TRIM_HORIZON or LATEST"
+      topics: "List of topic names to consume"
+
+  lambda_writes_msk:
+    description: "Lambda writes to MSK topic using kafka-python client"
+    owned_by: "lambda"
+    iam_on_lambda:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:WriteData"
+      - "ec2:CreateNetworkInterface"
+      - "ec2:DescribeNetworkInterfaces"
+      - "ec2:DescribeVpcs"
+      - "ec2:DescribeSubnets"
+      - "ec2:DescribeSecurityGroups"
+      - "ec2:DeleteNetworkInterface"
+
+  ec2_connects_msk:
+    description: "EC2 connects to MSK as producer, consumer, or admin client"
+    owned_by: "ec2"
+    iam_on_ec2:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeCluster"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:WriteData"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+    networking: "EC2 must be in same VPC or connected VPC with access to broker ports"
+
+  emr_reads_msk:
+    description: "EMR Spark/Flink reads from MSK topic"
+    owned_by: "emr"
+    iam_on_emr:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+      - "kafka-cluster:ReadData"
+    networking: "EMR must be in same VPC or connected VPC"
+
+  emr_writes_msk:
+    description: "EMR Spark/Flink writes to MSK topic"
+    owned_by: "emr"
+    iam_on_emr:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:WriteData"
+
+  firehose_reads_msk:
+    description: "Kinesis Firehose sources from MSK topic"
+    owned_by: "kinesis_firehose"
+    terraform_resources:
+      - "msk_source_configuration block in aws_kinesis_firehose_delivery_stream"
+    iam_on_firehose:
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:ReadData"
+
+  analytics_reads_msk:
+    description: "Kinesis Analytics (Flink) reads from MSK topic"
+    owned_by: "kinesis_analytics"
+    requires_vpc: true
+    iam_on_analytics:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:ReadData"
+      - "ec2:DescribeVpcs"
+      - "ec2:DescribeSubnets"
+      - "ec2:DescribeSecurityGroups"
+      - "ec2:DescribeNetworkInterfaces"
+      - "ec2:CreateNetworkInterface"
+      - "ec2:CreateNetworkInterfacePermission"
+      - "ec2:DeleteNetworkInterface"
+
+  analytics_writes_msk:
+    description: "Kinesis Analytics (Flink) writes to MSK topic"
+    owned_by: "kinesis_analytics"
+    requires_vpc: true
+    iam_on_analytics:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:WriteData"
+
+  msk_connect_source:
+    description: "MSK Connect connector reads from external source into MSK topic"
+    owned_by: "msk_connect"
+    terraform_resources:
+      - "aws_mskconnect_connector"
+      - "aws_mskconnect_custom_plugin"
+    iam_on_connect:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:CreateTopic"
+      - "kafka-cluster:WriteData"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+
+  msk_connect_sink:
+    description: "MSK Connect connector reads from MSK topic and writes to external sink"
+    owned_by: "msk_connect"
+    iam_on_connect:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+
+  dms_reads_msk:
+    description: "DMS can use MSK as a source for CDC replication"
+    owned_by: "dms"
+    iam_on_dms:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+
+  dms_writes_msk:
+    description: "DMS can use MSK as a target for CDC replication"
+    owned_by: "dms"
+    iam_on_dms:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:WriteData"
+      - "kafka-cluster:CreateTopic"
+
+  step_functions_manages_msk:
+    description: "Step Functions can invoke MSK APIs via SDK integration"
+    owned_by: "step_functions"
+    iam_on_step_functions:
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "kafka:GetBootstrapBrokers"
+
+  sagemaker_reads_msk:
+    description: "SageMaker can ingest from MSK for real-time feature engineering"
+    owned_by: "sagemaker"
+    iam_on_sagemaker:
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+
+# -- 19. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_msk_cluster"
+      description: "The MSK (provisioned) cluster"
+      always_created: true
+      key_attributes:
+        - "cluster_name"
+        - "kafka_version"
+        - "number_of_broker_nodes"
+        - "broker_node_group_info { instance_type, client_subnets, security_groups, storage_info }"
+        - "encryption_info { encryption_in_transit, encryption_at_rest_data_volume_kms_key_arn }"
+        - "logging_info { broker_logs { cloudwatch_logs, s3, firehose } }"
+        - "open_monitoring { prometheus }"
+        - "configuration_info { arn, revision }"
+        - "client_authentication { sasl { iam, scram }, tls, unauthenticated }"
+        - "enhanced_monitoring"
+        - "tags"
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for broker logs"
+      always_created: true
+    - resource: "aws_security_group"
+      description: "Security group for broker network access"
+      always_created: true
+
+  conditional:
+    - resource: "aws_msk_serverless_cluster"
+      condition: "When serverless mode is used instead of provisioned"
+    - resource: "aws_msk_configuration"
+      condition: "When custom Kafka configuration is specified"
+    - resource: "aws_msk_scram_secret_association"
+      condition: "When SASL/SCRAM authentication is used"
+    - resource: "aws_mskconnect_connector"
+      condition: "When MSK Connect connectors are deployed"
+    - resource: "aws_mskconnect_custom_plugin"
+      condition: "When custom Connect plugins are used"
+    - resource: "aws_mskconnect_worker_configuration"
+      condition: "When custom Connect worker config is needed"
+    - resource: "aws_msk_vpc_connection"
+      condition: "When cross-VPC connectivity is needed"
+
+  created_by_others:
+    - resource: "aws_lambda_event_source_mapping"
+      created_by: "lambda renderer"
+      condition: "When Lambda reads from MSK topic"
+    - resource: "aws_kinesis_firehose_delivery_stream (msk_source_configuration)"
+      created_by: "kinesis_firehose renderer"
+      condition: "When Firehose sources from MSK"
+
+# -- 20. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  client: "kafka"
+  note: >
+    The boto3 kafka client manages the MSK CLUSTER (control plane).
+    Kafka DATA operations (produce, consume, admin topics) use standard
+    Kafka libraries (kafka-python, confluent-kafka), NOT boto3.
+
+  cluster_management:
+    create_cluster_v2:
+      description: "Create a new MSK cluster (provisioned or serverless)"
+      parameters:
+        ClusterName: {type: string, required: true}
+        Provisioned: {type: object, description: "Provisioned cluster config"}
+        Serverless: {type: object, description: "Serverless cluster config"}
+        Tags: {type: object}
+      note: "Usually managed via Terraform"
+
+    delete_cluster:
+      description: "Delete an MSK cluster"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string}
+
+    describe_cluster_v2:
+      description: "Get detailed cluster information"
+      parameters:
+        ClusterArn: {type: string, required: true}
+      returns: ["ClusterInfo.ClusterArn", "ClusterInfo.ClusterName", "ClusterInfo.ClusterType", "ClusterInfo.State", "ClusterInfo.Provisioned.BrokerNodeGroupInfo", "ClusterInfo.Provisioned.CurrentBrokerSoftwareInfo"]
+
+    list_clusters_v2:
+      description: "List all MSK clusters"
+      parameters:
+        ClusterNameFilter: {type: string}
+        ClusterTypeFilter: {type: string, description: "PROVISIONED | SERVERLESS"}
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+      returns: ["ClusterInfoList[].ClusterArn", "ClusterInfoList[].ClusterName", "ClusterInfoList[].ClusterType", "ClusterInfoList[].State"]
+
+    get_bootstrap_brokers:
+      description: "Get broker connection strings for all authentication methods"
+      parameters:
+        ClusterArn: {type: string, required: true}
+      returns: ["BootstrapBrokerString", "BootstrapBrokerStringTls", "BootstrapBrokerStringSaslScram", "BootstrapBrokerStringSaslIam", "BootstrapBrokerStringPublicTls", "BootstrapBrokerStringPublicSaslScram", "BootstrapBrokerStringPublicSaslIam", "BootstrapBrokerStringVpcConnectivityTls", "BootstrapBrokerStringVpcConnectivitySaslScram", "BootstrapBrokerStringVpcConnectivitySaslIam"]
+
+    list_nodes:
+      description: "List broker nodes in a cluster"
+      parameters:
+        ClusterArn: {type: string, required: true}
+      returns: ["NodeInfoList[].BrokerNodeInfo.BrokerId", "NodeInfoList[].BrokerNodeInfo.Endpoints", "NodeInfoList[].InstanceType"]
+
+  cluster_scaling:
+    update_broker_count:
+      description: "Change the number of brokers (must be multiple of AZ count)"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string, required: true}
+        TargetNumberOfBrokerNodes: {type: integer, required: true}
+
+    update_broker_storage:
+      description: "Increase EBS volume size (cannot decrease)"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string, required: true}
+        TargetBrokerEBSVolumeInfo: {type: list, required: true, description: "[{'KafkaBrokerNodeId': 'All', 'VolumeSizeGB': N}]"}
+
+    update_broker_type:
+      description: "Change broker instance type (rolling restart)"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string, required: true}
+        TargetInstanceType: {type: string, required: true}
+
+  cluster_configuration:
+    update_cluster_configuration:
+      description: "Apply a new configuration to the cluster (rolling restart)"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string, required: true}
+        ConfigurationInfo: {type: object, required: true, description: "{'Arn': config_arn, 'Revision': N}"}
+
+    create_configuration:
+      description: "Create a reusable Kafka configuration"
+      parameters:
+        Name: {type: string, required: true}
+        ServerProperties: {type: string, required: true, description: "server.properties content (base64)"}
+        KafkaVersions: {type: list}
+        Description: {type: string}
+      returns: ["Arn", "Revision", "Name"]
+
+    describe_configuration:
+      description: "Get configuration details"
+      parameters:
+        Arn: {type: string, required: true}
+      returns: ["Arn", "Name", "Description", "LatestRevision", "KafkaVersions"]
+
+    describe_configuration_revision:
+      description: "Get a specific configuration revision"
+      parameters:
+        Arn: {type: string, required: true}
+        Revision: {type: integer, required: true}
+      returns: ["ServerProperties", "Revision", "Description"]
+
+  security:
+    update_security:
+      description: "Update cluster authentication and encryption settings"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string, required: true}
+        ClientAuthentication: {type: object}
+        EncryptionInfo: {type: object}
+
+    batch_associate_scram_secret:
+      description: "Associate Secrets Manager secrets for SASL/SCRAM"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        SecretArnList: {type: list, required: true}
+
+    batch_disassociate_scram_secret:
+      description: "Disassociate Secrets Manager secrets"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        SecretArnList: {type: list, required: true}
+
+  monitoring:
+    update_monitoring:
+      description: "Change monitoring level (DEFAULT, PER_BROKER, PER_TOPIC_PER_BROKER)"
+      parameters:
+        ClusterArn: {type: string, required: true}
+        CurrentVersion: {type: string, required: true}
+        EnhancedMonitoring: {type: string}
+        OpenMonitoring: {type: object}
+        LoggingInfo: {type: object}
+
+  tagging:
+    tag_resource:
+      description: "Add tags to an MSK cluster"
+      parameters:
+        ResourceArn: {type: string, required: true}
+        Tags: {type: object, required: true}
+
+    untag_resource:
+      description: "Remove tags"
+      parameters:
+        ResourceArn: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+
+    list_tags_for_resource:
+      description: "List tags for a cluster"
+      parameters:
+        ResourceArn: {type: string, required: true}
+      returns: ["Tags"]
+
+  kafka_data_operations:
+    note: >
+      Kafka data operations (produce, consume, create topics, manage consumer
+      groups) are performed using standard Kafka client libraries, NOT boto3.
+    libraries:
+      python:
+        - "kafka-python: KafkaProducer, KafkaConsumer, KafkaAdminClient"
+        - "confluent-kafka: Producer, Consumer, AdminClient"
+        - "aws-msk-iam-sasl-signer-python: for IAM authentication"
+      java:
+        - "org.apache.kafka:kafka-clients"
+        - "software.amazon.msk:aws-msk-iam-auth"
+    example_producer: |
+      from kafka import KafkaProducer
+      producer = KafkaProducer(
+          bootstrap_servers=bootstrap_brokers,
+          security_protocol='SASL_SSL',
+          sasl_mechanism='AWS_MSK_IAM',
+          # ... IAM auth config
+      )
+      producer.send('my-topic', b'message')
+    example_consumer: |
+      from kafka import KafkaConsumer
+      consumer = KafkaConsumer(
+          'my-topic',
+          bootstrap_servers=bootstrap_brokers,
+          group_id='my-group',
+          auto_offset_reset='earliest',
+          # ... IAM auth config
+      )
+      for msg in consumer:
+          process(msg)
+
+# -- 21. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "bootstrap.*not reachable|Connection.*refused.*9092"
+    category: NETWORK
+    cause: "MSK cluster not reachable — check VPC security group allows port 9092/9094/9096/9098"
+    fix_type: update_sg
+    resolution: "Add inbound rule to MSK security group: TCP 9092-9098 from client security group"
+
+  - pattern: "TopicAuthorizationException|ClusterAuthorizationException"
+    category: PERMISSION
+    cause: "IAM policy missing kafka-cluster:* actions for topic/cluster access"
+    fix_type: update_iam
+    resolution: "Add kafka-cluster:Connect, kafka-cluster:DescribeTopic, kafka-cluster:ReadData or WriteData to the client IAM role."
+
+  - pattern: "SaslAuthenticationException.*SASL"
+    category: AUTHENTICATION
+    cause: "SASL authentication failed — wrong credentials or mechanism"
+    fix_type: manual
+    resolution: "For IAM: verify IAM role and SigV4 signer config. For SCRAM: verify Secrets Manager secret."
+
+  - pattern: "ssl.*handshake.*failed|SSLHandshakeException"
+    category: ENCRYPTION
+    cause: "TLS handshake failed — client not configured for TLS or using wrong port"
+    fix_type: manual
+    resolution: "Use port 9094 (TLS), 9096 (SASL/SCRAM), or 9098 (IAM). Set security.protocol=SASL_SSL."
+
+  - pattern: "ClusterArn.*not found|ResourceNotFoundException.*kafka"
+    category: RESOURCE_NOT_FOUND
+    cause: "MSK cluster does not exist or was deleted"
+    fix_type: manual
+    resolution: "Verify cluster name/ARN. Check terraform apply completed."
+
+  - pattern: "BadRequestException.*broker.*count"
+    category: VALIDATION
+    cause: "Broker count must be a multiple of the number of AZs"
+    fix_type: update_config
+    resolution: "Set number_of_broker_nodes to a multiple of the number of subnets (AZs)."
+
+  - pattern: "TooManyRequestsException|Throttling.*kafka"
+    category: THROTTLE
+    cause: "AWS API rate limit exceeded for MSK control plane operations"
+    fix_type: retry
+    resolution: "Implement exponential backoff for API calls."
+
+  - pattern: "InternalServerException.*kafka"
+    category: SERVICE_ERROR
+    cause: "MSK service internal error"
+    fix_type: retry
+    resolution: "Retry after a few minutes. If persistent, check AWS Health Dashboard."
+
+  - pattern: "UnknownTopicOrPartitionException"
+    category: RESOURCE_NOT_FOUND
+    cause: "Kafka topic does not exist"
+    fix_type: manual
+    resolution: "Create the topic using KafkaAdminClient or kafka-topics.sh before producing/consuming."
+
+  - pattern: "NotEnoughReplicasException|NOT_ENOUGH_REPLICAS"
+    category: REPLICATION
+    cause: "Not enough in-sync replicas to satisfy min.insync.replicas"
+    fix_type: manual
+    resolution: "Check broker health. Reduce min.insync.replicas temporarily or wait for brokers to recover."
+
+# -- 22. Tags ----------------------------------------------------------------
+tags:
+  max_per_cluster: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 23. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: kafka
+  description: >
+    MSK has no user code — Kafka topics managed via Kafka AdminClient library
+    (kafka-python or confluent-kafka), not boto3. Cluster config updated via
+    update_cluster_configuration(). Broker storage via update_broker_storage().
+    Bootstrap brokers obtained via get_bootstrap_brokers(). For producing and
+    consuming messages, use standard Kafka client libraries with IAM or
+    SASL/SCRAM authentication.
+  config_update:
+    client: kafka
+    operation: update_cluster_configuration
+    id_param: ClusterArn
+    note: "ClusterArn from list_clusters_v2() filtering by cluster name. Also needs CurrentVersion."
+  discovery_ops:
+    - op: list_clusters_v2
+      returns: ["ClusterInfoList[].ClusterArn", "ClusterInfoList[].ClusterName", "ClusterInfoList[].ClusterType", "ClusterInfoList[].State"]
+    - op: describe_cluster_v2
+      id_param: ClusterArn
+      returns: ["ClusterInfo.ClusterArn", "ClusterInfo.State", "ClusterInfo.Provisioned.BrokerNodeGroupInfo.InstanceType", "ClusterInfo.Provisioned.NumberOfBrokerNodes"]
+    - op: get_bootstrap_brokers
+      id_param: ClusterArn
+      returns: ["BootstrapBrokerString", "BootstrapBrokerStringTls", "BootstrapBrokerStringSaslScram", "BootstrapBrokerStringSaslIam"]
+    - op: list_nodes
+      id_param: ClusterArn
+      returns: ["NodeInfoList[].BrokerNodeInfo.BrokerId", "NodeInfoList[].BrokerNodeInfo.Endpoints"]

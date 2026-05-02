@@ -1,0 +1,18 @@
+templates:
+  spark_only:
+    display_name: "Spark Only"
+    description: "EMR cluster with Spark application only"
+    config:
+      applications:
+        - "Spark"
+
+  full_analytics:
+    display_name: "Full Analytics Stack"
+    description: "Spark, Hive, Presto, and Zeppelin for interactive analytics"
+    config:
+      applications:
+        - "Spark"
+        - "Hive"
+        - "Presto"
+        - "Zeppelin"
+      core_instance_count: 3

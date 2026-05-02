@@ -1,0 +1,42 @@
+service_type: glue_data_catalog
+is_principal: false
+terraform_resource: aws_glue_catalog_database
+description: "AWS Glue Data Catalog database — central metadata repository for schemas, tables, and partitions"
+
+defaults:
+  description: "Glue Data Catalog database"
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+code_update:
+  method: api_config
+  boto3_client: glue
+  description: >
+    Glue Data Catalog database/table definitions updated via update_database()/update_table().
+    Table schema (columns, partitions) via update_table(). No code — metadata only.
+  config_update:
+    client: glue
+    operation: update_database
+    id_param: Name
+  discovery_ops:
+    - op: get_database
+      id_param: Name
+      returns: ["Database.Name", "Database.Description", "Database.LocationUri"]
+    - op: get_tables
+      id_param: DatabaseName
+      returns: ["TableList[].Name", "TableList[].StorageDescriptor.Location", "TableList[].PartitionKeys"]
+runtime_diagnostics:
+  - pattern: "EntityNotFoundException.*glue|database.*not.*exist"
+    category: RESOURCE_NOT_FOUND
+    cause: "Glue database or table does not exist — crawler has not run yet"
+    fix_type: trigger_crawler
+    resolution: "glue.start_crawler(Name=associated_crawler_name) to populate the catalog"

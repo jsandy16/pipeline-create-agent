@@ -1,0 +1,52 @@
+service: redshift
+boto3_client: redshift-data
+description: "Amazon Redshift — data warehouse with SQL interface"
+
+operations:
+  execute_statement:
+    description: "Execute a SQL statement against a Redshift cluster"
+    parameters:
+      ClusterIdentifier: {type: string, required: true}
+      Database: {type: string, required: true}
+      Sql: {type: string, required: true}
+      DbUser: {type: string}
+      SecretArn: {type: string}
+
+  batch_execute_statement:
+    description: "Execute multiple SQL statements"
+    parameters:
+      ClusterIdentifier: {type: string, required: true}
+      Database: {type: string, required: true}
+      Sqls: {type: list, required: true}
+      DbUser: {type: string}
+
+  describe_statement:
+    description: "Get the status of a SQL statement execution"
+    parameters:
+      Id: {type: string, required: true}
+
+  get_statement_result:
+    description: "Get the results of a completed SQL query"
+    parameters:
+      Id: {type: string, required: true}
+
+  list_tables:
+    description: "List tables in a database"
+    parameters:
+      ClusterIdentifier: {type: string, required: true}
+      Database: {type: string, required: true}
+      SchemaPattern: {type: string}
+
+  list_schemas:
+    description: "List schemas in a database"
+    parameters:
+      ClusterIdentifier: {type: string, required: true}
+      Database: {type: string, required: true}
+
+  describe_table:
+    description: "Get column details for a table"
+    parameters:
+      ClusterIdentifier: {type: string, required: true}
+      Database: {type: string, required: true}
+      Table: {type: string, required: true}
+      Schema: {type: string}

@@ -1,0 +1,183 @@
+service_type: stepfunctions
+is_principal: true
+terraform_resource: aws_sfn_state_machine
+description: "State machine workflow orchestrating Lambda, Glue, and DynamoDB tasks"
+
+defaults:
+  type: "STANDARD"
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "logs:CreateLogDelivery"
+    - "logs:GetLogDelivery"
+    - "logs:UpdateLogDelivery"
+    - "logs:DeleteLogDelivery"
+    - "logs:ListLogDeliveries"
+    - "logs:PutResourcePolicy"
+    - "logs:DescribeResourcePolicies"
+    - "logs:DescribeLogGroups"
+  as_target_of:
+    lambda:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    s3:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    eventbridge:
+      - "states:StartExecution"
+    cloudwatch:
+      - "states:StartExecution"
+  as_source_to:
+    lambda:
+      - "lambda:InvokeFunction"
+    glue:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:GetJobRuns"
+      - "glue:BatchStopJobRun"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:DeleteItem"
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    sqs:
+      - "sqs:SendMessage"
+    sns:
+      - "sns:Publish"
+    emr_serverless:
+      - "emr-serverless:StartJobRun"
+      - "emr-serverless:GetJobRun"
+      - "emr-serverless:CancelJobRun"
+      - "iam:PassRole"
+    emr:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:CancelSteps"
+      - "iam:PassRole"
+    sagemaker:
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:StopTrainingJob"
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+      - "iam:PassRole"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    eventbridge:
+      - "events:PutEvents"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+    redshift:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+
+env_vars:
+  as_source_to:
+    lambda:
+      pattern: "{PEER_UPPER}_FUNCTION_ARN"
+      ref: "aws_lambda_function.{peer_label}.arn"
+    sqs:
+      pattern: "{PEER_UPPER}_QUEUE_URL"
+      ref: "aws_sqs_queue.{peer_label}.url"
+    sns:
+      pattern: "{PEER_UPPER}_TOPIC_ARN"
+      ref: "aws_sns_topic.{peer_label}.arn"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    emr_serverless:
+      - pattern: "{PEER_UPPER}_APPLICATION_ID"
+        ref: "aws_emrserverless_application.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_EXECUTION_ROLE_ARN"
+        ref: "aws_iam_role.{peer_label}_role.arn"
+    emr:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_emr_cluster.{peer_label}.id"
+    glue:
+      - pattern: "{PEER_UPPER}_CRAWLER_NAME"
+        ref: "aws_glue_crawler.{peer_label}.name"
+    athena:
+      - pattern: "{PEER_UPPER}_WORKGROUP"
+        ref: "aws_athena_workgroup.{peer_label}.name"
+    sagemaker:
+      - pattern: "{PEER_UPPER}_ENDPOINT_NAME"
+        ref: "aws_sagemaker_endpoint.{peer_label}.name"
+    redshift:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_redshift_cluster.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_DATABASE"
+        ref: "aws_redshift_cluster.{peer_label}.database_name"
+
+vpc_triggers:
+  - aurora
+  - redshift
+
+# Step Functions generates a state machine definition JSON from its outgoing
+# integrations. Each target service becomes a task state with the appropriate
+# AWS SDK integration pattern.
+#
+# Task patterns per target type:
+#   lambda    → arn:aws:states:::lambda:invoke
+#   glue      → arn:aws:states:::glue:startJobRun.sync
+#   dynamodb  → arn:aws:states:::dynamodb:putItem / getItem
+#   sqs       → arn:aws:states:::sqs:sendMessage
+#   sns       → arn:aws:states:::sns:publish
+
+code_update:
+  method: sfn_definition
+  boto3_client: stepfunctions
+  description: >
+    State machine definition is JSON stored in AWS. Get via describe_state_machine(),
+    modify the definition dict (Python json.loads/dumps), update via update_state_machine().
+    Cannot change type (STANDARD/EXPRESS) after creation.
+  config_update:
+    client: stepfunctions
+    operation: update_state_machine
+    id_param: stateMachineArn
+    note: "stateMachineArn from list_state_machines() filtering by name matching resource_name"
+    updatable: [definition, roleArn, loggingConfiguration, tracingConfiguration]
+  code_update_steps:
+    - "sfn = boto3.client('stepfunctions', region_name=region)"
+    - "machines = sfn.list_state_machines()['stateMachines']"
+    - "arn = next(m['stateMachineArn'] for m in machines if resource_name in m['name'])"
+    - "desc = sfn.describe_state_machine(stateMachineArn=arn)"
+    - "defn = json.loads(desc['definition'])  # modify this dict"
+    - "sfn.update_state_machine(stateMachineArn=arn, definition=json.dumps(defn), roleArn=desc['roleArn'])"
+  discovery_ops:
+    - op: list_state_machines
+      returns: ["stateMachines[].stateMachineArn", "stateMachines[].name", "stateMachines[].type"]
+    - op: describe_state_machine
+      id_param: stateMachineArn
+      returns: ["definition", "roleArn", "status", "loggingConfiguration"]
+    - op: list_executions
+      id_param: stateMachineArn
+      returns: ["executions[].executionArn", "executions[].status", "executions[].startDate"]
+
+runtime_diagnostics:
+  - pattern: "States.TaskFailed|Task.*failed"
+    category: CONFIG
+    cause: "A task state failed — check the downstream service logs for the actual error"
+    fix_type: check_downstream
+    resolution: "Look at the logs of the task's target service (Lambda, Glue, EMR) for the root cause"
+  - pattern: "AccessDenied|not authorized|iam:PassRole"
+    category: PERMISSION
+    cause: "Step Functions IAM role is missing a permission — often iam:PassRole for EMR/SageMaker"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={statement})"

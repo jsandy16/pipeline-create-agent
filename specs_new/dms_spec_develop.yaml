@@ -1,0 +1,1170 @@
+# ============================================================================
+# DMS Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL DMS knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/dms.yaml with exhaustive
+# coverage of DMS capabilities, constraints, IAM, integrations, and Terraform
+# resource patterns.
+#
+# Structure:
+#   1. identity              - service metadata & Terraform mapping
+#   2. naming                - resource name constraints
+#   3. defaults              - Terraform attribute defaults (minimum-cost)
+#   4. quotas                - AWS service limits
+#   5. replication_instances - instance classes, multi-AZ, storage
+#   6. endpoints             - source/target engine types, connection config
+#   7. tasks                 - migration types, table mappings, task settings
+#   8. migration_types       - full-load, CDC, full-load-and-cdc
+#   9. validation            - data validation, premigration assessment
+#  10. cdc                   - change data capture mechanics
+#  11. s3_as_target          - S3 target endpoint specifics
+#  12. s3_as_source          - S3 source endpoint specifics
+#  13. encryption            - SSL, KMS, at-rest
+#  14. networking            - VPC, subnet groups, security groups
+#  15. monitoring            - CloudWatch, task logging
+#  16. iam                   - complete action catalog, ARN formats
+#  17. env_vars              - from existing spec
+#  18. vpc_triggers          - from existing spec
+#  19. integrations          - wiring ownership with all connected services
+#  20. terraform_resources   - all TF resource types
+#  21. boto3_operations      - complete API reference
+#  22. runtime_diagnostics   - error patterns
+#  23. tags                  - constraints
+#  24. code_update           - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: dms
+  aws_service_name: "AWS Database Migration Service"
+  is_principal: true            # DMS has an IAM service role
+  terraform_resource: aws_dms_replication_instance
+  description: >
+    AWS Database Migration Service migrates data between source and target databases
+    with minimal downtime. Supports homogeneous migrations (e.g. Oracle to Oracle)
+    and heterogeneous migrations (e.g. Oracle to Aurora PostgreSQL). DMS uses a
+    replication instance to connect to source and target endpoints, supporting
+    full-load migration, change data capture (CDC), or both.
+  free_tier:
+    status: free_trial
+    details: "DMS Free DMS usage for 6 months: 750 hours/month of dms.t2.micro single-AZ instance, 50 GB of included storage"
+    eligible_instance_class: "dms.t2.micro"
+    trial_duration_months: 6
+    included_storage_gb: 50
+  pricing_model: per_hour       # instance hours + storage + data transfer
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  replication_instance_id:
+    max_length: 63
+    valid_characters: "a-z0-9-"
+    rules:
+      - "Must begin with a letter"
+      - "Cannot end with a hyphen or contain two consecutive hyphens"
+      - "Lowercase letters, digits, and hyphens only"
+  endpoint_identifier:
+    max_length: 255
+    valid_characters: "a-z0-9-"
+    rules:
+      - "Must begin with a letter"
+      - "Cannot end with a hyphen or contain two consecutive hyphens"
+  replication_task_identifier:
+    max_length: 255
+    valid_characters: "a-z0-9-"
+    rules:
+      - "Must begin with a letter"
+      - "Cannot end with a hyphen or contain two consecutive hyphens"
+  subnet_group_id:
+    max_length: 255
+    valid_characters: "a-z0-9-"
+  resource_label_rules:
+    - "resource_label uses engine/naming.py resource_label() for safe Terraform identifiers"
+    - "resource_name uses engine/naming.py resource_name() with 63 char limit"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  replication_instance_class: "dms.t2.micro"  # free trial eligible (~$0.018/hr after trial)
+  allocated_storage: 20                        # minimum GB
+  engine_name: "aurora-postgresql"
+  multi_az: false
+  publicly_accessible: false
+  auto_minor_version_upgrade: true
+  allow_major_version_upgrade: false
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_replication_instances_per_account: 60    # adjustable
+  max_total_storage_gb: 30000                  # adjustable, across all instances
+  max_endpoints_per_account: 1000              # adjustable
+  max_replication_tasks_per_instance: 200      # adjustable
+  max_replication_tasks_per_account: 600       # adjustable
+  max_subnet_groups: 100
+  max_subnets_per_subnet_group: 60
+  max_event_subscriptions: 100
+  max_certificates: 100
+  max_lob_size_limited_mode: "64 KB"           # default limited LOB mode
+  max_lob_size_full_mode: "unlimited"          # but much slower
+  max_table_mappings_per_task: "unlimited (practical limit: JSON size)"
+
+# -- 5. Replication Instances ------------------------------------------------
+replication_instances:
+  description: "Managed EC2 instances that perform the actual data replication"
+  instance_classes:
+    general_purpose:
+      - class: "dms.t2.micro"
+        vcpu: 1
+        memory_gb: 1
+        note: "Free trial eligible. Development/testing only."
+      - class: "dms.t2.small"
+        vcpu: 1
+        memory_gb: 2
+      - class: "dms.t2.medium"
+        vcpu: 2
+        memory_gb: 4
+      - class: "dms.t2.large"
+        vcpu: 2
+        memory_gb: 8
+      - class: "dms.t3.micro"
+        vcpu: 2
+        memory_gb: 1
+      - class: "dms.t3.small"
+        vcpu: 2
+        memory_gb: 2
+      - class: "dms.t3.medium"
+        vcpu: 2
+        memory_gb: 4
+      - class: "dms.t3.large"
+        vcpu: 2
+        memory_gb: 8
+    compute_optimized:
+      - class: "dms.c5.large"
+        vcpu: 2
+        memory_gb: 4
+      - class: "dms.c5.xlarge"
+        vcpu: 4
+        memory_gb: 8
+      - class: "dms.c5.2xlarge"
+        vcpu: 8
+        memory_gb: 16
+      - class: "dms.c5.4xlarge"
+        vcpu: 16
+        memory_gb: 32
+    memory_optimized:
+      - class: "dms.r5.large"
+        vcpu: 2
+        memory_gb: 16
+      - class: "dms.r5.xlarge"
+        vcpu: 4
+        memory_gb: 32
+      - class: "dms.r5.2xlarge"
+        vcpu: 8
+        memory_gb: 64
+      - class: "dms.r5.4xlarge"
+        vcpu: 16
+        memory_gb: 128
+
+  storage:
+    type: "GP2 (SSD)"
+    min_gb: 5
+    max_gb: 6144
+    default_gb: 50
+    note: "Storage is used for log files and cached changes during replication"
+
+  multi_az:
+    description: "Standby replica in a different AZ for automatic failover"
+    terraform_attribute: "multi_az = true"
+    failover_time: "typically under a minute"
+    cost: "approximately 2x single-AZ"
+    recommended_for: "production CDC tasks"
+
+  engine_versions:
+    description: "DMS replication engine version"
+    terraform_attribute: "engine_version"
+    note: "Check aws_dms_replication_instance docs for latest supported versions"
+
+# -- 6. Endpoints ------------------------------------------------------------
+endpoints:
+  description: "Connection configuration for source and target databases"
+  terraform_resource: "aws_dms_endpoint"
+
+  endpoint_types:
+    source: "Database or service to read data FROM"
+    target: "Database or service to write data TO"
+
+  supported_engines:
+    relational_sources:
+      - engine: "oracle"
+        description: "Oracle Database (10g+)"
+        port_default: 1521
+        ssl_supported: true
+        cdc_method: "LogMiner or Binary Reader"
+      - engine: "mysql"
+        description: "MySQL (5.5+), MariaDB (10.0.24+)"
+        port_default: 3306
+        ssl_supported: true
+        cdc_method: "Binary log (binlog)"
+      - engine: "postgres"
+        description: "PostgreSQL (9.4+)"
+        port_default: 5432
+        ssl_supported: true
+        cdc_method: "Logical replication (pglogical/test_decoding)"
+      - engine: "sqlserver"
+        description: "Microsoft SQL Server (2008+)"
+        port_default: 1433
+        ssl_supported: true
+        cdc_method: "MS-CDC or MS-Replication"
+      - engine: "aurora"
+        description: "Amazon Aurora MySQL-Compatible"
+        port_default: 3306
+        ssl_supported: true
+        cdc_method: "Binary log"
+      - engine: "aurora-postgresql"
+        description: "Amazon Aurora PostgreSQL-Compatible"
+        port_default: 5432
+        ssl_supported: true
+        cdc_method: "Logical replication"
+      - engine: "mariadb"
+        description: "MariaDB (10.0.24+)"
+        port_default: 3306
+        cdc_method: "Binary log"
+      - engine: "db2"
+        description: "IBM Db2 LUW (9.7+)"
+        port_default: 50000
+        cdc_method: "ASN Capture"
+      - engine: "sybase"
+        description: "SAP ASE (15.7+)"
+        port_default: 5000
+        cdc_method: "Replication Server"
+
+    nosql_sources:
+      - engine: "mongodb"
+        description: "MongoDB (3.x+) as source"
+        port_default: 27017
+        cdc_method: "Change streams (4.0+) or oplog"
+      - engine: "docdb"
+        description: "Amazon DocumentDB as source"
+        port_default: 27017
+        cdc_method: "Change streams"
+      - engine: "neptune"
+        description: "Amazon Neptune as target only"
+
+    data_stores:
+      - engine: "s3"
+        description: "Amazon S3 as source or target"
+        note: "Source: reads CSV/Parquet files. Target: writes CSV/Parquet/JSON files."
+      - engine: "redshift"
+        description: "Amazon Redshift as target"
+        port_default: 5439
+      - engine: "kinesis"
+        description: "Amazon Kinesis Data Streams as target"
+      - engine: "kafka"
+        description: "Apache Kafka (including MSK) as target"
+      - engine: "elasticsearch"
+        description: "Amazon OpenSearch Service as target"
+      - engine: "dynamodb"
+        description: "Amazon DynamoDB as target"
+
+  connection_attributes:
+    common:
+      endpoint_identifier: "Unique name for the endpoint"
+      endpoint_type: "source or target"
+      engine_name: "Engine type (mysql, postgres, oracle, s3, etc.)"
+      server_name: "Hostname or IP of the database"
+      port: "Database port number"
+      database_name: "Name of the database to connect to"
+      username: "Database user with replication privileges"
+      password: "Database password (stored in Secrets Manager recommended)"
+      ssl_mode: "none, require, verify-ca, verify-full"
+      kms_key_arn: "KMS key for endpoint encryption"
+    s3_specific:
+      bucket_name: "S3 bucket name"
+      bucket_folder: "Optional prefix/folder in bucket"
+      service_access_role_arn: "IAM role for S3 access"
+      data_format: "csv or parquet"
+      compression_type: "none, gzip, or zip"
+      csv_delimiter: "Column delimiter (default: comma)"
+      csv_row_delimiter: "Row delimiter (default: newline)"
+    redshift_specific:
+      bucket_name: "Intermediate S3 bucket for COPY command"
+      bucket_folder: "S3 prefix for intermediate files"
+      service_access_role_arn: "IAM role for Redshift COPY"
+
+  secrets_manager_integration:
+    description: "Store endpoint credentials in Secrets Manager instead of plaintext"
+    terraform_attribute: "secrets_manager_arn"
+    benefits:
+      - "Automatic credential rotation"
+      - "No plaintext passwords in Terraform state"
+      - "Audit trail via CloudTrail"
+
+# -- 7. Tasks -----------------------------------------------------------------
+tasks:
+  description: "Replication tasks define what data to migrate and how"
+  terraform_resource: "aws_dms_replication_task"
+
+  key_attributes:
+    replication_task_identifier: "Unique task name"
+    source_endpoint_arn: "Source endpoint ARN"
+    target_endpoint_arn: "Target endpoint ARN"
+    replication_instance_arn: "Replication instance to use"
+    migration_type: "full-load, cdc, or full-load-and-cdc"
+    table_mappings: "JSON rules for table selection and transformation"
+    replication_task_settings: "JSON settings for logging, error handling, etc."
+
+  table_mappings:
+    description: "JSON document defining which tables to migrate and how to transform them"
+    rule_types:
+      selection:
+        description: "Include or exclude schemas/tables"
+        actions: ["include", "exclude", "explicit"]
+        example: |
+          {
+            "rules": [{
+              "rule-type": "selection",
+              "rule-id": "1",
+              "rule-name": "include-all",
+              "object-locator": {
+                "schema-name": "%",
+                "table-name": "%"
+              },
+              "rule-action": "include"
+            }]
+          }
+      transformation:
+        description: "Rename or modify schemas/tables/columns"
+        actions: ["rename", "remove-column", "convert-lowercase", "convert-uppercase", "add-prefix", "remove-prefix", "add-suffix", "remove-suffix"]
+        targets: ["schema", "table", "column"]
+      table_settings:
+        description: "Control per-table parallel load settings"
+        settings: ["parallel-load", "lob-settings"]
+    wildcards:
+      percent: "Matches zero or more characters"
+      underscore: "Matches a single character"
+      backslash: "Escape character"
+
+  task_settings:
+    description: "JSON document controlling task behavior"
+    key_sections:
+      TargetMetadata:
+        TargetSchema: "Target schema override"
+        SupportLobs: true
+        LobChunkSize: 64
+        LobMaxSize: 32768
+        BatchApplyEnabled: false
+      FullLoadSettings:
+        TargetTablePrepMode: "DROP_AND_CREATE, TRUNCATE_BEFORE_LOAD, DO_NOTHING"
+        CreatePkAfterFullLoad: false
+        StopTaskCachedChangesApplied: false
+        StopTaskCachedChangesNotApplied: false
+        MaxFullLoadSubTasks: 8
+        TransactionConsistencyTimeout: 600
+        CommitRate: 10000
+      Logging:
+        EnableLogging: true
+        CloudWatchLogGroup: "dms-tasks-<instance-id>"
+        CloudWatchLogStream: "dms-task-<task-id>"
+        LogComponents:
+          - "SOURCE_UNLOAD"
+          - "SOURCE_CAPTURE"
+          - "TARGET_LOAD"
+          - "TARGET_APPLY"
+          - "TASK_MANAGER"
+        Severity: "LOGGER_SEVERITY_DEFAULT"   # DEFAULT, DEBUG, DETAILED_DEBUG
+      ErrorBehavior:
+        DataErrorPolicy: "LOG_ERROR"         # LOG_ERROR, SUSPEND_TABLE, STOP_TASK, IGNORE
+        DataTruncationErrorPolicy: "LOG_ERROR"
+        DataErrorEscalationPolicy: "SUSPEND_TABLE"
+        DataErrorEscalationCount: 0
+        TableErrorPolicy: "SUSPEND_TABLE"
+        TableErrorEscalationPolicy: "STOP_TASK"
+        TableErrorEscalationCount: 0
+        RecoverableErrorCount: -1
+        RecoverableErrorInterval: 5
+        RecoverableErrorThrottling: true
+        RecoverableErrorThrottlingMax: 1800
+        RecoverableErrorStopRetryAfterThrottlingMax: true
+      StreamBuffer:
+        StreamBufferCount: 3
+        StreamBufferSizeInMB: 8
+      ChangeProcessingTuning:
+        BatchApplyPreserveTransaction: true
+        BatchApplyTimeoutMin: 1
+        BatchApplyTimeoutMax: 30
+        BatchApplyMemoryLimit: 500
+        BatchSplitSize: 0
+        MinTransactionSize: 1000
+        CommitTimeout: 1
+        MemoryLimitTotal: 1024
+        MemoryKeepTime: 60
+        StatementCacheSize: 50
+
+# -- 8. Migration Types -------------------------------------------------------
+migration_types:
+  full_load:
+    terraform_value: "full-load"
+    description: "One-time migration of all existing data"
+    behavior:
+      - "Reads all rows from source tables"
+      - "Writes to target (DROP_AND_CREATE or TRUNCATE_BEFORE_LOAD by default)"
+      - "Task completes when all data is migrated"
+      - "Source can remain active during migration"
+    best_for: "One-time migrations, initial data load"
+    considerations:
+      - "No ongoing replication after completion"
+      - "Source downtime not required but writes during migration may be missed"
+      - "Can use parallel load for large tables"
+
+  cdc:
+    terraform_value: "cdc"
+    description: "Ongoing replication of changes only (no initial data load)"
+    behavior:
+      - "Captures INSERT, UPDATE, DELETE from source"
+      - "Applies changes to target in near real-time"
+      - "Runs continuously until stopped"
+      - "Requires source to support change capture (binlog, WAL, etc.)"
+    best_for: "Data replication after initial load is already done"
+    source_requirements:
+      mysql: "Binary logging enabled (binlog_format=ROW)"
+      postgres: "wal_level=logical, max_replication_slots >= 1"
+      oracle: "Supplemental logging enabled, ARCHIVELOG mode"
+      sqlserver: "MS-CDC enabled on database and tables"
+
+  full_load_and_cdc:
+    terraform_value: "full-load-and-cdc"
+    description: "Full initial load followed by ongoing CDC"
+    behavior:
+      - "Phase 1: Full load of existing data"
+      - "Phase 2: Cached changes applied (changes during full load)"
+      - "Phase 3: Ongoing CDC replication"
+    best_for: "Complete migration with minimal downtime"
+    recommended: true
+    note: "Most common migration type for production migrations"
+
+# -- 9. Validation ------------------------------------------------------------
+validation:
+  data_validation:
+    description: "Row-by-row comparison between source and target after migration"
+    terraform_attribute: "replication_task_settings (EnableValidation)"
+    methods:
+      row_count: "Compare row counts per table"
+      value_comparison: "Compare actual column values"
+    output: "Validation results in awsdms_validation_failures_v1 table on target"
+    performance_impact: "Adds overhead — runs in parallel with migration"
+
+  premigration_assessment:
+    description: "Checks before starting migration to identify potential issues"
+    terraform_resource: "aws_dms_replication_task (premigration_assessment_run)"
+    checks:
+      - "Source database connectivity"
+      - "Target database connectivity"
+      - "Table structure compatibility"
+      - "Data type mapping compatibility"
+      - "LOB column handling"
+      - "Unsupported data types"
+      - "Source CDC prerequisites"
+    api_operation: "start_replication_task_assessment_run"
+
+# -- 10. CDC (Change Data Capture) -------------------------------------------
+cdc:
+  description: "Continuous capture and replay of database changes"
+  latency: "Typically seconds to minutes"
+  requirements_by_engine:
+    mysql:
+      - "binlog_format = ROW"
+      - "binlog_row_image = FULL"
+      - "expire_logs_days >= 1 (retain binlogs)"
+      - "DMS user needs REPLICATION CLIENT + REPLICATION SLAVE"
+    postgres:
+      - "wal_level = logical"
+      - "max_replication_slots >= 1 (for DMS)"
+      - "max_wal_senders >= 1"
+      - "DMS user needs rds_replication role (RDS) or REPLICATION privilege"
+    oracle:
+      - "ARCHIVELOG mode enabled"
+      - "Supplemental logging enabled at database level"
+      - "Table-level supplemental logging for replicated tables"
+      - "LogMiner (default) or Binary Reader"
+    sqlserver:
+      - "MS-CDC enabled: EXEC sys.sp_cdc_enable_db"
+      - "CDC enabled on each table: EXEC sys.sp_cdc_enable_table"
+      - "SQL Server Agent running"
+  cdc_start_position:
+    description: "Where to begin CDC capture"
+    options:
+      native_start_point: "Database-native position (e.g. binlog file:position)"
+      checkpoint: "DMS checkpoint from a previous task"
+      server_time: "Start from a specific timestamp"
+    terraform_attribute: "cdc_start_time or cdc_start_position"
+
+# -- 11. S3 as Target ---------------------------------------------------------
+s3_as_target:
+  description: "DMS can write migrated data to S3 in CSV or Parquet format"
+  endpoint_engine: "s3"
+  data_formats:
+    csv:
+      description: "Comma-separated values"
+      default_delimiter: ","
+      default_row_delimiter: "\\n"
+      terraform_attribute: "s3_settings { data_format = 'csv' }"
+    parquet:
+      description: "Apache Parquet columnar format"
+      terraform_attribute: "s3_settings { data_format = 'parquet' }"
+      parquet_settings:
+        parquet_version: "parquet-1-0 or parquet-2-0"
+        parquet_timestamp_in_millisecond: true
+        enable_statistics: true
+  compression:
+    options: ["none", "gzip"]
+    terraform_attribute: "s3_settings { compression_type = 'gzip' }"
+  output_structure:
+    full_load: "s3://bucket/folder/schema/table/LOAD00000001.csv"
+    cdc: "s3://bucket/folder/schema/table/YYYYMMDD-HHmmss-nnn.csv"
+  cdc_behavior:
+    - "New file created for each batch of changes"
+    - "File contains I (insert), U (update), D (delete) operations"
+    - "Column values before and after change included for updates"
+  iam_permissions:
+    - "s3:PutObject"
+    - "s3:DeleteObject"
+    - "s3:GetBucketLocation"
+    - "s3:ListBucket"
+    - "s3:GetObject"
+
+# -- 12. S3 as Source ----------------------------------------------------------
+s3_as_source:
+  description: "DMS can read data from S3 CSV/Parquet files as migration source"
+  endpoint_engine: "s3"
+  requirements:
+    - "External table definition (JSON) specifying columns and types"
+    - "Data files in consistent format (CSV or Parquet)"
+    - "Files organized by table name in bucket"
+  external_table_definition: |
+    {
+      "TableCount": 1,
+      "Tables": [{
+        "TableName": "my_table",
+        "TablePath": "schema/table/",
+        "TableOwner": "schema",
+        "TableColumns": [
+          {"ColumnName": "id", "ColumnType": "INT8"},
+          {"ColumnName": "name", "ColumnType": "STRING", "ColumnLength": 255}
+        ]
+      }]
+    }
+  cdc_from_s3:
+    description: "S3 source supports CDC by reading timestamped change files"
+    file_naming: "CDC files must include operation column (I/U/D)"
+  iam_permissions:
+    - "s3:GetObject"
+    - "s3:ListBucket"
+    - "s3:GetBucketLocation"
+
+# -- 13. Encryption -----------------------------------------------------------
+encryption:
+  at_rest:
+    description: "Replication instance storage encrypted with KMS"
+    default: true              # encrypted by default
+    terraform_attribute: "kms_key_arn"
+    key_types:
+      aws_managed: "aws/dms (default)"
+      customer_managed: "Custom KMS key ARN"
+  in_transit:
+    description: "SSL/TLS encryption between DMS and endpoints"
+    terraform_attribute: "ssl_mode"
+    modes:
+      none: "No encryption (not recommended)"
+      require: "Encrypted connection, no certificate verification"
+      verify_ca: "Encrypted + verify CA certificate"
+      verify_full: "Encrypted + verify CA + hostname"
+    certificate:
+      terraform_resource: "aws_dms_certificate"
+      description: "Upload CA certificate for SSL connections"
+  endpoint_encryption:
+    description: "Passwords stored encrypted in DMS"
+    recommendation: "Use Secrets Manager integration for credential management"
+
+# -- 14. Networking -----------------------------------------------------------
+networking:
+  subnet_group:
+    terraform_resource: "aws_dms_replication_subnet_group"
+    description: "Defines which VPC subnets the replication instance can use"
+    requirements:
+      - "At least 2 subnets in different AZs"
+      - "Subnets must be in the same VPC"
+    note: "Pipeline engine creates subnet group using default VPC subnets"
+  security_considerations:
+    - "Replication instance needs network access to both source and target"
+    - "For on-premises sources: VPN or Direct Connect required"
+    - "publicly_accessible=false recommended (use VPN/DX for external access)"
+    - "Security group must allow outbound to source and target ports"
+  vpc_placement:
+    - "DMS always runs in a VPC"
+    - "Pipeline engine uses default VPC subnets"
+    - "vpc_triggers: aurora, redshift (for same-VPC connectivity)"
+
+# -- 15. Monitoring -----------------------------------------------------------
+monitoring:
+  cloudwatch_metrics:
+    namespace: "AWS/DMS"
+    key_metrics:
+      replication_instance:
+        - "CPUUtilization"
+        - "FreeableMemory"
+        - "FreeStorageSpace"
+        - "WriteIOPS"
+        - "ReadIOPS"
+        - "WriteThroughput"
+        - "ReadThroughput"
+        - "NetworkTransmitThroughput"
+        - "NetworkReceiveThroughput"
+        - "SwapUsage"
+      replication_task:
+        - "FullLoadThroughputBandwidthTarget"
+        - "FullLoadThroughputRowsTarget"
+        - "CDCChangesMemorySource"
+        - "CDCChangesMemoryTarget"
+        - "CDCChangesDiskSource"
+        - "CDCChangesDiskTarget"
+        - "CDCThroughputBandwidthTarget"
+        - "CDCThroughputRowsSource"
+        - "CDCThroughputRowsTarget"
+        - "CDCLatencySource"
+        - "CDCLatencyTarget"
+        - "CDCIncomingChanges"
+  task_logging:
+    description: "Detailed task logs in CloudWatch Logs"
+    log_group_pattern: "dms-tasks-{replication_instance_id}"
+    log_components:
+      - "SOURCE_UNLOAD — full load read progress"
+      - "SOURCE_CAPTURE — CDC change capture"
+      - "TARGET_LOAD — full load write progress"
+      - "TARGET_APPLY — CDC change apply"
+      - "TASK_MANAGER — overall task management"
+    severity_levels:
+      - "LOGGER_SEVERITY_DEFAULT"
+      - "LOGGER_SEVERITY_DEBUG"
+      - "LOGGER_SEVERITY_DETAILED_DEBUG"
+  event_subscriptions:
+    terraform_resource: "aws_dms_event_subscription"
+    description: "SNS notifications for DMS events"
+    event_categories:
+      replication_instance: ["creation", "deletion", "maintenance", "failover", "configuration change", "low storage", "failure"]
+      replication_task: ["creation", "deletion", "state change", "failure"]
+  pipeline_monitoring: "cloudwatch"  # uses dms-tasks-* log group pattern
+
+# -- 16. IAM ------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    replication_instance: "arn:aws:dms:REGION:ACCOUNT:rep:INSTANCE-ID"
+    endpoint: "arn:aws:dms:REGION:ACCOUNT:endpoint:ENDPOINT-ID"
+    replication_task: "arn:aws:dms:REGION:ACCOUNT:task:TASK-ID"
+    subnet_group: "arn:aws:dms:REGION:ACCOUNT:subgrp:GROUP-ID"
+    certificate: "arn:aws:dms:REGION:ACCOUNT:cert:CERT-ID"
+
+  # Service principal for trust policy
+  service_principal: "dms.amazonaws.com"
+
+  # Actions always needed by DMS service role
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+
+  # Complete action catalog
+  actions:
+    replication_instance_management:
+      - "dms:CreateReplicationInstance"
+      - "dms:DeleteReplicationInstance"
+      - "dms:DescribeReplicationInstances"
+      - "dms:ModifyReplicationInstance"
+      - "dms:RebootReplicationInstance"
+    endpoint_management:
+      - "dms:CreateEndpoint"
+      - "dms:DeleteEndpoint"
+      - "dms:DescribeEndpoints"
+      - "dms:ModifyEndpoint"
+      - "dms:TestConnection"
+      - "dms:DescribeConnections"
+    task_management:
+      - "dms:CreateReplicationTask"
+      - "dms:DeleteReplicationTask"
+      - "dms:DescribeReplicationTasks"
+      - "dms:ModifyReplicationTask"
+      - "dms:StartReplicationTask"
+      - "dms:StopReplicationTask"
+      - "dms:ReloadTables"
+      - "dms:DescribeTableStatistics"
+    assessment:
+      - "dms:StartReplicationTaskAssessment"
+      - "dms:StartReplicationTaskAssessmentRun"
+      - "dms:DescribeReplicationTaskAssessmentRuns"
+      - "dms:DescribeReplicationTaskAssessmentResults"
+      - "dms:CancelReplicationTaskAssessmentRun"
+    subnet_groups:
+      - "dms:CreateReplicationSubnetGroup"
+      - "dms:DeleteReplicationSubnetGroup"
+      - "dms:DescribeReplicationSubnetGroups"
+      - "dms:ModifyReplicationSubnetGroup"
+    certificates:
+      - "dms:ImportCertificate"
+      - "dms:DeleteCertificate"
+      - "dms:DescribeCertificates"
+    events:
+      - "dms:CreateEventSubscription"
+      - "dms:DeleteEventSubscription"
+      - "dms:DescribeEventSubscriptions"
+      - "dms:DescribeEvents"
+    tags:
+      - "dms:AddTagsToResource"
+      - "dms:RemoveTagsFromResource"
+      - "dms:ListTagsForResource"
+
+  # DMS required service-linked roles
+  service_linked_roles:
+    - role: "AWSServiceRoleForDMS"
+      description: "Allows DMS to manage VPC resources"
+      managed_policy: "arn:aws:iam::aws:policy/aws-service-role/AWSDMSServiceRolePolicy"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    aurora:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:GetObject"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:DescribeTable"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift:ModifyCluster"
+    aurora:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+      - "rds:ModifyDBCluster"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:DescribeStream"
+
+# -- 17. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+# -- 18. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - redshift
+
+# -- 19. Integration Wiring Ownership ----------------------------------------
+integrations:
+  aurora_to_dms:
+    description: "Aurora database as DMS source endpoint"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (source, engine=aurora-postgresql or aurora)"
+    iam_permissions_on_dms:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+    connection_requirements:
+      - "DMS subnet group in same VPC as Aurora"
+      - "Aurora security group must allow inbound from DMS security group"
+      - "Database user with replication privileges"
+
+  dms_to_s3:
+    description: "DMS writes migrated data to S3 target"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (target, engine=s3)"
+    iam_permissions_on_dms:
+      - "s3:PutObject"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:GetObject"
+
+  s3_to_dms:
+    description: "S3 as DMS source (CSV/Parquet files)"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (source, engine=s3)"
+    iam_permissions_on_dms:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  dms_to_dynamodb:
+    description: "DMS migrates data to DynamoDB target"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (target, engine=dynamodb)"
+    iam_permissions_on_dms:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:DescribeTable"
+
+  dms_to_redshift:
+    description: "DMS migrates data to Redshift target"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (target, engine=redshift)"
+    iam_permissions_on_dms:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift:ModifyCluster"
+    note: "DMS uses intermediate S3 bucket for Redshift COPY command"
+
+  dms_to_aurora:
+    description: "DMS migrates data to Aurora target"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (target, engine=aurora-postgresql or aurora)"
+    iam_permissions_on_dms:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+      - "rds:ModifyDBCluster"
+
+  dms_to_kinesis_streams:
+    description: "DMS streams changes to Kinesis Data Streams"
+    owned_by: "dms"
+    terraform_resources:
+      - "aws_dms_endpoint (target, engine=kinesis)"
+    iam_permissions_on_dms:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:DescribeStream"
+
+# -- 20. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_dms_replication_instance"
+      description: "The managed EC2 instance that performs replication"
+      always_created: true
+    - resource: "aws_dms_replication_subnet_group"
+      description: "VPC subnet group for the replication instance"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "IAM role for DMS service (principal: dms.amazonaws.com)"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy with computed permissions"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for DMS task logs"
+      always_created: true
+
+  conditional:
+    - resource: "aws_dms_endpoint"
+      condition: "Source and target endpoints (created separately or by pipeline)"
+    - resource: "aws_dms_replication_task"
+      condition: "When task configuration is provided"
+    - resource: "aws_dms_certificate"
+      condition: "When SSL certificates are needed for endpoints"
+    - resource: "aws_dms_event_subscription"
+      condition: "When SNS notifications are configured"
+
+  created_by_others:
+    - resource: "aws_security_group"
+      created_by: "May be created for DMS-to-database connectivity"
+    - resource: "aws_secretsmanager_secret"
+      created_by: "For storing endpoint credentials securely"
+
+# -- 21. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "dms"
+
+  replication_instance_operations:
+    create_replication_instance:
+      description: "Create a new replication instance"
+      parameters:
+        ReplicationInstanceIdentifier: {type: string, required: true}
+        ReplicationInstanceClass: {type: string, required: true, description: "dms.t2.micro, dms.c5.large, etc."}
+        AllocatedStorage: {type: integer, description: "Storage in GB"}
+        MultiAZ: {type: boolean}
+        PubliclyAccessible: {type: boolean}
+        ReplicationSubnetGroupIdentifier: {type: string}
+        EngineVersion: {type: string}
+        KmsKeyId: {type: string}
+        Tags: {type: list}
+      returns: ["ReplicationInstance.ReplicationInstanceArn", "ReplicationInstance.ReplicationInstanceStatus"]
+
+    describe_replication_instances:
+      description: "List replication instances"
+      parameters:
+        Filters: {type: list}
+      returns: ["ReplicationInstances[].ReplicationInstanceArn", "ReplicationInstances[].ReplicationInstanceStatus",
+                "ReplicationInstances[].ReplicationInstanceClass", "ReplicationInstances[].AllocatedStorage"]
+
+    modify_replication_instance:
+      description: "Modify replication instance settings"
+      parameters:
+        ReplicationInstanceArn: {type: string, required: true}
+        ReplicationInstanceClass: {type: string}
+        AllocatedStorage: {type: integer}
+        MultiAZ: {type: boolean}
+        EngineVersion: {type: string}
+        ApplyImmediately: {type: boolean}
+
+    delete_replication_instance:
+      description: "Delete a replication instance"
+      parameters:
+        ReplicationInstanceArn: {type: string, required: true}
+
+    reboot_replication_instance:
+      description: "Reboot a replication instance"
+      parameters:
+        ReplicationInstanceArn: {type: string, required: true}
+        ForceFailover: {type: boolean}
+
+  endpoint_operations:
+    create_endpoint:
+      description: "Create a source or target endpoint"
+      parameters:
+        EndpointIdentifier: {type: string, required: true}
+        EndpointType: {type: string, required: true, description: "source or target"}
+        EngineName: {type: string, required: true, description: "mysql, postgres, oracle, s3, redshift, etc."}
+        ServerName: {type: string, description: "Database hostname"}
+        Port: {type: integer, description: "Database port"}
+        DatabaseName: {type: string}
+        Username: {type: string}
+        Password: {type: string}
+        SslMode: {type: string, description: "none, require, verify-ca, verify-full"}
+        KmsKeyId: {type: string}
+        S3Settings: {type: object, description: "For S3 endpoints: BucketName, ServiceAccessRoleArn, DataFormat, etc."}
+        RedshiftSettings: {type: object}
+        DynamoDbSettings: {type: object, description: "ServiceAccessRoleArn"}
+        KinesisSettings: {type: object, description: "StreamArn, ServiceAccessRoleArn, MessageFormat"}
+        Tags: {type: list}
+      returns: ["Endpoint.EndpointArn", "Endpoint.Status"]
+
+    describe_endpoints:
+      description: "List endpoints"
+      parameters:
+        Filters: {type: list}
+      returns: ["Endpoints[].EndpointArn", "Endpoints[].EndpointIdentifier", "Endpoints[].EndpointType",
+                "Endpoints[].EngineName", "Endpoints[].Status"]
+
+    modify_endpoint:
+      description: "Modify an endpoint configuration"
+      parameters:
+        EndpointArn: {type: string, required: true}
+        EngineName: {type: string}
+        ServerName: {type: string}
+        Port: {type: integer}
+        Username: {type: string}
+        Password: {type: string}
+
+    test_connection:
+      description: "Test connectivity between replication instance and endpoint"
+      parameters:
+        ReplicationInstanceArn: {type: string, required: true}
+        EndpointArn: {type: string, required: true}
+      returns: ["Connection.Status", "Connection.LastFailureMessage"]
+
+    delete_endpoint:
+      description: "Delete an endpoint"
+      parameters:
+        EndpointArn: {type: string, required: true}
+
+  task_operations:
+    create_replication_task:
+      description: "Create a migration task between endpoints"
+      parameters:
+        ReplicationTaskIdentifier: {type: string, required: true}
+        SourceEndpointArn: {type: string, required: true}
+        TargetEndpointArn: {type: string, required: true}
+        ReplicationInstanceArn: {type: string, required: true}
+        MigrationType: {type: string, required: true, description: "full-load, cdc, or full-load-and-cdc"}
+        TableMappings: {type: string, required: true, description: "JSON table mapping rules"}
+        ReplicationTaskSettings: {type: string, description: "JSON task settings"}
+        CdcStartTime: {type: datetime, description: "UTC timestamp to start CDC from"}
+        CdcStartPosition: {type: string, description: "Native CDC start position"}
+        Tags: {type: list}
+      returns: ["ReplicationTask.ReplicationTaskArn", "ReplicationTask.Status"]
+
+    start_replication_task:
+      description: "Start or resume a migration task"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+        StartReplicationTaskType: {type: string, required: true, description: "start-replication, resume-processing, reload-target"}
+      returns: ["ReplicationTask.Status"]
+
+    stop_replication_task:
+      description: "Stop a running migration task"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+
+    modify_replication_task:
+      description: "Modify task settings (task must be stopped first)"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+        TableMappings: {type: string}
+        ReplicationTaskSettings: {type: string}
+        MigrationType: {type: string}
+        CdcStartTime: {type: datetime}
+        CdcStartPosition: {type: string}
+
+    describe_replication_tasks:
+      description: "List migration tasks"
+      parameters:
+        Filters: {type: list}
+      returns: ["ReplicationTasks[].ReplicationTaskArn", "ReplicationTasks[].Status",
+                "ReplicationTasks[].ReplicationTaskIdentifier", "ReplicationTasks[].MigrationType",
+                "ReplicationTasks[].ReplicationTaskStats"]
+
+    describe_table_statistics:
+      description: "Get per-table migration statistics"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+      returns: ["TableStatistics[].TableName", "TableStatistics[].Inserts",
+                "TableStatistics[].Deletes", "TableStatistics[].Updates",
+                "TableStatistics[].FullLoadRows", "TableStatistics[].TableState"]
+
+    reload_tables:
+      description: "Reload specific tables in a running task"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+        TablesToReload: {type: list, required: true, description: "[{'SchemaName': 's', 'TableName': 't'}]"}
+        ReloadOption: {type: string, description: "data-reload or validate-only"}
+
+    delete_replication_task:
+      description: "Delete a migration task"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+
+  assessment_operations:
+    start_replication_task_assessment_run:
+      description: "Run premigration assessment"
+      parameters:
+        ReplicationTaskArn: {type: string, required: true}
+        ServiceAccessRoleArn: {type: string, required: true}
+        ResultLocationBucket: {type: string, required: true}
+        AssessmentRunName: {type: string, required: true}
+      returns: ["ReplicationTaskAssessmentRun.ReplicationTaskAssessmentRunArn"]
+
+    describe_replication_task_assessment_runs:
+      description: "List assessment run results"
+      parameters:
+        Filters: {type: list}
+      returns: ["ReplicationTaskAssessmentRuns[].Status", "ReplicationTaskAssessmentRuns[].AssessmentProgress"]
+
+# -- 22. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "TestConnectionFailed|Connection.*failed"
+    category: CONFIG
+    cause: "DMS cannot connect to source or target — check VPC, security groups, or credentials"
+    fix_type: manual
+    resolution: "dms.test_connection(ReplicationInstanceArn=ri_arn, EndpointArn=ep_arn) to diagnose"
+
+  - pattern: "REPLICATION_INSTANCE_NOT_FOUND"
+    category: RESOURCE_NOT_FOUND
+    cause: "Replication instance does not exist or was deleted"
+    fix_type: manual
+    resolution: "Re-run terraform apply to recreate the replication instance"
+
+  - pattern: "ENDPOINT_NOT_FOUND"
+    category: RESOURCE_NOT_FOUND
+    cause: "Source or target endpoint does not exist"
+    fix_type: manual
+    resolution: "Check endpoint ARN, re-create if needed"
+
+  - pattern: "InsufficientPrivileges|AccessDenied"
+    category: PERMISSION
+    cause: "DMS service role or endpoint user lacks required permissions"
+    fix_type: update_iam
+    resolution: "Add missing permissions to DMS IAM role or database user"
+
+  - pattern: "StorageFull|InsufficientResourceCapacity"
+    category: QUOTA
+    cause: "Replication instance storage is full"
+    fix_type: config_change
+    resolution: "Increase allocated_storage via modify_replication_instance"
+
+  - pattern: "TASK_FAILED|Last Error.*stopped"
+    category: TASK_FAILURE
+    cause: "Replication task failed due to data error or connectivity issue"
+    fix_type: manual
+    resolution: "Check CloudWatch logs for dms-tasks-*. Common: LOB size exceeded, data type mismatch."
+
+  - pattern: "CDC_SLOT_NOT_FOUND|replication slot.*does not exist"
+    category: CONFIG
+    cause: "PostgreSQL logical replication slot was dropped or never created"
+    fix_type: manual
+    resolution: "Verify wal_level=logical, recreate replication slot, restart task"
+
+  - pattern: "binlog.*not found|Binary log.*position"
+    category: CONFIG
+    cause: "MySQL binary logs have been purged; CDC cannot find starting position"
+    fix_type: manual
+    resolution: "Set expire_logs_days to retain binlogs longer, restart task with full-load-and-cdc"
+
+  - pattern: "LOB_DATA_EXCEEDS_MAX_SIZE"
+    category: DATA
+    cause: "LOB column data exceeds max LOB size in limited mode (default 64 KB)"
+    fix_type: config_change
+    resolution: "Increase LobMaxSize in task settings or switch to full LOB mode (slower)"
+
+  - pattern: "TABLE_ERROR.*error|Error.*table"
+    category: DATA
+    cause: "Table-level error during migration (data type mismatch, constraint violation)"
+    fix_type: manual
+    resolution: "Check describe_table_statistics for table state. May need to modify table mappings."
+
+# -- 23. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"       # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. DMS supports tags on instances, endpoints, tasks, and subnet groups."
+
+# -- 24. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: dms
+  description: >
+    DMS replication task settings and column mappings updated via modify_replication_task().
+    Task must be stopped first. Table mappings (JSON) define which tables to replicate.
+  config_update:
+    client: dms
+    operation: modify_replication_task
+    id_param: ReplicationTaskArn
+    note: "Must stop task first: stop_replication_task(). Wait for status 'stopped' before modifying."
+  code_update_steps:
+    - "dms = boto3.client('dms', region_name=region)"
+    - "tasks = dms.describe_replication_tasks()['ReplicationTasks']"
+    - "task = next(t for t in tasks if resource_name in t['ReplicationTaskIdentifier'])"
+    - "dms.stop_replication_task(ReplicationTaskArn=task['ReplicationTaskArn'])"
+    - "Poll task status until 'stopped'"
+    - "dms.modify_replication_task(ReplicationTaskArn=task['ReplicationTaskArn'], TableMappings=json.dumps(new_mappings))"
+    - "dms.start_replication_task(ReplicationTaskArn=task['ReplicationTaskArn'], StartReplicationTaskType='resume-processing')"
+  discovery_ops:
+    - op: describe_replication_tasks
+      returns: ["ReplicationTasks[].ReplicationTaskArn", "ReplicationTasks[].Status", "ReplicationTasks[].ReplicationTaskIdentifier"]
+    - op: describe_replication_instances
+      returns: ["ReplicationInstances[].ReplicationInstanceArn", "ReplicationInstances[].ReplicationInstanceStatus"]
+    - op: describe_endpoints
+      returns: ["Endpoints[].EndpointArn", "Endpoints[].EndpointIdentifier", "Endpoints[].EngineName", "Endpoints[].Status"]
+    - op: describe_table_statistics
+      id_param: ReplicationTaskArn
+      returns: ["TableStatistics[].TableName", "TableStatistics[].Inserts", "TableStatistics[].Deletes",
+                "TableStatistics[].Updates", "TableStatistics[].FullLoadRows", "TableStatistics[].TableState"]

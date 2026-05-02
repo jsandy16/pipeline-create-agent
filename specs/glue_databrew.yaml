@@ -1,0 +1,85 @@
+service_type: glue_databrew
+is_principal: true
+terraform_resource: aws_databrew_project
+description: "AWS Glue DataBrew — visual data preparation tool for cleaning and normalising data without code"
+
+defaults:
+  worker_size: "T_2"      # smallest DataBrew node type; NOT free tier (~$0.48/node-hr)
+  max_capacity: 3         # minimum concurrent nodes
+  timeout: 2880
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "glue:GetDatabase"
+    - "glue:GetTable"
+    - "glue:CreateTable"
+    - "glue:UpdateTable"
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+    stepfunctions:
+      - "databrew:StartJobRun"
+      - "databrew:DescribeJobRun"
+    lambda:
+      - "databrew:StartJobRun"
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+vpc_triggers:
+  - aurora
+  - redshift
+
+code_update:
+  method: api_config
+  boto3_client: databrew
+  description: >
+    DataBrew recipe steps updated via update_recipe(). Job config (outputs, max nodes)
+    via update_job(). Must publish recipe version before running job against it.
+  config_update:
+    client: databrew
+    operation: update_recipe
+    id_param: Name
+  code_update_steps:
+    - "databrew = boto3.client('databrew', region_name=region)"
+    - "recipe = databrew.describe_recipe(Name=resource_name)"
+    - "steps = recipe['Steps']  # list of {Action: {Operation, Parameters}, ConditionExpressions}"
+    - "Modify steps list"
+    - "databrew.update_recipe(Name=resource_name, Steps=modified_steps)"
+    - "databrew.publish_recipe(Name=resource_name)  # required before running job"
+  discovery_ops:
+    - op: describe_recipe
+      id_param: Name
+      returns: ["Steps", "RecipeVersion", "ResourceArn"]
+    - op: describe_job
+      id_param: Name
+      returns: ["JobType", "Outputs", "DataCatalogOutputs", "MaxCapacity", "Timeout"]
+    - op: list_job_runs
+      id_param: Name
+      returns: ["JobRuns[].RunId", "JobRuns[].State", "JobRuns[].ErrorMessage"]
+runtime_diagnostics:
+  - pattern: "AccessDenied.*s3|EntityNotFoundException"
+    category: PERMISSION
+    cause: "DataBrew cannot access S3 input or Glue catalog"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={s3+glue permissions})"

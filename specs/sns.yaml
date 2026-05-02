@@ -1,0 +1,49 @@
+service_type: sns
+is_principal: false
+terraform_resource: aws_sns_topic
+description: "Standard SNS topic for pub/sub messaging"
+
+defaults:
+  fifo_topic: false
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+# SNS fragment creates:
+#   1. aws_sns_topic
+#   2. aws_sns_topic_subscription for each target (Lambda, SQS, etc.)
+
+code_update:
+  method: api_config
+  boto3_client: sns
+  description: >
+    SNS has no code. Update topic attributes via set_topic_attributes().
+    Manage subscriptions via subscribe()/unsubscribe(). Topic ARN from list_topics().
+  config_update:
+    client: sns
+    operation: set_topic_attributes
+    id_param: TopicArn
+    note: "TopicArn from list_topics() filtering by name containing resource_name"
+  discovery_ops:
+    - op: list_topics
+      returns: ["Topics[].TopicArn"]
+    - op: get_topic_attributes
+      id_param: TopicArn
+      returns: ["Attributes.DisplayName", "Attributes.SubscriptionsConfirmed", "Attributes.Policy", "Attributes.TopicArn"]
+    - op: list_subscriptions_by_topic
+      id_param: TopicArn
+      returns: ["Subscriptions[].Protocol", "Subscriptions[].Endpoint", "Subscriptions[].SubscriptionArn", "Subscriptions[].SubscriptionAttributes"]
+runtime_diagnostics:
+  - pattern: "AuthorizationError.*sns|sns.*not authorized"
+    category: PERMISSION
+    cause: "Caller IAM role lacks sns:Publish permission on this topic"
+    fix_type: update_iam
+    resolution: "Add sns:Publish to the caller's IAM role policy for this topic ARN"

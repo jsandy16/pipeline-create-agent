@@ -1,0 +1,911 @@
+# ============================================================================
+# AWS Glue Data Catalog Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Glue Data Catalog knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/glue_data_catalog.yaml with
+# exhaustive coverage of Data Catalog capabilities, constraints, IAM,
+# integrations, and Terraform resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — resource name constraints
+#   3. defaults            — Terraform attribute defaults (free-tier safe)
+#   4. quotas              — AWS service limits
+#   5. databases           — catalog database features
+#   6. tables              — table types, storage descriptors, SerDe
+#   7. partitions          — partitioning strategies, partition indexes
+#   8. connections         — connection registry
+#   9. schema_registry     — Avro/JSON Schema registry
+#  10. resource_policies   — catalog-level access policies
+#  11. encryption          — catalog encryption at rest
+#  12. iam                 — complete action catalog, integration graph rules
+#  13. env_vars            — auto-wired environment variables
+#  14. vpc_triggers        — VPC placement rules
+#  15. integrations        — wiring ownership with all connected services
+#  16. terraform_resources — all TF resource types
+#  17. boto3_operations    — complete API reference
+#  18. runtime_diagnostics — error patterns & auto-fix rules
+#  19. tags                — tagging constraints
+#  20. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: glue_data_catalog
+  aws_service_name: "AWS Glue Data Catalog"
+  is_principal: false             # Data Catalog is passive (no execution role)
+  terraform_resource: aws_glue_catalog_database
+  description: >
+    Central metadata repository for the AWS analytics ecosystem. Stores
+    database and table definitions (schemas, locations, partitions, SerDe info)
+    that are used by Athena, EMR, Redshift Spectrum, Lake Formation, and Glue
+    ETL jobs. Hive Metastore-compatible. One catalog per AWS account per region.
+  free_tier:
+    status: always_free
+    details: >
+      First 1 million objects stored and 1 million requests per month are free.
+      Beyond that: $1.00 per 100,000 objects stored/month, $1.00 per 1 million
+      requests.
+  pricing_model: pay_per_use
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  database_name:
+    max_length: 252
+    valid_characters: "a-z0-9_"    # lowercase letters, digits, underscores ONLY
+    rules:
+      - "Must be unique within the catalog (account + region)"
+      - "Lowercase letters, digits, and underscores only"
+      - "Hyphens are NOT allowed (Hive metastore compatibility)"
+      - "Cannot start with a digit"
+    note: "The renderer converts hyphens to underscores: bp.resource_name.replace('-', '_')"
+  table_name:
+    max_length: 255
+    valid_characters: "a-z0-9_"
+    rules:
+      - "Must be unique within its database"
+      - "Same character constraints as database names"
+  column_name:
+    max_length: 255
+    valid_characters: "a-zA-Z0-9_"
+  partition_key:
+    max_length: 255
+    valid_characters: "a-zA-Z0-9_"
+
+# -- 3. Defaults (free-tier safe) --------------------------------------------
+defaults:
+  description: "Glue Data Catalog database"
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_databases_per_catalog: 10000           # soft limit, adjustable
+  max_tables_per_database: 1000000           # soft limit
+  max_partitions_per_table: 10000000         # soft limit
+  max_table_versions_per_table: 100000       # soft limit
+  max_partitions_per_batch_create: 100       # per BatchCreatePartition call
+  max_partitions_per_batch_delete: 25        # per BatchDeletePartition call
+  max_partitions_per_batch_get: 1000         # per BatchGetPartition call
+  max_partitions_per_get_partitions: 1000    # per GetPartitions call (paginated)
+  max_columns_per_table: 10000
+  max_partition_keys_per_table: 100          # max partition dimensions
+  max_partition_index_per_table: 3
+  max_connections_per_catalog: 1000
+  max_user_defined_functions: 100            # per database
+  max_parameter_map_size: 512000             # bytes per table/partition Parameters map
+  max_storage_descriptor_size: 20000         # bytes
+  max_catalog_resource_policy_size: 10240    # bytes
+  throttle_rates:
+    get_table: 100                           # requests per second
+    get_partition: 100
+    batch_create_partition: 25
+    create_table: 25
+
+# -- 5. Databases --------------------------------------------------------------
+databases:
+  description: >
+    A catalog database is a logical namespace grouping related tables. It is
+    analogous to a database in a traditional RDBMS or a schema in Hive.
+  terraform_resource: "aws_glue_catalog_database"
+  attributes:
+    name: {type: string, required: true, description: "Database name (lowercase, underscores)"}
+    description: {type: string, description: "Human-readable description"}
+    location_uri: {type: string, description: "Default S3 location for tables in this database"}
+    parameters: {type: object, description: "Key-value parameters"}
+    target_database:
+      description: "Federated database — points to a database in another account's catalog"
+      attributes: ["catalog_id", "database_name", "region"]
+    create_table_default_permission:
+      description: "Default Lake Formation permissions for new tables"
+      attributes: ["permissions", "principal"]
+  federated_databases:
+    description: >
+      Allows querying tables in another AWS account's Data Catalog without
+      copying metadata. Requires Lake Formation cross-account grants.
+
+# -- 6. Tables -----------------------------------------------------------------
+tables:
+  description: >
+    A catalog table stores metadata about a dataset: column names and types,
+    data format (SerDe), storage location (S3 path), and partition keys.
+    Tables do not contain data — they describe data stored elsewhere.
+  terraform_resource: "aws_glue_catalog_table"
+
+  table_types:
+    EXTERNAL_TABLE:
+      description: "Points to data in S3 or other external store. Most common type."
+      terraform_value: "EXTERNAL_TABLE"
+    MANAGED_TABLE:
+      description: "Catalog manages the data lifecycle (rare in AWS)"
+      terraform_value: null       # typically omitted
+    VIRTUAL_VIEW:
+      description: "Presto/Athena view over other tables"
+      terraform_value: "VIRTUAL_VIEW"
+    INDEX_TABLE:
+      description: "Used internally by partition indexes"
+    GOVERNED:
+      description: "Lake Formation governed table (transactions, time-travel)"
+
+  storage_descriptor:
+    description: >
+      Describes the physical storage of the table data: columns, location,
+      SerDe library, input/output format, compression, and sort columns.
+    terraform_block: "storage_descriptor"
+    key_attributes:
+      location: "S3 path to the data (e.g., s3://bucket/prefix/)"
+      input_format: "Hadoop InputFormat class"
+      output_format: "Hadoop OutputFormat class"
+      ser_de_info:
+        serialization_library: "SerDe class for reading/writing"
+        parameters: "SerDe-specific configuration"
+      columns: "List of column definitions (name, type, comment)"
+      compressed: "Whether data is compressed"
+      number_of_buckets: "Hive bucketing"
+      sort_columns: "Sort order within buckets"
+      stored_as_sub_directories: "Whether data uses subdirectory structure"
+
+  common_serde_configurations:
+    csv:
+      input_format: "org.apache.hadoop.mapred.TextInputFormat"
+      output_format: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+      serde: "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+      parameters:
+        "serialization.format": ","
+        "field.delim": ","
+    json:
+      input_format: "org.apache.hadoop.mapred.TextInputFormat"
+      output_format: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+      serde: "org.openx.data.jsonserde.JsonSerDe"
+    parquet:
+      input_format: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+      output_format: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+      serde: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+    orc:
+      input_format: "org.apache.hadoop.hive.ql.io.orc.OrcInputFormat"
+      output_format: "org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat"
+      serde: "org.apache.hadoop.hive.ql.io.orc.OrcSerde"
+    avro:
+      input_format: "org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat"
+      output_format: "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat"
+      serde: "org.apache.hadoop.hive.serde2.avro.AvroSerDe"
+    ion:
+      serde: "com.amazon.ionhiveserde.IonHiveSerDe"
+
+  hive_data_types:
+    primitive: ["string", "int", "bigint", "double", "float", "boolean", "binary", "timestamp", "date", "decimal", "char", "varchar", "tinyint", "smallint"]
+    complex: ["array<type>", "map<key_type, value_type>", "struct<field:type,...>", "uniontype<type1,type2>"]
+
+# -- 7. Partitions -------------------------------------------------------------
+partitions:
+  description: >
+    Partitions divide a table into segments based on column values (e.g.,
+    year, month, day). Each partition maps to a distinct S3 prefix, enabling
+    Athena and other engines to skip irrelevant data (partition pruning).
+  terraform_resource: "aws_glue_partition"
+
+  strategies:
+    hive_style:
+      description: "S3 keys use key=value format: s3://bucket/table/year=2024/month=01/"
+      auto_detected: true
+      note: "Glue crawlers auto-detect Hive-style partitions"
+    non_hive:
+      description: "S3 keys use plain directories: s3://bucket/table/2024/01/"
+      auto_detected: false
+      note: "Requires manual partition definition or crawler projection"
+
+  partition_indexes:
+    description: >
+      Partition indexes speed up GetPartitions queries by indexing partition
+      keys. Up to 3 indexes per table.
+    terraform_resource: "aws_glue_partition_index"
+    max_per_table: 3
+    max_keys_per_index: 3
+
+  partition_projection:
+    description: >
+      Athena-specific feature. Define partition structure in table properties
+      instead of registering each partition in the catalog. Athena generates
+      partition paths at query time. Reduces catalog calls dramatically.
+    types:
+      - "enum"                    # fixed list of values
+      - "integer"                 # numeric range
+      - "date"                    # date range
+      - "injected"               # values from query WHERE clause
+    table_parameters:
+      "projection.enabled": "true"
+      "projection.<col>.type": "enum|integer|date|injected"
+      "projection.<col>.values": "list of values (enum)"
+      "projection.<col>.range": "start,end (integer/date)"
+      "projection.<col>.format": "date format (date)"
+      "projection.<col>.interval": "interval (date)"
+      "storage.location.template": "s3://bucket/${col1}/${col2}/"
+
+# -- 8. Connections ------------------------------------------------------------
+connections:
+  description: >
+    The Data Catalog stores connection definitions used by crawlers and ETL
+    jobs to access external data stores. Connection metadata (JDBC URL,
+    credentials, VPC config) is stored in the catalog.
+  terraform_resource: "aws_glue_connection"
+  types: ["JDBC", "KAFKA", "MONGODB", "NETWORK", "MARKETPLACE", "CUSTOM"]
+  note: "Connections are stored in the catalog but used by Glue crawlers/jobs"
+
+# -- 9. Schema Registry -------------------------------------------------------
+schema_registry:
+  description: >
+    A schema registry within the Data Catalog for managing Avro and JSON Schema
+    definitions. Supports schema versioning, compatibility checks, and
+    integration with AWS services (Kinesis, MSK, Glue).
+  terraform_resources:
+    registry: "aws_glue_registry"
+    schema: "aws_glue_schema"
+  data_formats: ["AVRO", "JSON"]
+  compatibility_modes:
+    - "NONE"
+    - "DISABLED"
+    - "BACKWARD"
+    - "BACKWARD_ALL"
+    - "FORWARD"
+    - "FORWARD_ALL"
+    - "FULL"
+    - "FULL_ALL"
+  integrations:
+    - "Kinesis Data Streams (schema validation on producer)"
+    - "Amazon MSK (schema validation)"
+    - "Glue ETL (schema enforcement in jobs)"
+    - "Glue Streaming (schema evolution)"
+
+# -- 10. Resource Policies -----------------------------------------------------
+resource_policies:
+  description: >
+    Catalog-level resource policy controls cross-account and fine-grained
+    access to the Data Catalog. Similar to S3 bucket policies.
+  terraform_resource: "aws_glue_resource_policy"
+  max_size: 10240                  # bytes
+  use_cases:
+    - "Cross-account catalog access"
+    - "Restricting access to specific databases/tables"
+    - "Enforcing encryption requirements"
+  note: "Lake Formation is the recommended approach for fine-grained access control"
+
+# -- 11. Encryption ------------------------------------------------------------
+encryption:
+  terraform_resource: "aws_glue_data_catalog_encryption_settings"
+  encryption_at_rest:
+    description: "Encrypt all catalog objects (databases, tables, partitions) with KMS"
+    terraform_block: "encryption_at_rest"
+    modes:
+      - "SSE-KMS"
+      - "DISABLED"
+    attributes: ["catalog_encryption_mode", "sse_aws_kms_key_id"]
+  connection_password_encryption:
+    description: "Encrypt connection passwords stored in the catalog with KMS"
+    terraform_block: "connection_password_encryption"
+    attributes: ["return_connection_password_encrypted", "aws_kms_key_id"]
+
+# -- 12. IAM ------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    catalog: "arn:aws:glue:REGION:ACCOUNT:catalog"
+    database: "arn:aws:glue:REGION:ACCOUNT:database/DB_NAME"
+    table: "arn:aws:glue:REGION:ACCOUNT:table/DB_NAME/TABLE_NAME"
+    connection: "arn:aws:glue:REGION:ACCOUNT:connection/CONNECTION_NAME"
+    user_defined_function: "arn:aws:glue:REGION:ACCOUNT:userDefinedFunction/DB_NAME/FUNC_NAME"
+
+  # Data Catalog is passive — no execution role
+  always: []
+
+  # Complete action catalog by category
+  actions:
+    database_actions:
+      - "glue:CreateDatabase"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:UpdateDatabase"
+      - "glue:DeleteDatabase"
+    table_actions:
+      - "glue:CreateTable"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:UpdateTable"
+      - "glue:DeleteTable"
+      - "glue:BatchDeleteTable"
+      - "glue:SearchTables"
+      - "glue:GetTableVersion"
+      - "glue:GetTableVersions"
+      - "glue:DeleteTableVersion"
+      - "glue:BatchDeleteTableVersion"
+    partition_actions:
+      - "glue:CreatePartition"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:UpdatePartition"
+      - "glue:DeletePartition"
+      - "glue:BatchCreatePartition"
+      - "glue:BatchDeletePartition"
+      - "glue:BatchGetPartition"
+      - "glue:BatchUpdatePartition"
+    connection_actions:
+      - "glue:CreateConnection"
+      - "glue:GetConnection"
+      - "glue:GetConnections"
+      - "glue:UpdateConnection"
+      - "glue:DeleteConnection"
+    catalog_settings:
+      - "glue:GetCatalogImportStatus"
+      - "glue:ImportCatalogToGlue"
+      - "glue:PutDataCatalogEncryptionSettings"
+      - "glue:GetDataCatalogEncryptionSettings"
+      - "glue:PutResourcePolicy"
+      - "glue:GetResourcePolicy"
+      - "glue:DeleteResourcePolicy"
+      - "glue:GetResourcePolicies"
+    schema_registry:
+      - "glue:CreateRegistry"
+      - "glue:GetRegistry"
+      - "glue:UpdateRegistry"
+      - "glue:DeleteRegistry"
+      - "glue:ListRegistries"
+      - "glue:CreateSchema"
+      - "glue:GetSchema"
+      - "glue:GetSchemaVersion"
+      - "glue:UpdateSchema"
+      - "glue:DeleteSchema"
+      - "glue:ListSchemas"
+      - "glue:RegisterSchemaVersion"
+      - "glue:GetSchemaByDefinition"
+      - "glue:ListSchemaVersions"
+    user_defined_functions:
+      - "glue:CreateUserDefinedFunction"
+      - "glue:GetUserDefinedFunction"
+      - "glue:GetUserDefinedFunctions"
+      - "glue:UpdateUserDefinedFunction"
+      - "glue:DeleteUserDefinedFunction"
+    tagging:
+      - "glue:TagResource"
+      - "glue:UntagResource"
+      - "glue:GetTags"
+
+  # Integration graph IAM rules (Data Catalog is passive)
+  as_target_of: {}
+  as_source_to: {}
+
+  # Common permission sets for services that READ from catalog
+  common_reader_permissions:
+    - "glue:GetDatabase"
+    - "glue:GetDatabases"
+    - "glue:GetTable"
+    - "glue:GetTables"
+    - "glue:GetPartition"
+    - "glue:GetPartitions"
+    - "glue:BatchGetPartition"
+
+  # Common permission sets for services that WRITE to catalog
+  common_writer_permissions:
+    - "glue:CreateDatabase"
+    - "glue:CreateTable"
+    - "glue:UpdateTable"
+    - "glue:CreatePartition"
+    - "glue:BatchCreatePartition"
+    - "glue:UpdatePartition"
+
+  # Condition keys
+  condition_keys:
+    - "aws:RequestTag/${TagKey}"
+    - "aws:ResourceTag/${TagKey}"
+    - "aws:TagKeys"
+
+# -- 13. Environment Variables -------------------------------------------------
+env_vars:
+  as_target_of: {}    # passive service
+  as_source_to: {}    # passive service
+
+# -- 14. VPC Triggers ---------------------------------------------------------
+vpc_triggers: []       # Data Catalog is a managed API, no VPC needed
+
+# -- 15. Integration Wiring Ownership -----------------------------------------
+integrations:
+  glue_crawler_to_catalog:
+    description: "Glue crawler populates catalog with table definitions"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+      - "glue:GetTable"
+      - "glue:CreatePartition"
+      - "glue:BatchCreatePartition"
+
+  athena_reads_catalog:
+    description: "Athena queries use catalog for table metadata"
+    owned_by: "athena"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:BatchGetPartition"
+
+  emr_reads_catalog:
+    description: "EMR uses catalog as Hive metastore"
+    owned_by: "emr"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+
+  redshift_spectrum_reads_catalog:
+    description: "Redshift Spectrum queries external tables via catalog"
+    owned_by: "redshift"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+
+  lake_formation_governs_catalog:
+    description: "Lake Formation adds fine-grained access control on top of catalog"
+    owned_by: "lake_formation"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "lakeformation:GetDataAccess"
+
+  glue_databrew_reads_catalog:
+    description: "DataBrew uses catalog tables as dataset source"
+    owned_by: "glue_databrew"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+
+  glue_etl_reads_catalog:
+    description: "Glue ETL jobs read/write catalog tables"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+
+  lambda_reads_catalog:
+    description: "Lambda reads catalog metadata via Glue API"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartitions"
+
+  step_functions_reads_catalog:
+    description: "Step Functions accesses catalog via SDK integration"
+    owned_by: "step_functions"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+
+# -- 16. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_glue_catalog_database"
+      description: "The catalog database"
+      always_created: true
+
+  conditional:
+    - resource: "aws_glue_catalog_table"
+      condition: "When explicit table definitions are needed (not created by crawlers)"
+    - resource: "aws_glue_partition"
+      condition: "When explicit partition definitions are needed"
+    - resource: "aws_glue_partition_index"
+      condition: "When partition indexes are configured"
+    - resource: "aws_glue_connection"
+      condition: "When connections are defined in the catalog"
+    - resource: "aws_glue_data_catalog_encryption_settings"
+      condition: "When catalog encryption is enabled"
+    - resource: "aws_glue_resource_policy"
+      condition: "When cross-account or fine-grained access is needed"
+    - resource: "aws_glue_registry"
+      condition: "When schema registry is used"
+    - resource: "aws_glue_schema"
+      condition: "When schema registry schemas are defined"
+    - resource: "aws_glue_user_defined_function"
+      condition: "When custom UDFs are registered"
+    - resource: "aws_glue_classifier"
+      condition: "When custom classifiers are needed for crawlers"
+
+  all_known:
+    - "aws_glue_catalog_database"
+    - "aws_glue_catalog_table"
+    - "aws_glue_partition"
+    - "aws_glue_partition_index"
+    - "aws_glue_connection"
+    - "aws_glue_data_catalog_encryption_settings"
+    - "aws_glue_resource_policy"
+    - "aws_glue_registry"
+    - "aws_glue_schema"
+    - "aws_glue_classifier"
+    - "aws_glue_user_defined_function"
+
+# -- 17. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "glue"
+
+  database_operations:
+    create_database:
+      description: "Create a database in the Data Catalog"
+      parameters:
+        DatabaseInput: {type: object, required: true, description: "{'Name': '...', 'Description': '...', 'LocationUri': 's3://...'}"}
+        CatalogId: {type: string, description: "AWS account ID (default: caller's account)"}
+      returns: []
+
+    get_database:
+      description: "Get database details"
+      parameters:
+        Name: {type: string, required: true}
+        CatalogId: {type: string}
+      returns: ["Database.Name", "Database.Description", "Database.LocationUri", "Database.Parameters", "Database.CreateTime"]
+
+    get_databases:
+      description: "List all databases in the catalog"
+      parameters:
+        CatalogId: {type: string}
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+      returns: ["DatabaseList[].Name", "DatabaseList[].Description", "DatabaseList[].LocationUri"]
+
+    update_database:
+      description: "Update a database definition"
+      parameters:
+        Name: {type: string, required: true}
+        DatabaseInput: {type: object, required: true}
+        CatalogId: {type: string}
+
+    delete_database:
+      description: "Delete a database (and all its tables)"
+      parameters:
+        Name: {type: string, required: true}
+        CatalogId: {type: string}
+
+  table_operations:
+    create_table:
+      description: "Create a table in a database"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableInput: {type: object, required: true, description: "{'Name': '...', 'StorageDescriptor': {'Location': '...', 'Columns': [...], 'InputFormat': '...', 'OutputFormat': '...', 'SerdeInfo': {'SerializationLibrary': '...'}}, 'PartitionKeys': [...], 'TableType': 'EXTERNAL_TABLE'}"}
+        CatalogId: {type: string}
+
+    get_table:
+      description: "Get table details"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        Name: {type: string, required: true}
+        CatalogId: {type: string}
+      returns: ["Table.Name", "Table.StorageDescriptor", "Table.PartitionKeys", "Table.TableType", "Table.Parameters", "Table.CreateTime", "Table.UpdateTime"]
+
+    get_tables:
+      description: "List tables in a database"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        CatalogId: {type: string}
+        Expression: {type: string, description: "Regex filter on table names"}
+        MaxResults: {type: integer}
+      returns: ["TableList[].Name", "TableList[].StorageDescriptor.Location", "TableList[].PartitionKeys", "TableList[].TableType"]
+
+    update_table:
+      description: "Update a table definition"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableInput: {type: object, required: true}
+        CatalogId: {type: string}
+
+    delete_table:
+      description: "Delete a table"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        Name: {type: string, required: true}
+        CatalogId: {type: string}
+
+    batch_delete_table:
+      description: "Delete multiple tables"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TablesToDelete: {type: list, required: true}
+        CatalogId: {type: string}
+
+    search_tables:
+      description: "Search tables across databases"
+      parameters:
+        CatalogId: {type: string}
+        SearchText: {type: string}
+        Filters: {type: list}
+        MaxResults: {type: integer}
+      returns: ["TableList[].Name", "TableList[].DatabaseName"]
+
+  partition_operations:
+    create_partition:
+      description: "Add a partition to a table"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionInput: {type: object, required: true, description: "{'Values': ['2024', '01'], 'StorageDescriptor': {...}}"}
+        CatalogId: {type: string}
+
+    batch_create_partition:
+      description: "Create multiple partitions (up to 100 per call)"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionInputList: {type: list, required: true}
+        CatalogId: {type: string}
+
+    get_partition:
+      description: "Get a single partition"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionValues: {type: list, required: true}
+        CatalogId: {type: string}
+      returns: ["Partition.Values", "Partition.StorageDescriptor.Location", "Partition.CreationTime"]
+
+    get_partitions:
+      description: "List partitions with optional filtering"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        Expression: {type: string, description: "Partition filter expression (e.g., year='2024')"}
+        MaxResults: {type: integer}
+        CatalogId: {type: string}
+      returns: ["Partitions[].Values", "Partitions[].StorageDescriptor.Location"]
+
+    batch_get_partition:
+      description: "Get multiple partitions by values (up to 1000)"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionsToGet: {type: list, required: true, description: "[{'Values': ['2024', '01']}]"}
+        CatalogId: {type: string}
+
+    update_partition:
+      description: "Update a partition"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionValueList: {type: list, required: true}
+        PartitionInput: {type: object, required: true}
+        CatalogId: {type: string}
+
+    delete_partition:
+      description: "Delete a partition"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionValues: {type: list, required: true}
+        CatalogId: {type: string}
+
+    batch_delete_partition:
+      description: "Delete multiple partitions (up to 25 per call)"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionsToDelete: {type: list, required: true}
+        CatalogId: {type: string}
+
+  connection_operations:
+    create_connection:
+      description: "Create a connection"
+      parameters:
+        ConnectionInput: {type: object, required: true, description: "{'Name': '...', 'ConnectionType': 'JDBC', 'ConnectionProperties': {...}}"}
+        CatalogId: {type: string}
+
+    get_connection:
+      description: "Get connection details"
+      parameters:
+        Name: {type: string, required: true}
+        CatalogId: {type: string}
+      returns: ["Connection.Name", "Connection.ConnectionType", "Connection.ConnectionProperties"]
+
+    get_connections:
+      description: "List connections"
+      parameters:
+        CatalogId: {type: string}
+        Filter: {type: object, description: "Filter by connection type"}
+        MaxResults: {type: integer}
+      returns: ["ConnectionList[].Name", "ConnectionList[].ConnectionType"]
+
+  schema_registry_operations:
+    create_registry:
+      description: "Create a schema registry"
+      parameters:
+        RegistryName: {type: string, required: true}
+        Description: {type: string}
+        Tags: {type: object}
+      returns: ["RegistryArn", "RegistryName"]
+
+    create_schema:
+      description: "Create a schema in a registry"
+      parameters:
+        RegistryId: {type: object, required: true, description: "{'RegistryName': '...'}"}
+        SchemaName: {type: string, required: true}
+        DataFormat: {type: string, required: true, description: "AVRO or JSON"}
+        SchemaDefinition: {type: string, required: true}
+        Compatibility: {type: string, description: "BACKWARD, FORWARD, FULL, NONE, etc."}
+      returns: ["SchemaArn", "SchemaName", "SchemaVersionId"]
+
+    register_schema_version:
+      description: "Register a new version of an existing schema"
+      parameters:
+        SchemaId: {type: object, required: true}
+        SchemaDefinition: {type: string, required: true}
+      returns: ["SchemaVersionId", "VersionNumber", "Status"]
+
+  catalog_settings_operations:
+    put_data_catalog_encryption_settings:
+      description: "Configure catalog encryption"
+      parameters:
+        DataCatalogEncryptionSettings: {type: object, required: true}
+        CatalogId: {type: string}
+
+    get_data_catalog_encryption_settings:
+      description: "Get catalog encryption settings"
+      parameters:
+        CatalogId: {type: string}
+      returns: ["DataCatalogEncryptionSettings"]
+
+    put_resource_policy:
+      description: "Set catalog resource policy"
+      parameters:
+        PolicyInJson: {type: string, required: true}
+        CatalogId: {type: string}
+
+    get_resource_policy:
+      description: "Get catalog resource policy"
+      parameters:
+        CatalogId: {type: string}
+      returns: ["PolicyInJson", "PolicyHash"]
+
+# -- 18. Runtime Diagnostics ---------------------------------------------------
+runtime_diagnostics:
+  - pattern: "EntityNotFoundException.*glue|database.*not.*exist"
+    category: RESOURCE_NOT_FOUND
+    cause: "Glue database or table does not exist — crawler has not run yet"
+    fix_type: trigger_crawler
+    resolution: "glue.start_crawler(Name=associated_crawler_name) to populate the catalog"
+
+  - pattern: "AlreadyExistsException"
+    category: ALREADY_EXISTS
+    cause: "Database, table, or partition already exists"
+    fix_type: none
+    resolution: "Resource already exists. Use update_* API to modify."
+
+  - pattern: "AccessDeniedException.*glue"
+    category: PERMISSION
+    cause: "Caller lacks Glue catalog permissions"
+    fix_type: update_iam
+    resolution: "Add required glue:Get*/Create*/Update* actions to caller's IAM role"
+
+  - pattern: "InvalidInputException.*database.*name"
+    category: VALIDATION
+    cause: "Database name contains invalid characters (hyphens, uppercase)"
+    fix_type: rename
+    resolution: "Database names must use only lowercase letters, digits, and underscores. No hyphens."
+
+  - pattern: "ResourceNumberLimitExceededException"
+    category: QUOTA
+    cause: "Exceeded catalog quota (databases, tables, or partitions)"
+    fix_type: manual
+    resolution: "Request a quota increase via AWS Service Quotas console, or delete unused resources"
+
+  - pattern: "ConcurrentModificationException"
+    category: CONCURRENCY
+    cause: "Concurrent update to the same catalog resource"
+    fix_type: retry
+    resolution: "Retry with exponential backoff. This is a transient error from concurrent crawlers/writers."
+
+  - pattern: "GlueEncryptionException"
+    category: ENCRYPTION
+    cause: "Catalog encryption issue — KMS key permissions"
+    fix_type: update_iam
+    resolution: "Add kms:Decrypt and kms:GenerateDataKey* to the caller's role for the catalog KMS key"
+
+# -- 19. Tags -----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: >
+    Note: aws_glue_catalog_database does NOT support tags in all Terraform
+    provider versions. The Glue Data Catalog renderer currently does not emit
+    a tags block. Tags are supported on the database resource in newer provider
+    versions (5.x+).
+
+# -- 20. Code Update (Developer Agent) ----------------------------------------
+code_update:
+  method: api_config
+  boto3_client: glue
+  description: >
+    Glue Data Catalog database/table definitions updated via update_database()/update_table().
+    Table schema (columns, partitions) via update_table(). No code — metadata only.
+  config_update:
+    client: glue
+    operation: update_database
+    id_param: Name
+  discovery_ops:
+    - op: get_database
+      id_param: Name
+      returns: ["Database.Name", "Database.Description", "Database.LocationUri"]
+    - op: get_tables
+      id_param: DatabaseName
+      returns: ["TableList[].Name", "TableList[].StorageDescriptor.Location", "TableList[].PartitionKeys"]
+
+# Pipeline monitoring (log_aggregator.py)
+pipeline_monitoring:
+  method: "none"
+  note: >
+    Glue Data Catalog is metadata-only and has no runtime logs. It appears in
+    the log aggregator's _CLOUDTRAIL_SERVICES list for basic API-level tracking,
+    but there are no CloudWatch Log Groups to monitor. The catalog does not
+    appear in the pipeline run monitor service list.
+
+# -- Sub-Components (spec-driven, zero Python code) ----------------------------
+sub_components:
+  tables:
+    terraform_resource: aws_glue_catalog_table
+    trigger_key: tables
+    is_list: true
+    label_suffix: table
+    name_field: name
+    attributes:
+      database_name: "{parent_resource_ref}.name"
+      name: "{item.name}"
+      table_type: "{item.table_type|EXTERNAL_TABLE}"
+      parameters:
+        EXTERNAL: "{item.external_flag|TRUE}"
+    nested_blocks:
+      storage_descriptor:
+        attributes:
+          location: "{item.location}"
+          input_format: "{item.input_format|org.apache.hadoop.mapred.TextInputFormat}"
+          output_format: "{item.output_format|org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat}"
+        nested_blocks:
+          ser_de_info:
+            attributes:
+              serialization_library: "{item.serde|org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe}"
+        list_blocks:
+          columns:
+            source_key: columns
+            attributes:
+              name: "{col.name}"
+              type: "{col.type|string}"
+    list_blocks:
+      partition_keys:
+        source_key: partition_keys
+        attributes:
+          name: "{key.name}"
+          type: "{key.type|string}"

@@ -1,0 +1,56 @@
+service: sqs
+boto3_client: sqs
+description: "Amazon SQS — message queue service"
+
+operations:
+  send_message:
+    description: "Send a message to a queue"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      MessageBody: {type: string, required: true}
+      DelaySeconds: {type: integer}
+      MessageAttributes: {type: object}
+      MessageGroupId: {type: string, description: "Required for FIFO queues"}
+
+  send_message_batch:
+    description: "Send up to 10 messages in a single request"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      Entries: {type: list, required: true}
+
+  receive_message:
+    description: "Receive messages from a queue"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      MaxNumberOfMessages: {type: integer}
+      WaitTimeSeconds: {type: integer}
+      VisibilityTimeout: {type: integer}
+
+  delete_message:
+    description: "Delete a received message from the queue"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      ReceiptHandle: {type: string, required: true}
+
+  purge_queue:
+    description: "Delete all messages in a queue"
+    parameters:
+      QueueUrl: {type: string, required: true}
+
+  set_queue_attributes:
+    description: "Set queue attributes (visibility timeout, retention, DLQ, etc.)"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      Attributes: {type: object, required: true}
+
+  get_queue_attributes:
+    description: "Get queue attributes and metrics"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      AttributeNames: {type: list}
+
+  tag_queue:
+    description: "Add tags to a queue"
+    parameters:
+      QueueUrl: {type: string, required: true}
+      Tags: {type: object, required: true}

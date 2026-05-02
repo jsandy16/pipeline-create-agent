@@ -1,0 +1,82 @@
+business_unit: eng
+cost_center: f01
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: orders/
+  source: raw_data_bucket
+  suffix: null
+  target: orders_processor
+- event: s3:ObjectCreated:*
+  prefix: customers/
+  source: raw_data_bucket
+  suffix: null
+  target: customers_processor
+- event: s3:ObjectCreated:*
+  prefix: products/
+  source: raw_data_bucket
+  suffix: null
+  target: products_processor
+- event: s3:ObjectCreated:*
+  prefix: inventory/
+  source: raw_data_bucket
+  suffix: null
+  target: inventory_processor
+- event: put_object
+  prefix: null
+  source: orders_processor
+  suffix: null
+  target: staging_data_bucket
+- event: put_object
+  prefix: null
+  source: customers_processor
+  suffix: null
+  target: staging_data_bucket
+- event: put_object
+  prefix: null
+  source: products_processor
+  suffix: null
+  target: staging_data_bucket
+- event: put_object
+  prefix: null
+  source: inventory_processor
+  suffix: null
+  target: staging_data_bucket
+pipeline_name: multi_prefix_data_processor
+region: us-east-1
+services:
+- config:
+    versioning: false
+  name: raw_data_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: orders_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: customers_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: products_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: inventory_processor
+  type: lambda
+- config:
+    versioning: false
+  name: staging_data_bucket
+  type: s3

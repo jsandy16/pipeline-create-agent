@@ -1,0 +1,1112 @@
+# ============================================================================
+# QuickSight Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL QuickSight knowledge needed
+# by the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/quicksight.yaml with exhaustive
+# coverage of QuickSight capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity              — service metadata & Terraform mapping
+#   2. naming                — resource name constraints
+#   3. defaults              — Terraform attribute defaults (minimum-cost)
+#   4. quotas                — AWS service limits
+#   5. editions              — Standard vs Enterprise
+#   6. data_sources          — supported source types, configuration
+#   7. datasets              — SPICE, DIRECT_QUERY, calculated fields, joins
+#   8. analyses              — visual types, parameters, filters
+#   9. dashboards            — publishing, sharing, scheduling, embedding
+#  10. spice                 — in-memory engine, capacity, refresh
+#  11. permissions           — QuickSight-level access control
+#  12. users_and_groups      — identity management, namespaces
+#  13. embedding             — embedded analytics, anonymous access
+#  14. encryption            — KMS, SPICE encryption
+#  15. iam                   — complete IAM action catalog & integration rules
+#  16. env_vars              — auto-wired environment variables
+#  17. vpc_triggers          — VPC placement rules
+#  18. integrations          — wiring ownership with all connected services
+#  19. terraform_resources   — all TF resource types
+#  20. boto3_operations      — complete API operation reference
+#  21. runtime_diagnostics   — error patterns & auto-fix rules
+#  22. tags                  — tagging constraints
+#  23. code_update           — developer agent instructions
+#  24. logging               — monitoring
+# ============================================================================
+
+# -- 1. Identity ------------------------------------------------------------
+identity:
+  service_type: quicksight
+  aws_service_name: "Amazon QuickSight"
+  is_principal: true              # QuickSight uses an IAM service role for data access
+  terraform_resource: aws_quicksight_data_source
+  description: >
+    Amazon QuickSight — serverless BI and data visualization service. Connects
+    to Athena, S3, Redshift, Aurora, and other data sources to create
+    interactive dashboards and visualizations. Supports SPICE in-memory engine
+    for fast queries and embedded analytics for applications.
+  free_tier:
+    status: never_free
+    details: >
+      QuickSight has NO free tier. Standard Edition starts at $9/month per author,
+      $0.30/session for readers (up to $5/month cap). Enterprise Edition starts at
+      $18/month per author, $0.30/session for readers. SPICE capacity: 10 GB per
+      user included, additional at $0.25/GB/month (Standard) or $0.38/GB/month (Enterprise).
+    warning: >
+      NEVER FREE TIER. The HCL renderer emits a cost warning comment at the top
+      of every QuickSight resource block. QuickSight requires account setup
+      (subscription) before any Terraform resources can be created.
+  pricing_model: per_user_per_month  # authors/readers priced differently
+
+# -- 2. Naming --------------------------------------------------------------
+naming:
+  data_source_id:
+    max_length: 2048
+    valid_characters: "a-zA-Z0-9._~-"
+    rules:
+      - "Must be unique within the AWS account"
+      - "No spaces"
+  dataset_id:
+    max_length: 2048
+    valid_characters: "a-zA-Z0-9._~-"
+  dashboard_id:
+    max_length: 2048
+    valid_characters: "a-zA-Z0-9._~-"
+  analysis_id:
+    max_length: 2048
+    valid_characters: "a-zA-Z0-9._~-"
+  resource_name:
+    max_length: 2048
+    note: "Display names can contain spaces and special characters"
+  suffixes_used_by_renderer:
+    - "-role"    # IAM role name
+    - "-policy"  # IAM policy name
+
+# -- 3. Defaults (minimum-cost) ---------------------------------------------
+defaults:
+  # Data source type — auto-detected from integrations by renderer
+  type: "ATHENA"
+  # Athena defaults
+  work_group: "primary"
+  # S3 defaults
+  manifest_bucket: ""
+  manifest_key: "manifest.json"
+  # Redshift defaults
+  redshift_database: "dev"
+
+# -- 4. Quotas --------------------------------------------------------------
+quotas:
+  # Account limits
+  max_data_sources_per_account: 200
+  max_datasets_per_account: 500
+  max_analyses_per_account: 500
+  max_dashboards_per_account: 500
+  max_folders_per_account: 1000
+  max_namespaces_per_account: 100
+
+  # SPICE limits
+  spice_capacity_per_user_gb: 10     # included with subscription
+  max_spice_dataset_size_gb: 500     # Standard
+  max_spice_dataset_size_enterprise_gb: 500
+  max_spice_rows_per_dataset: 500000000  # 500M rows
+
+  # Dataset limits
+  max_columns_per_dataset: 2000
+  max_calculated_fields_per_dataset: 500
+  max_joined_tables_per_dataset: 32
+  max_filters_per_analysis: 20
+  max_visuals_per_sheet: 30
+  max_sheets_per_analysis: 20
+  max_parameters_per_analysis: 100
+
+  # API limits
+  api_rate_limit: "Varies per operation, typically 20-100 TPS"
+
+  # Dashboard limits
+  max_visuals_per_dashboard: "30 per sheet, 20 sheets = 600 total"
+  max_datasets_per_dashboard: 20
+  max_email_report_recipients: 500
+
+# -- 5. Editions --------------------------------------------------------------
+editions:
+  standard:
+    price_per_author_month: "$9"
+    price_per_reader_session: "$0.30"
+    reader_max_month: "$5"
+    spice_included_gb: 10
+    spice_extra_gb_price: "$0.25"
+    features:
+      - "SPICE in-memory engine"
+      - "AutoGraph (automatic visual selection)"
+      - "Calculated fields"
+      - "Conditional formatting"
+      - "Email reports"
+      - "Data alerts"
+    missing_features:
+      - "Row-level security"
+      - "Column-level security"
+      - "VPC connectivity"
+      - "Active Directory integration"
+      - "Encrypted SPICE"
+
+  enterprise:
+    price_per_author_month: "$18"
+    price_per_reader_session: "$0.30"
+    reader_max_month: "$5"
+    spice_included_gb: 10
+    spice_extra_gb_price: "$0.38"
+    features:
+      - "All Standard features"
+      - "Row-level security"
+      - "Column-level security"
+      - "VPC connectivity (private data sources)"
+      - "Active Directory / SAML / IAM federation"
+      - "Encrypted SPICE (SSE at rest)"
+      - "ML Insights (anomaly detection, forecasting)"
+      - "API access for embedding"
+      - "Hourly SPICE refresh"
+      - "Theme customization"
+      - "Paginated reports (PDFs)"
+
+  prerequisite: >
+    QuickSight must be set up in your AWS account before Terraform can create
+    any resources. Use the console (QuickSight → Sign up for QuickSight) or
+    call create_account_subscription via API. This is a one-time per-account step.
+
+# -- 6. Data Sources ----------------------------------------------------------
+data_sources:
+  description: >
+    A data source is a connection definition to an external data store.
+    QuickSight supports many source types; our pipeline engine supports
+    the four most common: Athena, S3, Redshift, and Aurora.
+
+  supported_types:
+    ATHENA:
+      description: "Query data in S3 via Athena SQL engine + Glue Data Catalog"
+      terraform_parameters_block: "athena { work_group = 'primary' }"
+      requires: "Athena workgroup, Glue catalog tables, S3 data"
+      pipeline_peer_types: ["athena", "glue_data_catalog"]
+      note: "Most common QuickSight data source in our pipelines"
+
+    S3:
+      description: "Read data directly from S3 via manifest file"
+      terraform_parameters_block: "s3 { manifest_file_location { bucket = '...', key = '...' } }"
+      requires: "S3 bucket with data files and a manifest.json"
+      pipeline_peer_types: ["s3"]
+      manifest_format: |
+        {
+          "fileLocations": [
+            {"URIs": ["s3://bucket/path/data.csv"]},
+            {"URIPrefixes": ["s3://bucket/prefix/"]}
+          ],
+          "globalUploadSettings": {
+            "format": "CSV",
+            "delimiter": ",",
+            "textqualifier": "\"",
+            "containsHeader": "true"
+          }
+        }
+
+    REDSHIFT:
+      description: "Connect to Amazon Redshift cluster"
+      terraform_parameters_block: "redshift { cluster_id = '...', database = 'dev' }"
+      requires: "Redshift cluster, database credentials"
+      pipeline_peer_types: ["redshift"]
+      authentication:
+        - "Database credentials (stored in QuickSight)"
+        - "IAM-based temporary credentials"
+
+    AURORA_POSTGRESQL:
+      description: "Connect to Aurora PostgreSQL cluster"
+      terraform_parameters_block: "rds_parameters { instance_id = '...', database = 'mydb' }"
+      requires: "Aurora cluster, database credentials"
+      pipeline_peer_types: ["aurora"]
+      authentication:
+        - "Database credentials"
+
+    AURORA:
+      description: "Connect to Aurora MySQL cluster"
+      terraform_parameters_block: "rds_parameters { instance_id = '...', database = 'mydb' }"
+      pipeline_peer_types: ["aurora"]
+
+  additional_types_not_in_renderer:
+    - "MYSQL"
+    - "POSTGRESQL"
+    - "MARIADB"
+    - "SQLSERVER"
+    - "ORACLE"
+    - "PRESTO"
+    - "SPARK"
+    - "SNOWFLAKE"
+    - "DATABRICKS"
+    - "TIMESTREAM"
+    - "TWITTER"
+    - "JIRA"
+    - "SALESFORCE"
+    - "SERVICENOW"
+
+  renderer_auto_detection: >
+    The renderer walks integrations_as_target to find the first recognized
+    peer type, then sets the data source type accordingly using the
+    _QS_SOURCE_TYPE map: athena->ATHENA, glue_data_catalog->ATHENA, s3->S3,
+    redshift->REDSHIFT, aurora->AURORA_POSTGRESQL.
+
+  ssl_properties:
+    terraform_block: "ssl_properties { disable_ssl = false }"
+    note: "SSL is always enabled by default in our renderer"
+
+# -- 7. Datasets ---------------------------------------------------------------
+datasets:
+  description: >
+    A dataset is a prepared view of data from one or more data sources.
+    Datasets define which tables/columns to use, joins between tables,
+    calculated fields, and the query mode (SPICE or DIRECT_QUERY).
+
+  import_modes:
+    SPICE:
+      description: "Import data into SPICE in-memory engine for fast queries"
+      refresh: "Scheduled or on-demand (hourly minimum in Enterprise)"
+      capacity: "10 GB per user included, expandable"
+      max_rows: "500 million per dataset"
+      best_for: "Dashboards used frequently by many users"
+    DIRECT_QUERY:
+      description: "Query the data source live for every visual interaction"
+      refresh: "Real-time (every click queries the source)"
+      best_for: "Real-time data, very large datasets that exceed SPICE limits"
+      limitations:
+        - "Slower than SPICE (depends on source performance)"
+        - "Puts load on the source database"
+        - "Not all visual types supported"
+
+  physical_table_map:
+    description: >
+      Maps table IDs to physical data source tables. Each entry specifies
+      the data source ID and either a SQL query or table/schema reference.
+    types:
+      RelationalTable: "Direct table reference (schema + table name)"
+      CustomSql: "Custom SQL query"
+      S3Source: "S3 data with upload settings"
+
+  logical_table_map:
+    description: >
+      Transforms applied to physical tables: joins, renames, calculated
+      fields, type casts, geo column tags, etc.
+    operations:
+      - "JoinInstruction — join two tables"
+      - "RenameColumnOperation"
+      - "CreateColumnsOperation — calculated fields"
+      - "CastColumnTypeOperation — type conversions"
+      - "TagColumnOperation — geographic roles"
+      - "FilterOperation — row-level filters"
+      - "ProjectOperation — column selection"
+
+  calculated_fields:
+    description: "Computed columns using QuickSight expression syntax"
+    functions:
+      aggregation: ["sum", "avg", "min", "max", "count", "countIf", "distinct_count"]
+      string: ["concat", "substring", "trim", "strlen", "toLower", "toUpper", "replace"]
+      date: ["extract", "addDateTime", "dateDiff", "truncDate", "epochDate"]
+      conditional: ["ifelse", "coalesce", "nullIf", "case"]
+      math: ["ceil", "floor", "round", "log", "sqrt", "abs", "mod"]
+    max_per_dataset: 500
+
+  joins:
+    max_tables: 32
+    join_types: ["INNER", "LEFT", "RIGHT", "FULL"]
+    note: "Joins are defined in LogicalTableMap using JoinInstruction"
+
+# -- 8. Analyses ---------------------------------------------------------------
+analyses:
+  description: >
+    An analysis is the authoring workspace where you build visualizations.
+    Analyses can have multiple sheets (tabs), each with up to 30 visuals.
+
+  visual_types:
+    - "Bar chart (horizontal/vertical, stacked/grouped)"
+    - "Line chart"
+    - "Scatter plot"
+    - "Pie chart / Donut chart"
+    - "Pivot table"
+    - "Table"
+    - "KPI"
+    - "Gauge"
+    - "Tree map"
+    - "Heat map"
+    - "Histogram"
+    - "Box plot"
+    - "Waterfall chart"
+    - "Funnel chart"
+    - "Sankey diagram"
+    - "Combo chart (bar + line)"
+    - "Geospatial map"
+    - "Filled map"
+    - "Word cloud"
+    - "Insight (ML-generated narrative)"
+
+  parameters:
+    types: ["String", "Integer", "Decimal", "DateTime"]
+    max_per_analysis: 100
+    use_cases:
+      - "Dynamic filters"
+      - "URL actions (drill-through)"
+      - "Conditional formatting"
+
+  filters:
+    max_per_analysis: 20
+    types:
+      - "Category (string match)"
+      - "Numeric range"
+      - "Date range (relative or absolute)"
+      - "Top/bottom N"
+
+  sheets:
+    max_per_analysis: 20
+    visuals_per_sheet: 30
+    layouts: ["Tiled (auto-arrange)", "Free-form (manual positioning)"]
+
+# -- 9. Dashboards --------------------------------------------------------------
+dashboards:
+  description: >
+    A dashboard is a published, read-only version of an analysis. Dashboards
+    can be shared with readers, embedded in applications, and scheduled for
+    email delivery.
+
+  publishing:
+    from_analysis: "Publish an analysis as a dashboard"
+    versioning: "Each publish creates a new version (can roll back)"
+    from_template: "Create dashboard from a reusable template"
+
+  sharing:
+    with_quicksight_users: "Share via QuickSight user/group permissions"
+    with_iam_users: "Share via IAM identity federation"
+    via_email: "Schedule automated email reports (PDF/CSV)"
+    via_embedding: "Embed in web applications"
+
+  email_reports:
+    formats: ["PDF", "CSV"]
+    schedule: "Daily, weekly, monthly, or custom cron"
+    max_recipients: 500
+    enterprise_only: false  # available in Standard too
+
+  embedding:
+    description: >
+      Embed QuickSight dashboards in external web applications with
+      full interactivity.
+    methods:
+      authenticated: "User authenticates via IAM/SAML, then gets embed URL"
+      anonymous: "No login required (Enterprise only, pay per session)"
+    terraform: "Not handled by our renderer — use API"
+    boto3_ops:
+      - "get_dashboard_embed_url (authenticated)"
+      - "generate_embed_url_for_anonymous_user (anonymous, Enterprise)"
+
+# -- 10. SPICE -----------------------------------------------------------------
+spice:
+  description: >
+    Super-fast, Parallel, In-memory Calculation Engine. QuickSight's
+    columnar in-memory store for fast dashboard queries.
+
+  capacity:
+    included_per_user_gb: 10
+    additional_standard_price: "$0.25/GB/month"
+    additional_enterprise_price: "$0.38/GB/month"
+    purchasable_in: "1 GB increments"
+    shared_across: "All datasets in the account"
+
+  refresh:
+    manual: "Trigger via console or API (create_ingestion)"
+    scheduled:
+      standard: "Daily, weekly, or monthly"
+      enterprise: "Hourly minimum"
+    incremental:
+      description: "Only ingest new/modified data (Enterprise)"
+      requirement: "Dataset must have a date column for change detection"
+    full:
+      description: "Re-ingest all data"
+
+  limits:
+    max_columns: 2000
+    max_rows: "500 million"
+    max_dataset_size: "500 GB"
+    max_row_size: "2 MB"
+    max_field_size: "131072 characters"
+
+  data_types:
+    - "STRING"
+    - "INTEGER"
+    - "DECIMAL"
+    - "DATETIME"
+    - "BIT (boolean)"
+
+  encryption:
+    at_rest: "Enterprise only — SSE with AWS-managed keys"
+    enterprise_cmk: "Customer-managed KMS key (Enterprise)"
+
+# -- 11. Permissions (QuickSight-level) ----------------------------------------
+permissions:
+  description: >
+    QuickSight has its own permission system separate from IAM. Resources
+    (data sources, datasets, analyses, dashboards) have permission lists
+    that grant specific QuickSight actions to QuickSight principals.
+
+  principal_format: "arn:aws:quicksight:REGION:ACCOUNT:user/NAMESPACE/USERNAME"
+  group_format: "arn:aws:quicksight:REGION:ACCOUNT:group/NAMESPACE/GROUPNAME"
+
+  data_source_actions:
+    - "quicksight:DescribeDataSource"
+    - "quicksight:DescribeDataSourcePermissions"
+    - "quicksight:PassDataSource"
+    - "quicksight:UpdateDataSource"
+    - "quicksight:DeleteDataSource"
+    - "quicksight:UpdateDataSourcePermissions"
+
+  dataset_actions:
+    - "quicksight:DescribeDataSet"
+    - "quicksight:DescribeDataSetPermissions"
+    - "quicksight:PassDataSet"
+    - "quicksight:UpdateDataSet"
+    - "quicksight:DeleteDataSet"
+    - "quicksight:UpdateDataSetPermissions"
+    - "quicksight:CreateIngestion"  # SPICE refresh
+    - "quicksight:DescribeIngestion"
+
+  dashboard_actions:
+    - "quicksight:DescribeDashboard"
+    - "quicksight:DescribeDashboardPermissions"
+    - "quicksight:QueryDashboard"   # view dashboard (for readers)
+    - "quicksight:UpdateDashboard"
+    - "quicksight:DeleteDashboard"
+    - "quicksight:UpdateDashboardPermissions"
+    - "quicksight:UpdateDashboardPublishedVersion"
+
+  analysis_actions:
+    - "quicksight:DescribeAnalysis"
+    - "quicksight:DescribeAnalysisPermissions"
+    - "quicksight:QueryAnalysis"
+    - "quicksight:UpdateAnalysis"
+    - "quicksight:DeleteAnalysis"
+    - "quicksight:UpdateAnalysisPermissions"
+
+# -- 12. Users and Groups -------------------------------------------------------
+users_and_groups:
+  description: >
+    QuickSight manages its own user directory. Users can be federated from
+    IAM, Active Directory (Enterprise), or SAML providers.
+
+  user_roles:
+    ADMIN: "Full access to all QuickSight features and management"
+    AUTHOR: "Can create/edit analyses, dashboards, datasets"
+    READER: "Can view dashboards only (pay-per-session)"
+
+  identity_types:
+    IAM: "Federated from IAM users/roles"
+    QUICKSIGHT: "Native QuickSight user (email/password)"
+    ACTIVE_DIRECTORY: "Enterprise only, via AD Connector"
+    SAML: "Enterprise only, via SAML 2.0 identity provider"
+
+  namespaces:
+    description: "Logical isolation of users within an account"
+    default: "default"
+    multi_tenancy: "Use namespaces for multi-tenant SaaS applications"
+
+  terraform_resources:
+    - "aws_quicksight_user"
+    - "aws_quicksight_group"
+    - "aws_quicksight_group_membership"
+
+# -- 13. Embedding ---------------------------------------------------------------
+embedding:
+  description: >
+    Embed QuickSight dashboards, visuals, or the full console in web
+    applications. Two main modes: authenticated and anonymous.
+
+  authenticated_embedding:
+    description: "User authenticates via IAM/SAML, then loads embedded dashboard"
+    flow:
+      - "1. User authenticates to your app"
+      - "2. App backend assumes IAM role, calls get_dashboard_embed_url"
+      - "3. Backend returns embed URL to frontend"
+      - "4. Frontend loads URL in iframe"
+    session_lifetime: "15 minutes to 10 hours"
+    api: "get_dashboard_embed_url"
+    identity_types: ["IAM", "QUICKSIGHT"]
+
+  anonymous_embedding:
+    description: "No login required — pay per session"
+    edition: "Enterprise only"
+    flow:
+      - "1. App backend calls generate_embed_url_for_anonymous_user"
+      - "2. Backend returns URL to frontend"
+      - "3. Frontend loads URL in iframe"
+    cost: "$0.30 per 30-min session (capped at $5/reader/month)"
+    api: "generate_embed_url_for_anonymous_user"
+
+  embedding_sdk:
+    description: "JavaScript SDK for embedded QuickSight"
+    npm_package: "amazon-quicksight-embedding-sdk"
+    features:
+      - "Parameter passing"
+      - "Event handling (visual selected, filter changed)"
+      - "Resize handling"
+      - "Theme customization"
+
+# -- 14. Encryption ---------------------------------------------------------------
+encryption:
+  in_transit:
+    description: "All QuickSight communications use HTTPS/TLS"
+    enforced: true
+
+  at_rest:
+    spice:
+      standard: "AWS-managed encryption"
+      enterprise: "Optional customer-managed KMS key"
+    connections:
+      description: "Database credentials encrypted at rest in QuickSight"
+
+  data_source_ssl:
+    description: "SSL/TLS for database connections"
+    terraform_attribute: "ssl_properties { disable_ssl = false }"
+    default: "SSL enabled (our renderer always sets this)"
+
+# -- 15. IAM -----------------------------------------------------------------
+iam:
+  # Service principal for trust policy
+  service_principal: "quicksight.amazonaws.com"
+
+  # ARN formats
+  arn_formats:
+    data_source: "arn:aws:quicksight:REGION:ACCOUNT:datasource/DATA_SOURCE_ID"
+    dataset: "arn:aws:quicksight:REGION:ACCOUNT:dataset/DATASET_ID"
+    analysis: "arn:aws:quicksight:REGION:ACCOUNT:analysis/ANALYSIS_ID"
+    dashboard: "arn:aws:quicksight:REGION:ACCOUNT:dashboard/DASHBOARD_ID"
+    template: "arn:aws:quicksight:REGION:ACCOUNT:template/TEMPLATE_ID"
+    user: "arn:aws:quicksight:REGION:ACCOUNT:user/NAMESPACE/USERNAME"
+    group: "arn:aws:quicksight:REGION:ACCOUNT:group/NAMESPACE/GROUPNAME"
+
+  # Permissions always required by QuickSight IAM role
+  always:
+    - "quicksight:CreateDataSource"
+    - "quicksight:DescribeDataSource"
+    - "quicksight:UpdateDataSource"
+    - "quicksight:DeleteDataSource"
+    - "quicksight:CreateDataSet"
+    - "quicksight:DescribeDataSet"
+    - "quicksight:UpdateDataSet"
+    - "quicksight:DeleteDataSet"
+    - "quicksight:PassDataSet"
+    - "quicksight:PassDataSource"
+
+  # Complete IAM action catalog
+  actions:
+    account_management:
+      - "quicksight:CreateAccountSubscription"
+      - "quicksight:DescribeAccountSubscription"
+      - "quicksight:DescribeAccountSettings"
+      - "quicksight:UpdateAccountSettings"
+      - "quicksight:GetDashboardEmbedUrl"
+      - "quicksight:GenerateEmbedUrlForAnonymousUser"
+      - "quicksight:GenerateEmbedUrlForRegisteredUser"
+    data_source_management:
+      - "quicksight:CreateDataSource"
+      - "quicksight:UpdateDataSource"
+      - "quicksight:DeleteDataSource"
+      - "quicksight:DescribeDataSource"
+      - "quicksight:DescribeDataSourcePermissions"
+      - "quicksight:UpdateDataSourcePermissions"
+      - "quicksight:PassDataSource"
+      - "quicksight:ListDataSources"
+    dataset_management:
+      - "quicksight:CreateDataSet"
+      - "quicksight:UpdateDataSet"
+      - "quicksight:DeleteDataSet"
+      - "quicksight:DescribeDataSet"
+      - "quicksight:DescribeDataSetPermissions"
+      - "quicksight:UpdateDataSetPermissions"
+      - "quicksight:PassDataSet"
+      - "quicksight:ListDataSets"
+      - "quicksight:CreateIngestion"
+      - "quicksight:DescribeIngestion"
+      - "quicksight:ListIngestions"
+      - "quicksight:CancelIngestion"
+    analysis_management:
+      - "quicksight:CreateAnalysis"
+      - "quicksight:UpdateAnalysis"
+      - "quicksight:DeleteAnalysis"
+      - "quicksight:DescribeAnalysis"
+      - "quicksight:DescribeAnalysisPermissions"
+      - "quicksight:UpdateAnalysisPermissions"
+      - "quicksight:ListAnalyses"
+    dashboard_management:
+      - "quicksight:CreateDashboard"
+      - "quicksight:UpdateDashboard"
+      - "quicksight:DeleteDashboard"
+      - "quicksight:DescribeDashboard"
+      - "quicksight:DescribeDashboardPermissions"
+      - "quicksight:UpdateDashboardPermissions"
+      - "quicksight:UpdateDashboardPublishedVersion"
+      - "quicksight:ListDashboards"
+      - "quicksight:QueryDashboard"
+    template_management:
+      - "quicksight:CreateTemplate"
+      - "quicksight:UpdateTemplate"
+      - "quicksight:DeleteTemplate"
+      - "quicksight:DescribeTemplate"
+      - "quicksight:ListTemplates"
+    user_management:
+      - "quicksight:RegisterUser"
+      - "quicksight:DeleteUser"
+      - "quicksight:DescribeUser"
+      - "quicksight:ListUsers"
+      - "quicksight:CreateGroup"
+      - "quicksight:DeleteGroup"
+      - "quicksight:DescribeGroup"
+      - "quicksight:ListGroups"
+      - "quicksight:CreateGroupMembership"
+      - "quicksight:DeleteGroupMembership"
+      - "quicksight:ListGroupMemberships"
+    namespace_management:
+      - "quicksight:CreateNamespace"
+      - "quicksight:DeleteNamespace"
+      - "quicksight:DescribeNamespace"
+      - "quicksight:ListNamespaces"
+    tagging:
+      - "quicksight:TagResource"
+      - "quicksight:UntagResource"
+      - "quicksight:ListTagsForResource"
+
+  # Integration graph rules (used by spec_builder)
+  as_target_of:
+    athena:
+      - "athena:BatchGetQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:GetQueryResultsStream"
+      - "athena:ListQueryExecutions"
+      - "athena:StartQueryExecution"
+      - "athena:StopQueryExecution"
+      - "athena:GetWorkGroup"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+      - "s3:PutObject"
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+    redshift:
+      - "redshift:GetClusterCredentials"
+      - "redshift:DescribeClusters"
+      - "redshift:DescribeClusterSubnetGroups"
+    aurora:
+      - "rds:DescribeDBInstances"
+      - "rds:DescribeDBClusters"
+      - "secretsmanager:GetSecretValue"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryResults"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+  as_source_to: {}  # QuickSight is a terminal/visualization service — no downstream targets
+
+# -- 16. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to: {}    # QuickSight doesn't auto-wire env vars downstream
+  as_target_of: {}    # QuickSight doesn't receive env vars from sources
+
+# -- 17. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - redshift
+  - aurora
+
+# -- 18. Integration Wiring Ownership ----------------------------------------
+integrations:
+  athena_to_quicksight:
+    description: "QuickSight creates an ATHENA data source referencing the workgroup"
+    owned_by: "quicksight"
+    auto_behavior: >
+      Renderer detects athena peer in integrations_as_target, sets ds_type to
+      ATHENA, and references aws_athena_workgroup.LABEL.name in the parameters block.
+
+  s3_to_quicksight:
+    description: "QuickSight creates an S3 data source with manifest file reference"
+    owned_by: "quicksight"
+    auto_behavior: >
+      Renderer sets ds_type to S3, references aws_s3_bucket.LABEL.id in the
+      manifest_file_location block.
+
+  glue_data_catalog_to_quicksight:
+    description: "QuickSight queries Glue tables via Athena (ATHENA data source type)"
+    owned_by: "quicksight"
+    auto_behavior: >
+      Renderer detects glue_data_catalog peer, sets ds_type to ATHENA
+      (QuickSight queries Glue catalog via Athena).
+
+  redshift_to_quicksight:
+    description: "QuickSight creates a REDSHIFT data source connecting to the cluster"
+    owned_by: "quicksight"
+    requires_vpc: true
+    auto_behavior: >
+      Renderer sets ds_type to REDSHIFT, references
+      aws_redshift_cluster.LABEL.id in the parameters block.
+
+  aurora_to_quicksight:
+    description: "QuickSight creates an AURORA_POSTGRESQL data source"
+    owned_by: "quicksight"
+    requires_vpc: true
+    auto_behavior: >
+      Renderer sets ds_type to AURORA_POSTGRESQL, references
+      aws_rds_cluster.LABEL.endpoint in the rds_parameters block.
+
+# -- 19. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_quicksight_data_source"
+      description: "Data source connection definition"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Service role for QuickSight data access"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy with data access permissions"
+      always_created: true
+
+  conditional: []  # no conditional resources in current renderer
+
+  not_created_but_available:
+    - resource: "aws_quicksight_data_set"
+      description: "Dataset definition (physical/logical table map, import mode)"
+    - resource: "aws_quicksight_analysis"
+      description: "Analysis definition (sheets, visuals, parameters)"
+    - resource: "aws_quicksight_dashboard"
+      description: "Published dashboard"
+    - resource: "aws_quicksight_template"
+      description: "Reusable template from analysis"
+    - resource: "aws_quicksight_folder"
+      description: "Organizational folder for QuickSight assets"
+    - resource: "aws_quicksight_user"
+      description: "QuickSight user registration"
+    - resource: "aws_quicksight_group"
+      description: "QuickSight group"
+    - resource: "aws_quicksight_group_membership"
+      description: "Group membership assignment"
+    - resource: "aws_quicksight_namespace"
+      description: "Namespace for multi-tenant isolation"
+    - resource: "aws_quicksight_account_subscription"
+      description: "QuickSight account setup"
+    - resource: "aws_quicksight_vpc_connection"
+      description: "VPC connection for private data sources (Enterprise)"
+    - resource: "aws_quicksight_refresh_schedule"
+      description: "SPICE refresh schedule for a dataset"
+
+# -- 20. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "quicksight"
+  note: "All QuickSight API calls require AwsAccountId parameter"
+
+  account_operations:
+    create_account_subscription:
+      description: "Set up QuickSight in the AWS account (one-time)"
+      parameters:
+        Edition: {type: string, required: true, description: "STANDARD or ENTERPRISE"}
+        AuthenticationMethod: {type: string, required: true, description: "IAM_AND_QUICKSIGHT or IAM_ONLY or ACTIVE_DIRECTORY"}
+        AwsAccountId: {type: string, required: true}
+        AccountName: {type: string, required: true}
+        NotificationEmail: {type: string, required: true}
+
+    describe_account_subscription:
+      description: "Check if QuickSight is set up in the account"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+      returns: ["AccountInfo.AccountSubscriptionStatus", "AccountInfo.Edition"]
+
+  data_source_operations:
+    create_data_source:
+      description: "Create a data source connection"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSourceId: {type: string, required: true}
+        Name: {type: string, required: true}
+        Type: {type: string, required: true, description: "ATHENA, S3, REDSHIFT, AURORA_POSTGRESQL, etc."}
+        DataSourceParameters: {type: object, required: true}
+        Credentials: {type: object}
+        Permissions: {type: list}
+        SslProperties: {type: object}
+        Tags: {type: list}
+
+    update_data_source:
+      description: "Update an existing data source"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSourceId: {type: string, required: true}
+        Name: {type: string, required: true}
+        DataSourceParameters: {type: object, required: true}
+        Credentials: {type: object}
+        SslProperties: {type: object}
+
+    describe_data_source:
+      description: "Get details and status of a data source"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSourceId: {type: string, required: true}
+      returns: ["DataSource.Status", "DataSource.Type", "DataSource.DataSourceParameters",
+                "DataSource.ErrorInfo", "DataSource.CreatedTime", "DataSource.LastUpdatedTime"]
+
+    delete_data_source:
+      description: "Delete a data source"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSourceId: {type: string, required: true}
+
+    list_data_sources:
+      description: "List all data sources"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        NextToken: {type: string}
+        MaxResults: {type: integer}
+
+  dataset_operations:
+    create_data_set:
+      description: "Create a dataset from one or more data sources"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSetId: {type: string, required: true}
+        Name: {type: string, required: true}
+        PhysicalTableMap: {type: object, required: true}
+        LogicalTableMap: {type: object}
+        ImportMode: {type: string, required: true, description: "SPICE or DIRECT_QUERY"}
+        Permissions: {type: list}
+        Tags: {type: list}
+
+    update_data_set:
+      description: "Update dataset definition"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSetId: {type: string, required: true}
+        Name: {type: string, required: true}
+        PhysicalTableMap: {type: object, required: true}
+        LogicalTableMap: {type: object}
+        ImportMode: {type: string, required: true}
+
+    describe_data_set:
+      description: "Get dataset definition"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSetId: {type: string, required: true}
+      returns: ["DataSet.ImportMode", "DataSet.PhysicalTableMap", "DataSet.LogicalTableMap",
+                "DataSet.ConsumedSpiceCapacityInBytes"]
+
+    delete_data_set:
+      description: "Delete a dataset"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSetId: {type: string, required: true}
+
+    list_data_sets:
+      description: "List all datasets"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        NextToken: {type: string}
+        MaxResults: {type: integer}
+
+    create_ingestion:
+      description: "Refresh SPICE dataset"
+      parameters:
+        DataSetId: {type: string, required: true}
+        IngestionId: {type: string, required: true}
+        AwsAccountId: {type: string, required: true}
+        IngestionType: {type: string, description: "INCREMENTAL_REFRESH or FULL_REFRESH"}
+
+    describe_ingestion:
+      description: "Check ingestion status"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DataSetId: {type: string, required: true}
+        IngestionId: {type: string, required: true}
+      returns: ["Ingestion.IngestionStatus", "Ingestion.ErrorInfo", "Ingestion.RowInfo",
+                "Ingestion.IngestionTimeInSeconds"]
+
+  dashboard_operations:
+    create_dashboard:
+      description: "Create a dashboard from analysis or template"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DashboardId: {type: string, required: true}
+        Name: {type: string, required: true}
+        SourceEntity: {type: object, required: true}
+        Permissions: {type: list}
+        Tags: {type: list}
+        VersionDescription: {type: string}
+
+    describe_dashboard:
+      description: "Get dashboard details"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DashboardId: {type: string, required: true}
+      returns: ["Dashboard.Name", "Dashboard.Version", "Dashboard.Status",
+                "Dashboard.DashboardId", "Dashboard.CreatedTime"]
+
+    list_dashboards:
+      description: "List all dashboards"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        NextToken: {type: string}
+        MaxResults: {type: integer}
+
+    get_dashboard_embed_url:
+      description: "Generate embed URL for authenticated user"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        DashboardId: {type: string, required: true}
+        IdentityType: {type: string, required: true, description: "IAM, QUICKSIGHT, or ANONYMOUS"}
+        SessionLifetimeInMinutes: {type: integer}
+      returns: ["EmbedUrl"]
+
+    generate_embed_url_for_anonymous_user:
+      description: "Generate embed URL for anonymous access (Enterprise only)"
+      parameters:
+        AwsAccountId: {type: string, required: true}
+        Namespace: {type: string, required: true}
+        AuthorizedResourceArns: {type: list, required: true}
+        ExperienceConfiguration: {type: object, required: true}
+        SessionLifetimeInMinutes: {type: integer}
+      returns: ["EmbedUrl"]
+
+# -- 21. Runtime Diagnostics ---------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AccessDeniedException.*QuickSight"
+    category: PERMISSION
+    cause: "QuickSight user or service role lacks permissions"
+    fix_type: manual
+    resolution: "Check QuickSight console -> Manage QuickSight -> Security & permissions"
+
+  - pattern: "ResourceNotFoundException.*data.source"
+    category: RESOURCE_NOT_FOUND
+    cause: "Data source does not exist or was deleted"
+    fix_type: wait_or_create
+    resolution: "Check if terraform apply completed. Re-run terraform apply."
+
+  - pattern: "QuickSight.*not.*subscribed|not.*activated"
+    category: PREREQUISITE
+    cause: "QuickSight account not set up in this AWS account"
+    fix_type: manual
+    resolution: >
+      Set up QuickSight: console -> QuickSight -> Sign up for QuickSight.
+      Or use API: create_account_subscription(). This is a one-time per-account step.
+
+  - pattern: "InvalidParameterValueException.*DataSourceParameters"
+    category: CONFIG
+    cause: "Data source connection parameters are incorrect"
+    fix_type: config_change
+    resolution: "Verify connection parameters (workgroup name, bucket, cluster ID, etc.)"
+
+  - pattern: "ConflictException.*already exists"
+    category: ALREADY_EXISTS
+    cause: "Resource with this ID already exists"
+    fix_type: none
+    resolution: "Resource already created. Import to Terraform state if needed."
+
+  - pattern: "ThrottlingException"
+    category: THROTTLE
+    cause: "QuickSight API rate limit exceeded"
+    fix_type: retry
+    resolution: "Implement exponential backoff. Batch operations where possible."
+
+  - pattern: "SPICE.*capacity.*exceeded|InsufficientCapacity"
+    category: QUOTA
+    cause: "SPICE capacity exhausted"
+    fix_type: quota_request
+    resolution: "Purchase additional SPICE capacity in QuickSight console settings."
+
+  - pattern: "DataSourceConnection.*Failed|Connection.*refused"
+    category: CONNECTIVITY
+    cause: "Cannot connect to the underlying data source"
+    fix_type: check_connectivity
+    resolution: >
+      For Redshift/Aurora: check security group rules, VPC endpoint.
+      For Athena: check workgroup exists and IAM permissions.
+      For S3: check bucket policy and IAM permissions.
+
+  - pattern: "IngestionFailed|INGESTION_FAILED"
+    category: RUNTIME
+    cause: "SPICE data ingestion failed"
+    fix_type: check_data
+    resolution: >
+      Check describe_ingestion for ErrorInfo. Common causes:
+      - Data format mismatch (CSV encoding, schema changes)
+      - Source data unavailable
+      - Insufficient SPICE capacity
+
+# -- 22. Tags ------------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  supported_on:
+    - "Data sources"
+    - "Datasets"
+    - "Analyses"
+    - "Dashboards"
+    - "Templates"
+    - "Folders"
+
+# -- 23. Code Update (Developer Agent) -----------------------------------------
+code_update:
+  method: api_config
+  boto3_client: quicksight
+  description: >
+    QuickSight data sources via update_data_source(). Datasets via update_data_set().
+    All calls require AwsAccountId (from sts.get_caller_identity()['Account']).
+  config_update:
+    client: quicksight
+    operation: update_data_source
+    id_param: DataSourceId
+    note: "AwsAccountId required — get via sts.get_caller_identity()['Account']"
+  code_update_steps:
+    - "account_id = sts.get_caller_identity()['Account']"
+    - "qs.update_data_source(AwsAccountId=account_id, DataSourceId=resource_name, Name=resource_name, DataSourceParameters={...})"
+    - "Poll qs.describe_data_source(AwsAccountId=account_id, DataSourceId=resource_name) until Status is CREATION_SUCCESSFUL or UPDATE_SUCCESSFUL"
+  discovery_ops:
+    - op: list_data_sources
+      id_param: AwsAccountId
+      returns: ["DataSources[].DataSourceId", "DataSources[].Name", "DataSources[].Type", "DataSources[].Status"]
+    - op: describe_data_source
+      id_params: [AwsAccountId, DataSourceId]
+      returns: ["DataSource.Status", "DataSource.DataSourceParameters", "DataSource.ErrorInfo"]
+    - op: list_data_sets
+      id_param: AwsAccountId
+      returns: ["DataSetSummaries[].DataSetId", "DataSetSummaries[].Name", "DataSetSummaries[].ImportMode"]
+    - op: list_dashboards
+      id_param: AwsAccountId
+      returns: ["DashboardSummaryList[].DashboardId", "DashboardSummaryList[].Name", "DashboardSummaryList[].Status"]
+
+# -- 24. Logging ---------------------------------------------------------------
+logging:
+  cloudwatch_log_groups: {}  # QuickSight does not write to CloudWatch Log Groups
+
+  pipeline_monitoring:
+    method: "not_monitored"
+    note: >
+      QuickSight is a visualization/BI service — it is not an execution service
+      in the pipeline. It falls under the "metadata-only / no monitoring"
+      category in the pipeline run log aggregator.
+
+  cloudwatch_metrics:
+    namespace: "AWS/QuickSight"
+    note: >
+      Limited CloudWatch metrics. SPICE capacity and dataset refresh metrics
+      available via QuickSight admin console rather than CloudWatch.

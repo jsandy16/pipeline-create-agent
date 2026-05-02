@@ -1,0 +1,140 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: case/
+  source: src_bucket
+  suffix: null
+  target: case_processor
+- event: s3:ObjectCreated:*
+  prefix: party/
+  source: src_bucket
+  suffix: null
+  target: party_processor
+- event: s3:ObjectCreated:*
+  prefix: victim/
+  source: src_bucket
+  suffix: null
+  target: victim_processor
+- event: s3:ObjectCreated:*
+  prefix: collision/
+  source: src_bucket
+  suffix: null
+  target: collision_processor
+- event: put_object
+  prefix: null
+  source: case_processor
+  suffix: null
+  target: tgt_bucket
+- event: put_object
+  prefix: null
+  source: party_processor
+  suffix: null
+  target: tgt_bucket
+- event: put_object
+  prefix: null
+  source: victim_processor
+  suffix: null
+  target: tgt_bucket
+- event: put_object
+  prefix: null
+  source: collision_processor
+  suffix: null
+  target: tgt_bucket
+pipeline_name: collision_data_processing_pipeline
+region: us-east-1
+services:
+- config: {}
+  name: src_bucket
+  type: s3
+- config: {}
+  name: tgt_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: case_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: party_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: victim_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: collision_processor
+  type: lambda
+- config:
+    database_name: collision_analysis
+  name: collision_analysis_database
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis_staging
+  name: collision_analysis_staging_database
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis
+    s3_location: s3://tgt_bucket/case/
+    table_name: case
+  name: case_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis
+    s3_location: s3://tgt_bucket/party/
+    table_name: party
+  name: party_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis
+    s3_location: s3://tgt_bucket/victim/
+    table_name: victim
+  name: victim_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis
+    s3_location: s3://tgt_bucket/collision/
+    table_name: collision
+  name: collision_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis_staging
+    s3_location: s3://src_bucket/case/
+    table_name: case
+  name: case_staging_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis_staging
+    s3_location: s3://src_bucket/party/
+    table_name: party
+  name: party_staging_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis_staging
+    s3_location: s3://src_bucket/victim/
+    table_name: victim
+  name: victim_staging_table
+  type: glue_data_catalog
+- config:
+    database_name: collision_analysis_staging
+    s3_location: s3://src_bucket/collision/
+    table_name: collision
+  name: collision_staging_table
+  type: glue_data_catalog
+- config:
+    workgroup_name: collision_analysis_workgroup
+  name: athena_workgroup
+  type: athena

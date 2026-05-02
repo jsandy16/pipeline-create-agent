@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Proto</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="app">
+
+<header>
+  <div class="logo">&#9672;</div>
+  <div>
+    <div class="hdr-title">Proto</div>
+    <div class="hdr-sub">Spec-driven Terraform infrastructure</div>
+  </div>
+</header>
+
+<div class="body">
+  <!-- SIDEBAR -->
+  <div class="sidebar" id="sidebar">
+    <button class="sidebar-toggle" id="sidebarToggle" title="Collapse/Expand sidebar">&#9664;</button>
+    <div class="input-tabs" id="inputTabs">
+      <button class="input-tab active" id="tabUpload">&#11014; Upload</button>
+      <button class="input-tab" id="tabArchitect">&#9999;&#65039; Architect</button>
+    </div>
+
+    <!-- UPLOAD SECTION (existing content) -->
+    <div class="upload-section" id="uploadSection">
+      <div>
+        <div class="sec-label">Architecture Diagram</div>
+        <div class="drop-zone" id="dropZone">
+          <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.gif,.webp"/>
+          <div class="dz-icon">&#128444;&#65039;</div>
+          <h3>Drop diagram here</h3>
+          <p>or click to browse</p>
+          <div class="fmt-row">
+            <span class="badge">PNG</span><span class="badge">JPEG</span>
+            <span class="badge">WebP</span><span class="badge">GIF</span>
+            <span class="badge">max 5 MB</span>
+          </div>
+        </div>
+        <div class="file-chip" id="fileChip">
+          <img id="fcThumb" src="" alt=""/>
+          <div class="fc-meta">
+            <div class="fc-name" id="fcName"></div>
+            <div class="fc-size" id="fcSize"></div>
+          </div>
+          <button class="fc-rm" id="fcRm">&#10005;</button>
+        </div>
+      </div>
+      <input id="hintInput" type="hidden" value=""/>
+      <button class="run-btn" id="runBtn" disabled>
+        <div class="spin" id="spin"></div>
+        <span id="runLabel">Generate Terraform</span>
+      </button>
+    </div>
+
+    <!-- ARCHITECT SECTION -->
+    <div class="arch-sidebar" id="archSection">
+      <div class="arch-pipe-field">
+        <label>Pipeline Name</label>
+        <input class="arch-pipe-input" id="archPipeName" placeholder="my_pipeline" maxlength="64"/>
+      </div>
+      <input type="hidden" id="archHint" value=""/>
+      <div class="sec-label" style="margin-bottom:0">AWS Services — drag to canvas</div>
+      <input class="pal-search" id="palSearch" placeholder="Search services..."/>
+      <div class="pal-grid" id="palGrid"></div>
+      <button class="arch-run-btn" id="archRunBtn" disabled>
+        <span id="archRunLabel">Generate Terraform</span>
+      </button>
+    </div>
+
+    <button class="deploy-btn enabled" id="pipeBuilderBtn" style="border-color:var(--accent);color:var(--accent);opacity:1;cursor:pointer;background:var(--accent-glow)">Pipeline Builder Agent</button>
+
+    <!-- TERRAFORM / AWS SECTION (collapsible) -->
+    <div class="admin-sec" id="tfSec">
+      <div class="admin-sec-hdr" id="tfSecHdr">
+        <span class="admin-sec-title">Terraform / AWS</span>
+        <span class="admin-chevron" id="tfChevron">&#9654;</span>
+      </div>
+      <div class="admin-menu-rows" id="tfMenuRows">
+        <button class="cancel-btn" id="cancelBtn" style="margin:3px 0">Cancel</button>
+        <div class="result-card" id="resultCard">
+          <div class="rc-head" id="rcHead"></div>
+          <div class="rc-rows" id="rcRows"></div>
+        </div>
+        <button class="deploy-btn" id="planBtn" disabled style="margin:3px 0">Deploy to AWS: Plan</button>
+        <button class="apply-btn" id="applyBtn" disabled style="margin:3px 0">Deploy to AWS: Deploy</button>
+
+        <div id="autofixBanner" style="display:none; margin:8px 0; padding:14px 16px; border-radius:8px; background:var(--surface2); border:1px solid rgba(248,81,73,0.3); font-size:12px;">
+          <div style="font-weight:600; color:var(--red); margin-bottom:6px;" id="autofixTitle">Auto-Fix Available</div>
+          <div style="color:var(--muted-light); margin-bottom:4px;" id="autofixSummary"></div>
+          <div style="color:var(--text-secondary); margin-bottom:8px; font-family:var(--mono); font-size:11px; white-space:pre-wrap; background:var(--bg); padding:8px 10px; border-radius:6px; max-height:120px; overflow-y:auto; border:1px solid var(--border);" id="autofixDetails"></div>
+          <div style="color:var(--yellow); margin-bottom:8px; font-size:11px;" id="autofixUserAction"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="autofixConfirmBtn" style="padding:7px 16px; border-radius:var(--radius-sm); border:none; background:var(--green); color:#fff; font-weight:600; cursor:pointer; font-size:12px; font-family:var(--font);">Apply Fix</button>
+            <button id="autofixRejectBtn" style="padding:7px 16px; border-radius:var(--radius-sm); border:none; background:var(--surface3); color:var(--muted-light); cursor:pointer; font-size:12px; font-family:var(--font); border:1px solid var(--border-strong);">Dismiss</button>
+            <button id="autofixRegenerateBtn" style="display:none; padding:7px 16px; border-radius:var(--radius-sm); border:none; background:var(--red); color:#fff; font-weight:600; cursor:pointer; font-size:12px; font-family:var(--font);">Regenerate Pipeline</button>
+          </div>
+        </div>
+
+        <button class="dl-btn" id="dlPlanBtn" disabled style="margin:3px 0">Download Plan</button>
+        <button class="dl-btn" id="matrixBtn" disabled style="margin:3px 0">Download Matrix</button>
+        <button class="destroy-btn" id="destroyBtn" disabled style="margin:3px 0">Destroy Resources</button>
+        <button class="monitor-btn" id="monitorBtn" disabled style="margin:3px 0">Monitor Pipeline Run</button>
+        <label class="autofix-toggle" id="autofixToggle" style="display:none">
+          <input type="checkbox" id="autofixCheck">
+          <span class="autofix-label">Auto-fix errors (AI Inspector)</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- ADMIN SIDEBAR SECTION -->
+    <div class="admin-sec">
+      <div class="admin-sec-hdr" id="adminSecHdr">
+        <span class="admin-sec-title">&#9881; Admin</span>
+        <span class="admin-chevron" id="adminChevron">&#9654;</span>
+      </div>
+      <div class="admin-menu-rows" id="adminMenuRows">
+        <div class="admin-row" id="rowApiKey">
+          <span class="admin-row-icon">&#128273;</span>
+          <span class="admin-row-label">Configure API Key</span>
+          <span class="admin-row-badge" id="apiKeyBadge" style="display:none">Set</span>
+          <span class="admin-row-arrow">&#8250;</span>
+        </div>
+        <div class="admin-row" id="rowAwsKeys">
+          <span class="admin-row-icon">&#9729;&#65039;</span>
+          <span class="admin-row-label">Configure AWS Keys</span>
+          <span class="admin-row-badge" id="awsKeyBadge" style="display:none">Set</span>
+          <span class="admin-row-arrow">&#8250;</span>
+        </div>
+        <div class="admin-row disabled" id="rowDestroyAll">
+          <span class="admin-row-icon">&#128274;</span>
+          <span class="admin-row-label">Destroy ALL</span>
+          <span class="admin-row-badge warn">Disabled</span>
+        </div>
+        <div class="admin-row" id="rowHistory">
+          <span class="admin-row-icon">&#128203;</span>
+          <span class="admin-row-label">Historical Pipelines</span>
+          <span class="admin-row-arrow">&#8250;</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DESTROY MODAL -->
+  <div class="destroy-overlay" id="destroyOverlay">
+    <div class="destroy-modal">
+      <div class="destroy-modal-hdr">
+        <h2 id="destroyModalTitle">&#128465;&#65039; Destroy AWS Resources</h2>
+        <button class="modal-close" id="destroyClose">&#10005;</button>
+      </div>
+      <!-- Confirmation view -->
+      <div class="destroy-confirm-view" id="destroyConfirmView">
+        <div class="destroy-warn-icon">&#9888;&#65039;</div>
+        <div class="destroy-warn-title">This action is irreversible</div>
+        <div class="destroy-warn-body" id="destroyWarnBody">
+          All AWS resources created by this pipeline will be permanently deleted.<br/>
+          This includes buckets, functions, queues, roles, and all associated data.
+        </div>
+      </div>
+      <!-- Destroy log (shown after confirm) -->
+      <div class="destroy-log" id="destroyLog"></div>
+      <div class="destroy-footer">
+        <span class="plan-note" id="destroyNote">This will permanently delete all pipeline resources.</span>
+        <button class="modal-close" id="destroyCancelBtn" style="margin-right:4px">Cancel</button>
+        <button class="destroy-confirm-btn" id="destroyConfirmBtn">&#128465;&#65039; Yes, Destroy All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PIPELINE BUILDER AGENT MODAL -->
+  <div class="pb-overlay" id="pbOverlay">
+    <div class="pb-modal">
+      <div class="pb-hdr">
+        <h2>&#9672; Pipeline Builder</h2>
+        <span class="pb-status" id="pbStatus">Ready</span>
+        <button class="modal-close" id="pbClose">&#10005;</button>
+      </div>
+      <div class="pb-content">
+        <div class="pb-chat-col">
+          <div class="pb-chat-area" id="pbChat">
+            <div class="pb-empty" id="pbEmpty">
+              <div class="pb-icon">&#127959;&#65039;</div>
+              <b>Describe your pipeline in plain English</b><br>
+              The agent will design the AWS architecture and generate Terraform-ready infrastructure.
+              <div class="pb-examples">
+                <div class="pb-ex" onclick="pbUseExample(this)">Create a pipeline: S3 bucket with 4 prefixes (case, party, collision, victim). Each prefix triggers its own Lambda when a file is uploaded. The Lambdas read the file and store it in a target S3 bucket.</div>
+                <div class="pb-ex" onclick="pbUseExample(this)">Build an ETL pipeline: raw data lands in S3, triggers a Lambda that starts a Step Functions workflow. The workflow runs a Glue job, then a data quality Lambda, and writes results to an analytics S3 bucket.</div>
+                <div class="pb-ex" onclick="pbUseExample(this)">Real-time streaming: Kinesis stream receives events, Lambda processes them, stores in DynamoDB, and sends alerts via SNS.</div>
+              </div>
+            </div>
+          </div>
+          <div class="pb-img-preview" id="pbImgPreview" style="display:none">
+            <span class="pb-img-icon">&#128444;</span>
+            <span class="pb-img-name" id="pbImgName"></span>
+            <button class="pb-img-clear" id="pbImgClear" title="Remove image">&#10005;</button>
+          </div>
+          <div class="pb-input-row">
+            <input type="file" id="pbImageInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
+            <button class="pb-img-btn" id="pbImgBtn" title="Upload architecture diagram">&#128206;</button>
+            <div class="pb-input-wrap">
+              <textarea class="pb-input" id="pbInput" placeholder="Describe your pipeline, or type create @service to add a service..." rows="2"></textarea>
+            </div>
+            <button class="pb-send" id="pbSend">Send</button>
+          </div>
+        </div>
+        <div class="pb-preview-col empty" id="pbPreviewCol">
+          <div class="pb-preview-hdr">
+            <span>Generated Pipeline</span>
+            <span class="pb-pipe-name" id="pbPipeName"></span>
+          </div>
+          <div class="pb-yaml-wrap" id="pbYaml"></div>
+          <div class="pb-preview-footer">
+            <button class="pb-build-btn" id="pbBuildBtn" disabled>&#128640; Build Terraform</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- @mention autocomplete dropdowns (outside overlays to avoid overflow clip) -->
+  <div class="pb-mention-drop" id="pbMentionDrop"></div>
+  <div class="dc-mention-drop" id="dcMentionDrop"></div>
+
+  <!-- ADMIN: Configure API Key modal -->
+  <div class="adm-overlay" id="apiKeyOverlay">
+    <div class="adm-box">
+      <div class="adm-hdr">
+        <h3>&#128273; Configure Anthropic API Key</h3>
+        <button class="modal-close" id="apiKeyClose">&#10005;</button>
+      </div>
+      <div class="adm-body">
+        <p class="adm-desc">Enter your Anthropic API key. It will be used for diagram reading in this session only — never written to disk.</p>
+        <div class="adm-field">
+          <label>API Key</label>
+          <input type="password" id="apiKeyInput" placeholder="sk-ant-api03-..."/>
+        </div>
+      </div>
+      <div class="adm-footer">
+        <span class="adm-status" id="apiKeyStatus"></span>
+        <button class="adm-save" id="saveApiKeyBtn">Save Key</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN: Configure AWS Keys modal -->
+  <div class="adm-overlay" id="awsKeysOverlay">
+    <div class="adm-box">
+      <div class="adm-hdr">
+        <h3>&#9729;&#65039; Configure AWS Credentials</h3>
+        <button class="modal-close" id="awsKeysClose">&#10005;</button>
+      </div>
+      <div class="adm-body">
+        <p class="adm-desc">Credentials are injected into all Terraform commands for this session only — never written to disk.</p>
+        <div class="adm-field">
+          <label>AWS Access Key ID</label>
+          <input type="text" id="awsAccessKeyInput" placeholder="AKIA..."/>
+        </div>
+        <div class="adm-field">
+          <label>AWS Secret Access Key</label>
+          <input type="password" id="awsSecretKeyInput" placeholder="wJal..."/>
+        </div>
+        <div class="adm-field">
+          <label>Region</label>
+          <input type="text" id="awsRegionInput" placeholder="us-east-1" value="us-east-1"/>
+        </div>
+      </div>
+      <div class="adm-footer">
+        <span class="adm-status" id="awsKeyStatus"></span>
+        <button class="adm-save" id="saveAwsKeysBtn">Save Keys</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN: Historical Pipelines modal -->
+  <div class="adm-overlay" id="historyOverlay">
+    <div class="adm-box" style="width:560px">
+      <div class="adm-hdr">
+        <h3>&#128203; Historical Pipelines</h3>
+        <button class="modal-close" id="historyClose">&#10005;</button>
+      </div>
+      <div class="adm-body">
+        <p class="adm-desc">Click a pipeline to view it, or use the action buttons to modify or delete.</p>
+        <div class="hist-list" id="histList">
+          <div class="hist-empty">Loading...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SERVICE CONFIG POPUP -->
+  <div class="svc-cfg-overlay" id="svcCfgOverlay">
+    <div class="svc-cfg-modal">
+      <div class="svc-cfg-hdr">
+        <span class="svc-cfg-icon" id="svcCfgIcon"></span>
+        <h3 id="svcCfgTitle"></h3>
+        <span class="svc-cfg-type" id="svcCfgType"></span>
+        <button class="modal-close" id="svcCfgClose">&#10005;</button>
+      </div>
+      <div class="svc-cfg-body" id="svcCfgBody">
+        <div style="text-align:center;padding:40px;color:var(--muted)">Loading configuration...</div>
+      </div>
+      <div class="svc-cfg-footer">
+        <span style="font-size:10px;color:var(--muted)" id="svcCfgNote"></span>
+        <button class="dev-agent-btn" id="devAgentBtn" disabled>
+          <span>&#129302;</span> Developer Agent
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edge label popup -->
+  <div class="edge-label-popup" id="edgeLabelPopup">
+    <label>Connection Event Type</label>
+    <input type="text" id="edgeLabelInput" placeholder="e.g. s3:ObjectCreated:* or *"/>
+    <div class="popup-hint">Leave blank / use * for any event. Examples:<br/>s3:ObjectCreated:* · sqs · * · cron · http</div>
+    <div class="popup-btns">
+      <button class="popup-cancel" id="edgeLabelCancel">Cancel</button>
+      <button class="popup-ok" id="edgeLabelOk">Connect</button>
+    </div>
+  </div>
+
+  <!-- Node rename popup -->
+  <div class="rename-popup" id="renamePopup">
+    <label>Service Name</label>
+    <input type="text" id="renameInput" maxlength="64" placeholder="my_service"/>
+    <div class="popup-btns">
+      <button class="popup-cancel" id="renameCancelBtn">Cancel</button>
+      <button class="popup-ok" id="renameOkBtn">Rename</button>
+    </div>
+  </div>
+
+  <!-- DEVELOPER AGENT WINDOW -->
+  <div class="devag-overlay" id="devagOverlay">
+    <div class="devag-modal">
+      <div class="devag-hdr">
+        <span style="font-size:20px">&#129302;</span>
+        <h2>Developer Agent</h2>
+        <span class="devag-svc" id="devagSvcLabel"></span>
+        <button class="modal-close" id="devagClose">&#10005;</button>
+      </div>
+      <div class="devag-content">
+        <div class="devag-chat" id="devagChat">
+          <div class="devag-msg agent">
+            <div style="font-weight:600;margin-bottom:4px;color:#c4b5fd">&#128075; Welcome to Developer Agent</div>
+            I can help you create artifacts, configure resources, and write code for this AWS service.
+            Tell me what you need — for example:
+            <ul style="margin:6px 0 0 16px;color:var(--muted);font-size:11px;line-height:1.8">
+              <li>Create 10 prefixes in this S3 bucket</li>
+              <li>Write a Lambda handler that processes SQS messages</li>
+              <li>Create a Glue table with specific columns</li>
+              <li>Set up DynamoDB items with sample data</li>
+            </ul>
+          </div>
+        </div>
+        <div class="devag-input-row">
+          <div class="devag-input-wrap">
+            <div class="devag-mention-drop" id="devagMentionDrop"></div>
+            <textarea class="devag-input" id="devagInput" rows="2"
+              placeholder="Describe what you want... (type @ to reference another service)"></textarea>
+          </div>
+          <button class="devag-send" id="devagSend">Send &#10148;</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="con-bar">
+      <span id="sdot" style="display:none"></span><span id="sLabel" style="display:none"></span>
+      <div class="conbar-fields">
+        <div class="conbar-field">
+          <label>Project</label>
+          <input type="text" id="projectInput" placeholder="e.g. analytics" maxlength="32"/>
+        </div>
+        <div class="conbar-field">
+          <label>Cost Center</label>
+          <input type="text" id="costCenterInput" placeholder="e.g. cc001" maxlength="16"/>
+        </div>
+        <div class="conbar-field">
+          <label>Business Unit</label>
+          <input type="text" id="businessUnitInput" placeholder="e.g. engineering" maxlength="32"/>
+        </div>
+      </div>
+      <button class="clear-btn" id="clearBtn">Clear</button>
+    </div>
+    <div class="prog-wrap" id="progWrap">
+      <div class="prog-track"><div class="prog-fill" id="progFill"></div></div>
+      <span class="prog-stage" id="progStage"></span>
+      <span class="prog-pct" id="progPct"></span>
+    </div>
+
+    <div class="ws-split" id="wsSplit">
+      <div class="dgm-row">
+
+        <!-- DIAGRAM PANEL -->
+        <div class="dgm-wrap">
+          <div class="dgm-topbar">
+            <span class="panel-label" id="dgmLabel">Input Diagram</span>
+            <button class="edit-pipeline-btn" id="editPipelineBtn" style="display:none">&#9998; Edit Pipeline</button>
+            <div class="zoom-row">
+              <button class="zbtn" id="zIn">+</button>
+              <button class="zbtn" id="zFit">&#8865;</button>
+              <button class="zbtn" id="zOut">-</button>
+            </div>
+          </div>
+          <div class="dgm-stage" id="dgmStage">
+            <div class="dgm-empty" id="dgmEmpty" style="display:none"></div>
+            <!-- Phase 1: raw image preview -->
+            <img id="rawImg" alt="Architecture diagram"/>
+            <!-- Phase 2: Dagre SVG (fills stage 100%) -->
+            <svg id="diagramSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+            <!-- Pipeline Architect canvas -->
+            <svg id="archCanvas" xmlns="http://www.w3.org/2000/svg"></svg>
+            <div class="arch-empty" id="archEmpty">
+              <div class="ae-icon">&#127959;&#65039;</div>
+              <div>Drag AWS services here to build your pipeline</div>
+              <div style="font-size:10px;margin-top:6px;opacity:.7">Connect nodes by dragging from the right port -> left port</div>
+            </div>
+            <!-- Arch canvas toolbar (floats above canvas, inside dgm-stage for correct positioning) -->
+            <div class="arch-toolbar" id="archToolbar">
+              <button class="arch-tbtn" id="archZoomIn">+</button>
+              <button class="arch-tbtn" id="archFit">&#8865;</button>
+              <button class="arch-tbtn" id="archZoomOut">-</button>
+              <button class="arch-tbtn danger" id="archDeleteBtn" disabled>&#128465; Delete</button>
+              <button class="arch-tbtn danger" id="archClearBtn">Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- DEPLOYED RESOURCES TABLE PANEL -->
+        <div class="res-panel" id="resPanel">
+          <div class="res-panel-hdr">
+            <span class="res-panel-title">&#9729;&#65039; Deployed Resources</span>
+            <button class="res-panel-close" id="resPanelClose" title="Close">&#10005;</button>
+          </div>
+          <div class="res-table-wrap">
+            <table class="res-table" id="resTable">
+              <thead>
+                <tr>
+                  <th class="res-num">#</th>
+                  <th>Component</th>
+                  <th>Name</th>
+                  <th>ARN / Link</th>
+                </tr>
+              </thead>
+              <tbody id="resTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Hidden ghost elements: JS still references these for service state tracking -->
+      <div id="svcEmpty" style="display:none"></div>
+      <div id="svcList" style="display:none"></div>
+
+      <div class="drag-h" id="dragH"><div class="drag-pip"></div></div>
+
+      <!-- DESIGNER CHAT PANE -->
+      <div class="designer-chat" id="designerChat">
+        <div class="designer-chat-hdr" id="dcHeader">
+          <button class="dc-toggle" id="dcToggle" title="Collapse/Expand">&#9660;</button>
+          <span class="panel-label">Pipeline Designer</span>
+          <span class="dc-status" id="dcStatus">Ready</span>
+          <button class="dc-build-btn" id="dcBuildBtn" disabled>Build Terraform</button>
+        </div>
+        <div class="dc-body">
+          <div class="dc-messages" id="dcMessages">
+            <div class="dc-empty" id="dcEmpty">
+              Describe your pipeline in simple terms. The designer will create a flow diagram first.<br>
+              Once you're happy with the design, click <b>Build Terraform</b>.
+              <div class="dc-examples">
+                <div class="dc-ex" onclick="dcUseExample(this)">S3 bucket with 4 prefixes, each triggering a Lambda that processes data and writes to a staging bucket</div>
+                <div class="dc-ex" onclick="dcUseExample(this)">Real-time streaming: Kinesis receives events, Lambda processes them, stores in DynamoDB</div>
+                <div class="dc-ex" onclick="dcUseExample(this)">ETL pipeline: S3 raw data triggers Glue job, writes to analytics bucket, queryable via Athena</div>
+              </div>
+            </div>
+          </div>
+          <div class="dc-input-row">
+            <textarea class="dc-input" id="dcInput" placeholder="Describe your pipeline, or type create @service to add a service..." rows="5"></textarea>
+            <button class="dc-send" id="dcSend">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="drag-h" id="dragH2"><div class="drag-pip"></div></div>
+
+      <div class="con-wrap" id="conWrap">
+        <div class="con-tabs" id="conTabs">
+          <button class="con-toggle" id="conToggle" title="Collapse/Expand logs">&#9660;</button>
+          <div class="con-tab active" data-tab="build" id="tabBuild">Pipeline Build</div>
+          <div class="con-tab" data-tab="run" id="tabRun">Pipeline Run <span class="tab-dot" id="runDot"></span> <span class="tab-count" id="runCount"></span></div>
+          <div class="con-tab" data-tab="config" id="tabConfig">Config Chat</div>
+        </div>
+        <div class="run-filter-bar" id="runFilterBar"></div>
+        <!-- Config Chat Panel -->
+        <div class="cfg-chat" id="cfgChat">
+          <div class="cfg-chat-svc">
+            <label>Service:</label>
+            <select id="cfgSvcSelect"><option value="">-- select service --</option></select>
+          </div>
+          <div class="cfg-tpl-bar" id="cfgTplBar"></div>
+          <div class="cfg-msgs" id="cfgMsgs">
+            <div class="cfg-empty" id="cfgEmpty">
+              Select a service above and type a request to customize its configuration.<br>
+              Examples: "enable versioning", "set memory to 1GB", "change timeout to 5 minutes"
+            </div>
+          </div>
+          <div class="cfg-input-row">
+            <input type="text" id="cfgInput" placeholder="Describe the config change you want..." disabled>
+            <button id="cfgSendBtn" disabled>Send</button>
+          </div>
+        </div>
+        <div class="console" id="console">
+          <div class="con-empty">Console output will appear here.</div>
+        </div>
+        <div class="console" id="runConsole" style="display:none">
+          <div class="con-empty">Pipeline run logs will appear here once monitoring starts.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="/static/js/core.js"></script>
+<script src="/static/js/websocket.js"></script>
+<script src="/static/js/deploy.js"></script>
+<script src="/static/js/admin.js"></script>
+<script src="/static/js/services.js"></script>
+<script src="/static/js/architect.js"></script>
+<script src="/static/js/pipeline-run.js"></script>
+<script src="/static/js/config-chat.js"></script>
+<script src="/static/js/pipeline-builder.js"></script>
+</body>
+</html>

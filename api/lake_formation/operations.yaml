@@ -1,0 +1,41 @@
+service: lake_formation
+boto3_client: lakeformation
+description: "AWS Lake Formation — data lake governance and permissions"
+
+operations:
+  grant_permissions:
+    description: "Grant data lake permissions to a principal"
+    parameters:
+      Principal: {type: object, required: true, description: "DataLakePrincipalIdentifier"}
+      Resource: {type: object, required: true, description: "Database, Table, or DataLocation"}
+      Permissions: {type: list, required: true, description: "SELECT, ALTER, DROP, etc."}
+
+  revoke_permissions:
+    description: "Revoke data lake permissions"
+    parameters:
+      Principal: {type: object, required: true}
+      Resource: {type: object, required: true}
+      Permissions: {type: list, required: true}
+
+  register_resource:
+    description: "Register an S3 path as a data lake location"
+    parameters:
+      ResourceArn: {type: string, required: true}
+      RoleArn: {type: string}
+
+  get_data_lake_settings:
+    description: "Get data lake admin settings"
+    parameters:
+      CatalogId: {type: string}
+
+  put_data_lake_settings:
+    description: "Set data lake admin settings"
+    parameters:
+      DataLakeSettings: {type: object, required: true}
+      CatalogId: {type: string}
+
+  list_permissions:
+    description: "List granted permissions"
+    parameters:
+      Principal: {type: object}
+      Resource: {type: object}

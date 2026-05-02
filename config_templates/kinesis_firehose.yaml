@@ -1,0 +1,21 @@
+templates:
+  low_latency:
+    display_name: "Low Latency Delivery"
+    description: "Minimal buffering for near-real-time delivery"
+    config:
+      buffering_size: 1
+      buffering_interval: 60
+
+  high_throughput:
+    display_name: "High Throughput"
+    description: "Max buffering for cost-efficient batch delivery"
+    config:
+      buffering_size: 128
+      buffering_interval: 900
+      compression_format: "GZIP"
+
+  uncompressed:
+    display_name: "Uncompressed Output"
+    description: "No compression for human-readable output"
+    config:
+      compression_format: "UNCOMPRESSED"

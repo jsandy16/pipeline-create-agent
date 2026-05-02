@@ -1,0 +1,879 @@
+# ============================================================================
+# SNS Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL SNS knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/sns.yaml with exhaustive
+# coverage of SNS capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - topic naming rules & constraints
+#   3. defaults          - Terraform attribute defaults (free-tier safe)
+#   4. quotas            - AWS service limits
+#   5. topic_types       - Standard vs FIFO topics
+#   6. subscriptions     - protocols, endpoints, confirmation
+#   7. message_filtering - filter policies on subscriptions
+#   8. message_attributes - message metadata system
+#   9. fan_out           - SNS -> multiple subscribers pattern
+#  10. encryption        - SSE-KMS encryption
+#  11. access_policies   - topic policies & permissions
+#  12. delivery_retry    - retry policies per protocol
+#  13. data_protection   - message data protection policies
+#  14. iam               - complete action catalog, integration graph rules
+#  15. env_vars          - auto-wired environment variables
+#  16. vpc_triggers      - VPC placement rules
+#  17. integrations      - wiring ownership with all service types
+#  18. terraform_resources - all TF resource types
+#  19. boto3_operations  - complete API reference
+#  20. runtime_diagnostics - error patterns & auto-fix rules
+#  21. tags              - tagging constraints
+#  22. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -----------------------------------------------------------------
+identity:
+  service_type: sns
+  aws_service_name: "Amazon Simple Notification Service"
+  is_principal: false            # SNS has no execution role
+  terraform_resource: aws_sns_topic
+  description: >
+    Fully managed pub/sub messaging service for application-to-application (A2A)
+    and application-to-person (A2P) communication. Supports fan-out to multiple
+    subscribers (SQS, Lambda, HTTP/S, email, SMS), message filtering, and
+    both Standard and FIFO topic types.
+  free_tier:
+    status: always_free
+    details: "1 million publishes/month, 100,000 HTTP/S deliveries, 1,000 email deliveries"
+  pricing_model: pay_per_use     # per-publish + per-delivery (varies by protocol)
+
+# -- 2. Naming -------------------------------------------------------------------
+naming:
+  standard_topic:
+    resource_name_limit: 256     # max characters for topic name
+    resource_name_min: 1
+    valid_characters: "a-zA-Z0-9-_"  # alphanumeric, hyphens, underscores
+    rules:
+      - "Must be unique within an AWS account and region"
+      - "1-256 characters"
+      - "Alphanumeric, hyphens, underscores only"
+  fifo_topic:
+    resource_name_limit: 256     # including .fifo suffix
+    suffix: ".fifo"              # MANDATORY suffix for FIFO topics
+    rules:
+      - "Must end with .fifo suffix"
+      - "Name before .fifo: 1-251 characters"
+      - "Same character restrictions as Standard"
+
+# -- 3. Defaults (free-tier safe) ------------------------------------------------
+defaults:
+  fifo_topic: false
+  # Optional features (not set by default):
+  # content_based_deduplication: false  # FIFO only
+  # kms_master_key_id: null            # SSE-KMS
+  # display_name: null                 # for SMS subscriptions
+  # delivery_policy: null              # HTTP/S retry policy
+  # policy: null                       # topic access policy
+
+# -- 4. Quotas -------------------------------------------------------------------
+quotas:
+  # Topic limits
+  max_topics_per_account: 100000       # per region, adjustable
+  topic_name_max_length: 256           # characters
+
+  # Subscription limits
+  max_subscriptions_per_topic: 12500000  # 12.5 million, adjustable
+  max_filter_policies_per_topic: 200   # adjustable
+  max_filter_policy_size: "256 KB"     # per subscription
+  max_filter_policy_attributes: 5      # per filter policy (adjustable to 100)
+  max_filter_policy_values_per_attribute: 150  # adjustable
+
+  # Message limits
+  max_message_size: 262144             # bytes = 256 KB
+  max_message_attributes: 10           # per message
+  max_message_attribute_name_length: 256
+  message_attribute_data_types: ["String", "Number", "Binary"]
+
+  # Publishing
+  standard_publish_rate: 30000         # messages per second per account (adjustable)
+  fifo_publish_rate: 300               # messages per second per topic
+  fifo_publish_rate_high: 30000        # with high throughput mode per message group
+
+  # Subscription protocols
+  max_subscriptions_per_account: "unlimited (soft limit varies by protocol)"
+
+  # Tags
+  max_tags_per_topic: 50
+  tag_key_max_length: 128
+  tag_value_max_length: 256
+
+  # Data protection
+  max_data_protection_policies: 1      # per topic
+
+# -- 5. Topic Types --------------------------------------------------------------
+topic_types:
+  standard:
+    description: >
+      Default topic type. Maximum throughput, best-effort ordering. Messages
+      delivered to all confirmed subscribers. At-least-once delivery.
+    terraform_attribute: "fifo_topic = false"
+    ordering: "best-effort (no ordering guarantee)"
+    delivery: "at-least-once"
+    throughput: "nearly unlimited (30,000 publishes/second default)"
+    deduplication: "none"
+    supported_protocols:
+      - "sqs"
+      - "lambda"
+      - "http"
+      - "https"
+      - "email"
+      - "email-json"
+      - "sms"
+      - "application"        # mobile push
+      - "firehose"           # Kinesis Firehose
+    use_cases:
+      - "Fan-out to multiple consumers"
+      - "Event notification broadcasting"
+      - "S3 event distribution"
+      - "Alert and notification systems"
+
+  fifo:
+    description: >
+      First-In-First-Out ordering guaranteed within message groups.
+      Exactly-once message delivery via deduplication.
+    terraform_attributes:
+      fifo_topic: true
+      content_based_deduplication: "true/false"
+    ordering: "strict FIFO within message group"
+    delivery: "exactly-once"
+    throughput: "300 msg/s (30,000 with high throughput per message group)"
+    deduplication:
+      content_based: "SHA-256 hash of message body"
+      explicit: "MessageDeduplicationId parameter"
+    supported_protocols:
+      - "sqs"                # FIFO queues only
+    constraints:
+      - "Topic name MUST end with .fifo"
+      - "Can ONLY deliver to SQS FIFO queues"
+      - "MessageGroupId is REQUIRED for every publish"
+      - "Standard SQS queues cannot subscribe to FIFO topics"
+      - "Lambda, HTTP/S, email, SMS cannot subscribe to FIFO topics"
+    use_cases:
+      - "Ordered event processing across multiple consumers"
+      - "Financial transaction fan-out"
+      - "Exactly-once distributed processing"
+
+# -- 6. Subscriptions ------------------------------------------------------------
+subscriptions:
+  description: >
+    A subscription connects a topic to an endpoint. When a message is published
+    to the topic, SNS delivers it to all confirmed subscriptions (minus those
+    filtered out by filter policies).
+  terraform_resource: "aws_sns_topic_subscription"
+  protocols:
+    sqs:
+      description: "Deliver JSON-wrapped message to SQS queue"
+      terraform_protocol: "sqs"
+      endpoint: "SQS queue ARN"
+      raw_message_delivery: true  # optional: deliver unwrapped message body
+      confirmation: "automatic"
+      cross_account: true
+      note: "Standard topics -> Standard or FIFO queues. FIFO topics -> FIFO queues only."
+    lambda:
+      description: "Invoke Lambda function with SNS message"
+      terraform_protocol: "lambda"
+      endpoint: "Lambda function ARN"
+      raw_message_delivery: false
+      confirmation: "automatic"
+      cross_account: true
+    http:
+      description: "POST message to HTTP endpoint"
+      terraform_protocol: "http"
+      endpoint: "HTTP URL"
+      confirmation: "requires endpoint confirmation"
+      cross_account: false
+    https:
+      description: "POST message to HTTPS endpoint"
+      terraform_protocol: "https"
+      endpoint: "HTTPS URL"
+      confirmation: "requires endpoint confirmation"
+      cross_account: false
+    email:
+      description: "Send message as email (human-readable)"
+      terraform_protocol: "email"
+      endpoint: "email address"
+      confirmation: "requires email confirmation"
+    email_json:
+      description: "Send message as JSON-formatted email"
+      terraform_protocol: "email-json"
+      endpoint: "email address"
+      confirmation: "requires email confirmation"
+    sms:
+      description: "Send message as SMS text"
+      terraform_protocol: "sms"
+      endpoint: "phone number (E.164 format)"
+      confirmation: "automatic (opt-out available)"
+      cost: "per-message SMS charges"
+    application:
+      description: "Push notification to mobile application endpoint"
+      terraform_protocol: "application"
+      endpoint: "platform application endpoint ARN"
+      confirmation: "automatic"
+    firehose:
+      description: "Deliver message to Kinesis Data Firehose delivery stream"
+      terraform_protocol: "firehose"
+      endpoint: "Firehose delivery stream ARN"
+      confirmation: "automatic"
+      requires_iam_role: true
+
+  subscription_attributes:
+    FilterPolicy: "JSON filter policy for message filtering"
+    FilterPolicyScope: "MessageAttributes or MessageBody"
+    RawMessageDelivery: "true/false - deliver raw message (SQS, HTTP/S, Firehose)"
+    RedrivePolicy: "DLQ for failed deliveries"
+    DeliveryPolicy: "Retry policy (HTTP/S only)"
+    SubscriptionRoleArn: "IAM role for Firehose subscriptions"
+
+# -- 7. Message Filtering --------------------------------------------------------
+message_filtering:
+  description: >
+    Filter policies on subscriptions allow subscribers to receive only the
+    messages they care about, instead of every message published to the topic.
+    Filtering reduces costs and simplifies consumer logic.
+  terraform_attribute: "filter_policy"
+  filter_policy_scope:
+    MessageAttributes:
+      description: "Filter based on message attributes (default, more efficient)"
+      terraform_attribute: "filter_policy_scope = \"MessageAttributes\""
+    MessageBody:
+      description: "Filter based on message body content (requires well-formed JSON)"
+      terraform_attribute: "filter_policy_scope = \"MessageBody\""
+
+  operators:
+    exact_match:
+      description: "Attribute value equals one of the specified values"
+      example: '{"store": ["example_corp"]}'
+    prefix_match:
+      description: "Attribute value starts with specified prefix"
+      example: '{"customer_interests": [{"prefix": "bas"}]}'
+    anything_but:
+      description: "Attribute value does NOT match specified value(s)"
+      example: '{"store": [{"anything-but": ["example_corp"]}]}'
+    numeric_match:
+      description: "Numeric comparisons: =, >, >=, <, <=, between"
+      example: '{"price": [{"numeric": [">=", 100, "<=", 200]}]}'
+    exists:
+      description: "Attribute exists or does not exist"
+      example: '{"store": [{"exists": true}]}'
+    ip_address:
+      description: "IP address matches CIDR range"
+      example: '{"source_ip": [{"cidr": "10.0.0.0/24"}]}'
+    suffix_match:
+      description: "Attribute value ends with specified suffix"
+      example: '{"filename": [{"suffix": ".png"}]}'
+
+  constraints:
+    - "Max 5 attribute keys per filter policy (adjustable to 100)"
+    - "Max 150 values per attribute (adjustable)"
+    - "Max 256 KB total filter policy size"
+    - "AND logic between attributes, OR logic between values within an attribute"
+    - "Unmatched messages are discarded (not delivered to that subscriber)"
+
+# -- 8. Message Attributes -------------------------------------------------------
+message_attributes:
+  description: >
+    Structured metadata attached to published messages. Used for message
+    filtering and consumer routing decisions.
+  max_per_message: 10
+  data_types:
+    - "String"
+    - "String.Array"         # JSON array of strings
+    - "Number"               # integer or floating-point as string
+    - "Binary"               # base64-encoded binary
+  size_impact: "Attributes count toward the 256 KB message size limit"
+  reserved_attributes:
+    - "AWS.SNS.FIFO.MessageGroupId"
+    - "AWS.SNS.FIFO.MessageDeduplicationId"
+    - "AWS.SNS.MOBILE.*"
+
+# -- 9. Fan-Out Pattern ----------------------------------------------------------
+fan_out:
+  description: >
+    SNS fan-out delivers a single published message to multiple subscribers
+    simultaneously. Combined with SQS, this creates a robust pattern where
+    each SQS queue gets its own copy of the message for independent processing.
+  sns_sqs_fan_out:
+    description: >
+      Publish once to SNS, deliver to N SQS queues. Each queue processes
+      independently at its own rate. Failed deliveries don't affect other queues.
+    terraform_resources:
+      - "aws_sns_topic"
+      - "aws_sns_topic_subscription (protocol: sqs) per queue"
+      - "aws_sqs_queue_policy on each queue (allows sns.amazonaws.com)"
+    benefits:
+      - "Parallel processing without coordination"
+      - "Independent failure isolation per consumer"
+      - "Message filtering per subscription"
+      - "DLQ per queue for failed processing"
+  sns_lambda_fan_out:
+    description: >
+      Publish once to SNS, invoke N Lambda functions. Each function processes
+      the message independently.
+    terraform_resources:
+      - "aws_sns_topic"
+      - "aws_sns_topic_subscription (protocol: lambda) per function"
+  sns_mixed_fan_out:
+    description: >
+      Publish once to SNS, deliver to mix of SQS, Lambda, HTTP/S, email.
+      Each endpoint type has its own delivery and retry characteristics.
+
+# -- 10. Encryption --------------------------------------------------------------
+encryption:
+  types:
+    none:
+      description: "No encryption at rest (messages encrypted in transit via HTTPS)"
+      cost: free
+    SSE_KMS:
+      description: "Server-side encryption using AWS KMS keys"
+      terraform_attribute: "kms_master_key_id"
+      terraform_value: "alias/aws/sns or custom key ARN"
+      cost: "KMS API charges"
+      kms_required: true
+      required_kms_permissions:
+        publisher: ["kms:GenerateDataKey", "kms:Decrypt"]
+        subscriber: ["kms:Decrypt"]
+      cross_account_note: >
+        SSE-KMS encrypted topics require the KMS key policy to allow the
+        subscriber's account to use the key for decryption.
+      constraints:
+        - "S3 event notifications cannot publish to SSE-KMS encrypted topics unless using aws/sns key"
+        - "Some AWS services cannot publish to encrypted topics without additional KMS permissions"
+
+# -- 11. Access Policies ---------------------------------------------------------
+access_policies:
+  topic_policy:
+    terraform_attribute: "policy"
+    description: >
+      Resource-based policy on the topic. Controls who can publish to or
+      subscribe to the topic. JSON IAM policy format.
+    max_size: "30 KB"
+    common_patterns:
+      s3_publish: |
+        Allow s3.amazonaws.com to sns:Publish with ArnLike condition
+      eventbridge_publish: |
+        Allow events.amazonaws.com to sns:Publish
+      cross_account_publish: |
+        Allow specific account/role to sns:Publish
+      cross_account_subscribe: |
+        Allow specific account to sns:Subscribe
+      ssl_enforcement: |
+        Deny sns:Publish where aws:SecureTransport = false
+    default_policy: >
+      By default, only the topic owner can publish and subscribe.
+
+# -- 12. Delivery Retry ----------------------------------------------------------
+delivery_retry:
+  description: >
+    SNS retries failed deliveries based on the protocol and delivery policy.
+  protocols:
+    sqs:
+      retries: "23 times over 23 minutes (linear backoff)"
+      dead_letter: "Subscription-level DLQ (SQS queue)"
+    lambda:
+      retries: "3 times (immediate, 1s, 2s delays)"
+      dead_letter: "Subscription-level DLQ (SQS queue)"
+    http_https:
+      retries: "Configurable via delivery policy"
+      phases: ["immediate retries", "pre-backoff", "backoff", "post-backoff"]
+      max_retries: "up to 100 over 23 days"
+      dead_letter: "Subscription-level DLQ (SQS queue)"
+    email:
+      retries: "Minimal retries"
+      dead_letter: "Not supported"
+    sms:
+      retries: "Minimal retries"
+      dead_letter: "Not supported"
+
+  subscription_dlq:
+    description: "SQS queue that receives messages SNS cannot deliver to a subscription"
+    terraform_attribute: "redrive_policy on aws_sns_topic_subscription"
+    format: '{"deadLetterTargetArn": "QUEUE_ARN"}'
+
+# -- 13. Data Protection ---------------------------------------------------------
+data_protection:
+  description: >
+    SNS message data protection policies detect and protect sensitive data
+    (PII, PHI) in messages using pattern matching and optional masking/auditing.
+  terraform_resource: "aws_sns_topic_data_protection_policy"
+  operations:
+    - "Audit: log matched patterns to CloudWatch, S3, or Firehose"
+    - "De-identify: mask sensitive data before delivery"
+    - "Deny: block messages containing sensitive data"
+  supported_data_types:
+    - "Credit card numbers"
+    - "SSN, phone numbers, email addresses"
+    - "AWS access keys"
+    - "Custom regex patterns"
+
+# -- 14. IAM --------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    topic: "arn:aws:sns:REGION:ACCOUNT:TOPIC-NAME"
+    subscription: "arn:aws:sns:REGION:ACCOUNT:TOPIC-NAME:SUBSCRIPTION-ID"
+
+  # SNS is not a principal (no execution role), so "always" is empty
+  always: []
+
+  # Complete action catalog
+  actions:
+    topic_management:
+      - "sns:CreateTopic"
+      - "sns:DeleteTopic"
+      - "sns:GetTopicAttributes"
+      - "sns:SetTopicAttributes"
+      - "sns:ListTopics"
+    publishing:
+      - "sns:Publish"                    # publish to topic or phone number
+    subscription_management:
+      - "sns:Subscribe"
+      - "sns:Unsubscribe"
+      - "sns:ConfirmSubscription"
+      - "sns:GetSubscriptionAttributes"
+      - "sns:SetSubscriptionAttributes"
+      - "sns:ListSubscriptions"
+      - "sns:ListSubscriptionsByTopic"
+    permissions:
+      - "sns:AddPermission"
+      - "sns:RemovePermission"
+    tagging:
+      - "sns:TagResource"
+      - "sns:UntagResource"
+      - "sns:ListTagsForResource"
+    data_protection:
+      - "sns:GetDataProtectionPolicy"
+      - "sns:PutDataProtectionPolicy"
+    platform_application:
+      - "sns:CreatePlatformApplication"
+      - "sns:DeletePlatformApplication"
+      - "sns:GetPlatformApplicationAttributes"
+      - "sns:SetPlatformApplicationAttributes"
+      - "sns:ListPlatformApplications"
+      - "sns:CreatePlatformEndpoint"
+      - "sns:DeleteEndpoint"
+      - "sns:GetEndpointAttributes"
+      - "sns:SetEndpointAttributes"
+      - "sns:ListEndpointsByPlatformApplication"
+    sms:
+      - "sns:GetSMSAttributes"
+      - "sns:SetSMSAttributes"
+      - "sns:CheckIfPhoneNumberIsOptedOut"
+      - "sns:ListPhoneNumbersOptedOut"
+      - "sns:OptInPhoneNumber"
+      - "sns:ListOriginationNumbers"
+    sms_sandbox:
+      - "sns:GetSMSSandboxAccountStatus"
+      - "sns:CreateSMSSandboxPhoneNumber"
+      - "sns:VerifySMSSandboxPhoneNumber"
+      - "sns:DeleteSMSSandboxPhoneNumber"
+      - "sns:ListSMSSandboxPhoneNumbers"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of: {}    # SNS is passive -- no IAM actions needed when receiving publishes
+
+  as_source_to: {}    # SNS is passive -- it does not initiate actions itself
+
+  # Common permission sets
+  common_publisher_permissions:
+    - "sns:Publish"
+  common_subscriber_permissions:
+    - "sns:Subscribe"
+    - "sns:Receive"
+  common_admin_permissions:
+    - "sns:CreateTopic"
+    - "sns:DeleteTopic"
+    - "sns:GetTopicAttributes"
+    - "sns:SetTopicAttributes"
+    - "sns:Subscribe"
+    - "sns:Unsubscribe"
+    - "sns:Publish"
+    - "sns:ListSubscriptionsByTopic"
+
+  # SNS condition keys
+  condition_keys:
+    - "aws:SourceArn"                      # ARN of calling service
+    - "aws:SourceAccount"                  # account of calling service
+    - "sns:Protocol"                       # subscription protocol filter
+    - "sns:Endpoint"                       # subscription endpoint filter
+
+# -- 15. Environment Variables ---------------------------------------------------
+env_vars:
+  as_target_of: {}  # SNS is passive; no env vars auto-wired for sources
+  as_source_to: {}  # SNS is passive; no env vars auto-wired for targets
+
+# -- 16. VPC Triggers -----------------------------------------------------------
+vpc_triggers: []     # SNS does not need VPC placement (public endpoint)
+
+# -- 17. Integration Wiring Ownership -------------------------------------------
+integrations:
+  # SNS as TARGET (receives publishes)
+  s3_to_sns:
+    description: "S3 event notification publishes to SNS topic"
+    owned_by: "s3"
+    terraform_resources:
+      - "aws_s3_bucket_notification (topic block)"
+    constraint: "Standard topics only -- FIFO topics NOT supported for S3 notifications"
+    note: "SNS topic policy must allow s3.amazonaws.com to publish"
+
+  lambda_to_sns:
+    description: "Lambda publishes messages to SNS"
+    owned_by: "lambda"
+    iam_on_caller: ["sns:Publish"]
+    env_var_on_caller: "{PEER_UPPER}_TOPIC_ARN"
+
+  eventbridge_to_sns:
+    description: "EventBridge rule targets SNS topic"
+    owned_by: "cloudwatch/eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_target"
+    note: "SNS topic policy must allow events.amazonaws.com to publish"
+
+  stepfunctions_to_sns:
+    description: "Step Functions publishes to SNS"
+    owned_by: "stepfunctions"
+    iam_on_caller: ["sns:Publish"]
+
+  glue_to_sns:
+    description: "Glue job publishes notifications to SNS"
+    owned_by: "glue"
+    iam_on_caller: ["sns:Publish"]
+
+  emr_to_sns:
+    description: "EMR publishes cluster/step status to SNS"
+    owned_by: "emr"
+    iam_on_caller: ["sns:Publish"]
+
+  cloudwatch_to_sns:
+    description: "CloudWatch alarm actions publish to SNS"
+    owned_by: "cloudwatch"
+    note: "CloudWatch alarm -> SNS is a native integration (alarm action ARN)"
+
+  # SNS as SOURCE (delivers to subscribers)
+  sns_to_sqs:
+    description: "SNS delivers messages to SQS queue"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: sqs)"
+    sqs_side:
+      - "aws_sqs_queue_policy (allows sns.amazonaws.com with ArnEquals condition)"
+    note: "Standard topics -> Standard or FIFO queues. FIFO topics -> FIFO queues only."
+
+  sns_to_lambda:
+    description: "SNS invokes Lambda function for each message"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: lambda)"
+    note: "Lambda function must have resource-based policy allowing sns.amazonaws.com"
+
+  sns_to_http:
+    description: "SNS POSTs messages to HTTP/HTTPS endpoint"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: http or https)"
+    confirmation: "Endpoint must confirm subscription via ConfirmSubscription"
+
+  sns_to_email:
+    description: "SNS sends messages as email"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: email or email-json)"
+    confirmation: "Recipient must confirm subscription via email link"
+
+  sns_to_sms:
+    description: "SNS sends messages as SMS text"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: sms)"
+
+  sns_to_firehose:
+    description: "SNS delivers messages to Kinesis Firehose"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: firehose)"
+    requires_iam_role: true
+
+  # SNS as intermediary (fan-out pattern)
+  sns_sqs_fan_out:
+    description: "SNS fans out to multiple SQS queues for parallel processing"
+    pattern: >
+      One SNS topic -> N SQS queues -> N independent consumers.
+      Each queue gets its own copy of every message (minus filtered ones).
+    terraform_resources:
+      - "aws_sns_topic"
+      - "aws_sns_topic_subscription per queue"
+      - "aws_sqs_queue_policy per queue"
+
+  s3_sns_sqs_fan_out:
+    description: "S3 -> SNS -> multiple SQS queues (common pipeline pattern)"
+    pattern: >
+      S3 event -> SNS topic -> N SQS queues. Used when multiple consumers
+      need the same S3 event notification independently.
+
+# -- 18. Terraform Resources ----------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_sns_topic"
+      description: "The SNS topic itself"
+      always_created: true
+
+  conditional:
+    - resource: "aws_sns_topic_subscription"
+      condition: "One per outgoing integration (SQS, Lambda, HTTP, etc.)"
+      suffix: "_sub_{target_label}"
+    - resource: "aws_sns_topic_policy"
+      condition: "When other services need to publish to this topic"
+      note: "Not currently created by default renderer -- topic uses default policy"
+
+  created_by_others:
+    - resource: "aws_s3_bucket_notification"
+      created_by: "s3 renderer"
+      condition: "When S3 sends notifications to this topic"
+    - resource: "aws_sqs_queue_policy"
+      created_by: "sqs renderer"
+      condition: "When this topic delivers to an SQS queue"
+    - resource: "aws_cloudwatch_event_target"
+      created_by: "cloudwatch/eventbridge renderer"
+      condition: "When EventBridge targets this topic"
+
+  available_but_not_in_default_renderer:
+    - "aws_sns_topic_policy"
+    - "aws_sns_topic_data_protection_policy"
+    - "aws_sns_platform_application"
+    - "aws_sns_sms_preferences"
+
+# -- 19. Boto3 Operations -------------------------------------------------------
+boto3_operations:
+  client: "sns"
+  topic_operations:
+    create_topic:
+      description: "Create a new SNS topic (idempotent -- returns existing topic if name matches)"
+      parameters:
+        Name: {type: string, required: true}
+        Attributes: {type: object, description: "FifoTopic, ContentBasedDeduplication, KmsMasterKeyId, Policy, DisplayName"}
+        Tags: {type: list, description: "List of {'Key': str, 'Value': str}"}
+      returns: ["TopicArn"]
+    delete_topic:
+      description: "Delete a topic and all its subscriptions"
+      parameters:
+        TopicArn: {type: string, required: true}
+    get_topic_attributes:
+      description: "Get topic attributes"
+      parameters:
+        TopicArn: {type: string, required: true}
+      returns: ["Attributes.TopicArn", "Attributes.DisplayName", "Attributes.SubscriptionsConfirmed", "Attributes.SubscriptionsPending", "Attributes.SubscriptionsDeleted", "Attributes.Policy", "Attributes.EffectiveDeliveryPolicy", "Attributes.KmsMasterKeyId"]
+    set_topic_attributes:
+      description: "Set a topic attribute"
+      parameters:
+        TopicArn: {type: string, required: true}
+        AttributeName: {type: string, required: true, description: "DisplayName, Policy, DeliveryPolicy, KmsMasterKeyId, etc."}
+        AttributeValue: {type: string}
+    list_topics:
+      description: "List all topics in the account"
+      parameters:
+        NextToken: {type: string}
+      returns: ["Topics[].TopicArn", "NextToken"]
+
+  publishing_operations:
+    publish:
+      description: "Publish a message to a topic or phone number"
+      parameters:
+        TopicArn: {type: string, description: "Topic ARN (mutually exclusive with TargetArn/PhoneNumber)"}
+        TargetArn: {type: string, description: "Endpoint ARN for direct publish"}
+        PhoneNumber: {type: string, description: "E.164 phone number for SMS"}
+        Message: {type: string, required: true, description: "Max 256 KB"}
+        Subject: {type: string, description: "Email subject line (max 100 chars)"}
+        MessageStructure: {type: string, description: "'json' for per-protocol messages"}
+        MessageAttributes: {type: object, description: "Up to 10 attributes for filtering"}
+        MessageGroupId: {type: string, description: "REQUIRED for FIFO topics"}
+        MessageDeduplicationId: {type: string, description: "FIFO: required unless content-based dedup"}
+      returns: ["MessageId", "SequenceNumber (FIFO only)"]
+    publish_batch:
+      description: "Publish up to 10 messages to a topic in a single request"
+      parameters:
+        TopicArn: {type: string, required: true}
+        PublishBatchRequestEntries: {type: list, required: true, description: "List of {Id, Message, Subject, ...}"}
+      returns: ["Successful[].MessageId", "Failed[].Id", "Failed[].Code"]
+
+  subscription_operations:
+    subscribe:
+      description: "Subscribe an endpoint to a topic"
+      parameters:
+        TopicArn: {type: string, required: true}
+        Protocol: {type: string, required: true, description: "sqs, lambda, http, https, email, email-json, sms, application, firehose"}
+        Endpoint: {type: string, required: true, description: "ARN, URL, email, or phone number"}
+        Attributes: {type: object, description: "FilterPolicy, RawMessageDelivery, RedrivePolicy"}
+        ReturnSubscriptionArn: {type: boolean, description: "Return subscription ARN even if pending confirmation"}
+      returns: ["SubscriptionArn"]
+    unsubscribe:
+      description: "Remove a subscription"
+      parameters:
+        SubscriptionArn: {type: string, required: true}
+    confirm_subscription:
+      description: "Confirm a pending subscription (for HTTP/S and email)"
+      parameters:
+        TopicArn: {type: string, required: true}
+        Token: {type: string, required: true}
+    get_subscription_attributes:
+      description: "Get subscription attributes"
+      parameters:
+        SubscriptionArn: {type: string, required: true}
+      returns: ["Attributes.Protocol", "Attributes.Endpoint", "Attributes.TopicArn", "Attributes.FilterPolicy", "Attributes.RawMessageDelivery", "Attributes.RedrivePolicy", "Attributes.SubscriptionRoleArn"]
+    set_subscription_attributes:
+      description: "Set a subscription attribute"
+      parameters:
+        SubscriptionArn: {type: string, required: true}
+        AttributeName: {type: string, required: true}
+        AttributeValue: {type: string}
+    list_subscriptions:
+      description: "List all subscriptions"
+      parameters:
+        NextToken: {type: string}
+      returns: ["Subscriptions[].SubscriptionArn", "Subscriptions[].Protocol", "Subscriptions[].Endpoint", "Subscriptions[].TopicArn"]
+    list_subscriptions_by_topic:
+      description: "List subscriptions for a specific topic"
+      parameters:
+        TopicArn: {type: string, required: true}
+        NextToken: {type: string}
+      returns: ["Subscriptions[].SubscriptionArn", "Subscriptions[].Protocol", "Subscriptions[].Endpoint"]
+
+  tagging_operations:
+    tag_resource:
+      description: "Add tags to an SNS topic"
+      parameters:
+        ResourceArn: {type: string, required: true}
+        Tags: {type: list, required: true, description: "List of {'Key': str, 'Value': str}"}
+    untag_resource:
+      description: "Remove tags from an SNS topic"
+      parameters:
+        ResourceArn: {type: string, required: true}
+        TagKeys: {type: list, required: true}
+    list_tags_for_resource:
+      description: "List tags on an SNS topic"
+      parameters:
+        ResourceArn: {type: string, required: true}
+      returns: ["Tags[].Key", "Tags[].Value"]
+
+  permission_operations:
+    add_permission:
+      description: "Add a statement to the topic's access control policy"
+      parameters:
+        TopicArn: {type: string, required: true}
+        Label: {type: string, required: true, description: "Unique statement ID"}
+        AWSAccountId: {type: list, required: true}
+        ActionName: {type: list, required: true, description: "e.g., ['Publish', 'Subscribe']"}
+    remove_permission:
+      description: "Remove a statement from the topic's access control policy"
+      parameters:
+        TopicArn: {type: string, required: true}
+        Label: {type: string, required: true}
+
+# -- 20. Runtime Diagnostics -----------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AuthorizationError.*sns|sns.*not authorized|AccessDenied.*sns"
+    category: PERMISSION
+    cause: "Caller IAM role lacks sns:Publish permission on this topic"
+    fix_type: update_iam
+    resolution: "Add sns:Publish to the caller's IAM role policy for this topic ARN"
+
+  - pattern: "NotFound.*Topic|TopicArn.*not found|InvalidParameter.*TopicArn"
+    category: RESOURCE_NOT_FOUND
+    cause: "SNS topic does not exist"
+    fix_type: manual
+    resolution: "Verify terraform apply completed. Topic ARN must match exactly."
+
+  - pattern: "InvalidParameter.*Protocol|InvalidParameterValue.*Endpoint"
+    category: CONFIG
+    cause: "Invalid subscription protocol or endpoint"
+    fix_type: manual
+    resolution: "Verify protocol (sqs, lambda, http, https, email, sms) and endpoint format"
+
+  - pattern: "SubscriptionLimitExceeded"
+    category: QUOTA
+    cause: "Topic subscription limit reached (12.5 million default)"
+    fix_type: manual
+    resolution: "Contact AWS support to increase subscription limit"
+
+  - pattern: "FilterPolicyLimitExceeded"
+    category: QUOTA
+    cause: "Filter policy limit exceeded (200 per topic default)"
+    fix_type: manual
+    resolution: "Contact AWS support to increase filter policy limit, or consolidate filters"
+
+  - pattern: "InvalidSecurity|KMS.*Error|KmsAccessDenied"
+    category: ENCRYPTION
+    cause: "KMS key issue for SSE-KMS encrypted topic"
+    fix_type: manual
+    resolution: "Verify KMS key exists, is enabled, and caller has kms:GenerateDataKey and kms:Decrypt"
+
+  - pattern: "InvalidParameter.*Message.*too long|MessageTooLong"
+    category: SIZE_LIMIT
+    cause: "Message exceeds 256 KB limit"
+    fix_type: code_change
+    resolution: "Reduce message size or use claim-check pattern (store in S3, publish reference)"
+
+  - pattern: "InvalidParameter.*MessageGroupId"
+    category: CONFIG
+    cause: "FIFO topic requires MessageGroupId"
+    fix_type: code_change
+    resolution: "Include MessageGroupId parameter in Publish call"
+
+  - pattern: "EndpointDisabled|SubscriptionConfirmation"
+    category: CONFIG
+    cause: "Subscription endpoint is disabled or not confirmed"
+    fix_type: manual
+    resolution: "Re-confirm subscription or re-enable the endpoint"
+
+  - pattern: "Throttled|ThrottledException"
+    category: THROTTLE
+    cause: "Publish rate exceeds account limit"
+    fix_type: retry
+    resolution: "Implement exponential backoff. Request limit increase via Service Quotas."
+
+# -- 21. Tags -------------------------------------------------------------------
+tags:
+  max_per_topic: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"        # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  reserved_prefixes:
+    - "aws:"                     # reserved for AWS use
+
+# -- 22. Code Update (Developer Agent) ------------------------------------------
+code_update:
+  method: api_config
+  boto3_client: sns
+  description: >
+    SNS has no code. Update topic attributes via set_topic_attributes().
+    Manage subscriptions via subscribe()/unsubscribe(). Topic ARN from list_topics().
+  config_update:
+    client: sns
+    operation: set_topic_attributes
+    id_param: TopicArn
+    note: "TopicArn from list_topics() filtering by name containing resource_name"
+    updatable_attributes:
+      - DisplayName
+      - Policy
+      - DeliveryPolicy
+      - KmsMasterKeyId
+      - ContentBasedDeduplication      # FIFO only
+  discovery_ops:
+    - op: list_topics
+      returns: ["Topics[].TopicArn"]
+    - op: get_topic_attributes
+      id_param: TopicArn
+      returns: ["Attributes.DisplayName", "Attributes.SubscriptionsConfirmed", "Attributes.Policy", "Attributes.TopicArn", "Attributes.KmsMasterKeyId"]
+    - op: list_subscriptions_by_topic
+      id_param: TopicArn
+      returns: ["Subscriptions[].Protocol", "Subscriptions[].Endpoint", "Subscriptions[].SubscriptionArn"]

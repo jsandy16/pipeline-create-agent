@@ -1,0 +1,40 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: case/
+  source: src
+  suffix: null
+  target: src_lam
+- event: crawl
+  prefix: null
+  source: case_table_crawler
+  suffix: null
+  target: src
+pipeline_name: s3_glue_athena_pipeline
+region: us-east-1
+services:
+- config: {}
+  name: src
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: src_lam
+  type: lambda
+- config:
+    database_name: src_case
+  name: src_glue_catalog
+  type: glue_data_catalog
+- config:
+    crawler_name: case_crawler
+    database_name: src_case
+    s3_target_path: s3://src/case/
+  name: case_table_crawler
+  type: glue
+- config:
+    database: src_case
+  name: src_athena
+  type: athena

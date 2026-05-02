@@ -1,0 +1,69 @@
+service: glue_data_catalog
+boto3_client: glue
+description: "AWS Glue Data Catalog — centralized metadata store for databases and tables"
+
+operations:
+  create_database:
+    description: "Create a database in the Data Catalog"
+    parameters:
+      DatabaseInput: {type: object, required: true, description: "Name, Description, LocationUri"}
+      CatalogId: {type: string}
+
+  update_database:
+    description: "Update a database definition"
+    parameters:
+      Name: {type: string, required: true}
+      DatabaseInput: {type: object, required: true}
+
+  delete_database:
+    description: "Delete a database"
+    parameters:
+      Name: {type: string, required: true}
+
+  create_table:
+    description: "Create a table in a database"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableInput: {type: object, required: true, description: "Name, StorageDescriptor, PartitionKeys, TableType"}
+
+  update_table:
+    description: "Update a table definition"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableInput: {type: object, required: true}
+
+  delete_table:
+    description: "Delete a table"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      Name: {type: string, required: true}
+
+  create_partition:
+    description: "Add a partition to a table"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableName: {type: string, required: true}
+      PartitionInput: {type: object, required: true}
+
+  batch_create_partition:
+    description: "Create multiple partitions at once"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      TableName: {type: string, required: true}
+      PartitionInputList: {type: list, required: true}
+
+  get_databases:
+    description: "List all databases"
+    parameters:
+      CatalogId: {type: string}
+
+  get_tables:
+    description: "List tables in a database"
+    parameters:
+      DatabaseName: {type: string, required: true}
+
+  get_table:
+    description: "Get table details"
+    parameters:
+      DatabaseName: {type: string, required: true}
+      Name: {type: string, required: true}

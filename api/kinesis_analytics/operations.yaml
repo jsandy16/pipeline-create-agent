@@ -1,0 +1,47 @@
+service: kinesis_analytics
+boto3_client: kinesisanalyticsv2
+description: "Amazon Kinesis Data Analytics — real-time SQL/Flink analytics"
+
+operations:
+  update_application:
+    description: "Update application code, inputs, or outputs"
+    parameters:
+      ApplicationName: {type: string, required: true}
+      CurrentApplicationVersionId: {type: integer, required: true}
+      ApplicationConfigurationUpdate: {type: object}
+
+  start_application:
+    description: "Start an analytics application"
+    parameters:
+      ApplicationName: {type: string, required: true}
+      RunConfiguration: {type: object}
+
+  stop_application:
+    description: "Stop a running application"
+    parameters:
+      ApplicationName: {type: string, required: true}
+
+  describe_application:
+    description: "Get application details"
+    parameters:
+      ApplicationName: {type: string, required: true}
+
+  add_application_input:
+    description: "Add a streaming input source"
+    parameters:
+      ApplicationName: {type: string, required: true}
+      CurrentApplicationVersionId: {type: integer, required: true}
+      Input: {type: object, required: true}
+
+  add_application_output:
+    description: "Add an output destination"
+    parameters:
+      ApplicationName: {type: string, required: true}
+      CurrentApplicationVersionId: {type: integer, required: true}
+      Output: {type: object, required: true}
+
+  tag_resource:
+    description: "Add tags to an analytics application"
+    parameters:
+      ResourceARN: {type: string, required: true}
+      Tags: {type: list, required: true}

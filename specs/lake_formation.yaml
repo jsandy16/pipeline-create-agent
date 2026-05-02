@@ -1,0 +1,44 @@
+service_type: lake_formation
+is_principal: false
+terraform_resource: aws_lakeformation_data_lake_settings
+description: "AWS Lake Formation — centralised data lake governance, permissions, and resource registration over S3 and Glue"
+
+defaults:
+  create_database_default_permissions: true
+  create_table_default_permissions: true
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+code_update:
+  method: api_config
+  boto3_client: lakeformation
+  description: >
+    Lake Formation permissions via grant_permissions()/revoke_permissions().
+    Resource registration (S3 paths) via register_resource(). Data lake settings
+    (admins, default permissions) via put_data_lake_settings().
+  config_update:
+    client: lakeformation
+    operation: grant_permissions
+    note: "Grant/revoke access to databases/tables for specific IAM principals"
+  discovery_ops:
+    - op: get_data_lake_settings
+      returns: ["DataLakeSettings.DataLakeAdmins", "DataLakeSettings.CreateDatabaseDefaultPermissions", "DataLakeSettings.CreateTableDefaultPermissions"]
+    - op: list_resources
+      returns: ["ResourceInfoList[].ResourceArn", "ResourceInfoList[].RoleArn"]
+    - op: list_permissions
+      returns: ["PrincipalResourcePermissions[].Principal", "PrincipalResourcePermissions[].Resource", "PrincipalResourcePermissions[].Permissions"]
+runtime_diagnostics:
+  - pattern: "AccessDeniedException.*lakeformation|not.*authorized.*lake"
+    category: PERMISSION
+    cause: "Lake Formation permission denied — principal lacks DESCRIBE or SELECT on table"
+    fix_type: update_permissions
+    resolution: "lakeformation.grant_permissions(Principal={DataLakePrincipalIdentifier: role_arn}, Resource={Table:{DatabaseName:db, Name:table}}, Permissions=['SELECT','DESCRIBE'])"

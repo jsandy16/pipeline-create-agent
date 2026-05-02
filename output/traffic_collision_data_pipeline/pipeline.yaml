@@ -1,0 +1,227 @@
+business_unit: ANALYTICS
+cost_center: D01
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: collision_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: collision_processor
+- event: s3:ObjectCreated:*
+  prefix: party_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: party_processor
+- event: s3:ObjectCreated:*
+  prefix: victim_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: victim_processor
+- event: s3:ObjectCreated:*
+  prefix: case_raw/
+  source: raw_data_bucket
+  suffix: null
+  target: case_processor
+- event: put_object
+  prefix: null
+  source: collision_processor
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: null
+  source: party_processor
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: null
+  source: victim_processor
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: null
+  source: case_processor
+  suffix: null
+  target: staging_bucket
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: staging_bucket
+  suffix: null
+  target: refine_data
+- event: put_object
+  prefix: null
+  source: refine_data
+  suffix: null
+  target: minilake
+pipeline_name: traffic_collision_data_pipeline
+region: us-east-1
+services:
+- config:
+    prefixes:
+    - collision_raw/
+    - party_raw/
+    - victim_raw/
+    - case_raw/
+  name: raw_data_bucket
+  type: s3
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3_client = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        # Copy to staging with collision prefix\n        destination_key =\
+      \ f\"collision/{source_key.split('/')[-1]}\"\n        \n        s3_client.copy_object(\n\
+      \            CopySource={'Bucket': source_bucket, 'Key': source_key},\n    \
+      \        Bucket=staging_bucket,\n            Key=destination_key\n        )\n\
+      \        \n        print(f\"Copied {source_key} to staging: {destination_key}\"\
+      )\n    \n    return {\n        'statusCode': 200,\n        'body': json.dumps('Collision\
+      \ data processed successfully')\n    }\n"
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: collision_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3_client = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        # Copy to staging with party prefix\n        destination_key = f\"\
+      party/{source_key.split('/')[-1]}\"\n        \n        s3_client.copy_object(\n\
+      \            CopySource={'Bucket': source_bucket, 'Key': source_key},\n    \
+      \        Bucket=staging_bucket,\n            Key=destination_key\n        )\n\
+      \        \n        print(f\"Copied {source_key} to staging: {destination_key}\"\
+      )\n    \n    return {\n        'statusCode': 200,\n        'body': json.dumps('Party\
+      \ data processed successfully')\n    }\n"
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: party_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3_client = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        # Copy to staging with victim prefix\n        destination_key = f\"\
+      victim/{source_key.split('/')[-1]}\"\n        \n        s3_client.copy_object(\n\
+      \            CopySource={'Bucket': source_bucket, 'Key': source_key},\n    \
+      \        Bucket=staging_bucket,\n            Key=destination_key\n        )\n\
+      \        \n        print(f\"Copied {source_key} to staging: {destination_key}\"\
+      )\n    \n    return {\n        'statusCode': 200,\n        'body': json.dumps('Victim\
+      \ data processed successfully')\n    }\n"
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: victim_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3_client = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    \n    for record\
+      \ in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        # Copy to staging with case prefix\n        destination_key = f\"case/{source_key.split('/')[-1]}\"\
+      \n        \n        s3_client.copy_object(\n            CopySource={'Bucket':\
+      \ source_bucket, 'Key': source_key},\n            Bucket=staging_bucket,\n \
+      \           Key=destination_key\n        )\n        \n        print(f\"Copied\
+      \ {source_key} to staging: {destination_key}\")\n    \n    return {\n      \
+      \  'statusCode': 200,\n        'body': json.dumps('Case data processed successfully')\n\
+      \    }\n"
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: case_processor
+  type: lambda
+- config:
+    prefixes:
+    - collision/
+    - party/
+    - victim/
+    - case/
+  name: staging_bucket
+  type: s3
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\nfrom urllib.parse import\
+      \ unquote_plus\n\ns3_client = boto3.client('s3')\n\ndef handler(event, context):\n\
+      \    staging_bucket = os.environ['STAGING_BUCKET_BUCKET']\n    minilake_bucket\
+      \ = os.environ['MINILAKE_BUCKET']\n    \n    for record in event['Records']:\n\
+      \        source_key = unquote_plus(record['s3']['object']['key'])\n        \n\
+      \        # Determine dataset type from prefix\n        if source_key.startswith('collision/'):\n\
+      \            dataset_type = 'collision'\n        elif source_key.startswith('party/'):\n\
+      \            dataset_type = 'party'\n        elif source_key.startswith('victim/'):\n\
+      \            dataset_type = 'victim'\n        elif source_key.startswith('case/'):\n\
+      \            dataset_type = 'case'\n        else:\n            print(f\"Unknown\
+      \ prefix for {source_key}\")\n            continue\n        \n        # Copy\
+      \ refined data to minilake with same structure\n        destination_key = f\"\
+      {dataset_type}/{source_key.split('/')[-1]}\"\n        \n        s3_client.copy_object(\n\
+      \            CopySource={'Bucket': staging_bucket, 'Key': source_key},\n   \
+      \         Bucket=minilake_bucket,\n            Key=destination_key\n       \
+      \ )\n        \n        print(f\"Refined {source_key} to minilake: {destination_key}\"\
+      )\n    \n    return {\n        'statusCode': 200,\n        'body': json.dumps('Data\
+      \ refinement completed')\n    }\n"
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: refine_data
+  type: lambda
+- config: {}
+  name: minilake
+  type: s3
+- config:
+    tables:
+    - columns:
+      - name: collision_id
+        type: string
+      - name: collision_date
+        type: timestamp
+      - name: location
+        type: string
+      - name: severity
+        type: string
+      location: s3://minilake/collision/
+      name: collision
+    - columns:
+      - name: party_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: party_type
+        type: string
+      - name: vehicle_year
+        type: int
+      location: s3://minilake/party/
+      name: party
+    - columns:
+      - name: victim_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: victim_role
+        type: string
+      - name: injury_severity
+        type: string
+      location: s3://minilake/victim/
+      name: victim
+    - columns:
+      - name: case_id
+        type: string
+      - name: collision_id
+        type: string
+      - name: case_status
+        type: string
+      - name: filing_date
+        type: date
+      location: s3://minilake/case/
+      name: case
+  name: minilake_catalog
+  type: glue_data_catalog
+- config: {}
+  name: query_layer
+  type: athena

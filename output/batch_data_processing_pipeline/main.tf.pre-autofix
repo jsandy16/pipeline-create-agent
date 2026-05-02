@@ -1,0 +1,1214 @@
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+
+# --- collision_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-col-aac5eda"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1-batch_data_p-600bdd49"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1"
+    filter_prefix       = "collision_raw/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1_collision_raw_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1.id
+
+  key = "collision_raw/"
+
+  content_type = "application/x-directory"
+}
+
+# --- party_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-par-e1c0801"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2-batch_data_proce-0660cd46"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2"
+    filter_prefix       = "party_raw/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2_party_raw_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2.id
+
+  key = "party_raw/"
+
+  content_type = "application/x-directory"
+}
+
+# --- victim_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-vic-ebfcfb5"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3-batch_data_proc-5d7bb0c7"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3"
+    filter_prefix       = "victim_raw/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3_victim_raw_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3.id
+
+  key = "victim_raw/"
+
+  content_type = "application/x-directory"
+}
+
+# --- case_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-cas-fd19152"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4-batch_data_proces-c2c7a60a"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4"
+    filter_prefix       = "case_raw/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4_case_raw_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4.id
+
+  key = "case_raw/"
+
+  content_type = "application/x-directory"
+}
+
+# --- collision_processor ---
+data "archive_file" "batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_placeholder" {
+  type        = "zip"
+  output_path = "${path.module}/batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_placeholder.zip"
+  source {
+    content  = "import json\nimport os\nimport boto3\n\ndef handler(event, context):\n    s3_client = boto3.client('s3')\n    staging_bucket = os.environ.get('COLLISION_STAGING_BUCKET_NAME')\n    \n    for record in event['Records']:\n        bucket = record['s3']['bucket']['name']\n        key = record['s3']['object']['key']\n        print(f'Processing collision data: s3://{bucket}/{key}')\n        \n        # Read source data\n        response = s3_client.get_object(Bucket=bucket, Key=key)\n        data = response['Body'].read().decode('utf-8')\n        \n        # Process and write to staging\n        processed_key = key.replace('collision_raw/', 'collision_staging/')\n        s3_client.put_object(\n            Bucket=staging_bucket,\n            Key=processed_key,\n            Body=data\n        )\n    \n    return {'statusCode': 200, 'body': 'Collision data processed'}"
+    filename = "index.py"
+  }
+}
+
+resource "aws_iam_role" "batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_role" {
+  name = "batch-data-processing-pipeline-engineering-cc001-la-5a21032-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_iam_role_policy" "batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_policy" {
+  name = "batch-data-processing-pipeline-engineering-cc001-5a21032-policy"
+  role = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject",
+          "s3:DeleteObject"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_lg" {
+  name              = "/aws/lambda/batch-data-processing-pipeline-engineering-cc001-lambda-6a1a0a0"
+  retention_in_days = 7
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_lambda_function" "batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1" {
+  function_name    = "batch-data-processing-pipeline-engineering-cc001-lambda-6a1a0a0"
+  role             = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_role.arn
+  runtime          = "python3.12"
+  handler          = "index.handler"
+  memory_size      = 128
+  timeout          = 300
+  filename         = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_placeholder.output_path
+  source_code_hash = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_placeholder.output_base64sha256
+
+  environment {
+    variables = {
+      COLLISION_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_bucket_1.id
+      COLLISION_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.id
+    }
+  }
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+
+  depends_on = [aws_cloudwatch_log_group.batch_data_processing_pipeline_engineering_cc001_lambda_collision_processor_1_lg]
+}
+
+# --- party_processor ---
+data "archive_file" "batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_placeholder" {
+  type        = "zip"
+  output_path = "${path.module}/batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_placeholder.zip"
+  source {
+    content  = "import json\nimport os\nimport boto3\n\ndef handler(event, context):\n    s3_client = boto3.client('s3')\n    staging_bucket = os.environ.get('PARTY_STAGING_BUCKET_NAME')\n    \n    for record in event['Records']:\n        bucket = record['s3']['bucket']['name']\n        key = record['s3']['object']['key']\n        print(f'Processing party data: s3://{bucket}/{key}')\n        \n        # Read source data\n        response = s3_client.get_object(Bucket=bucket, Key=key)\n        data = response['Body'].read().decode('utf-8')\n        \n        # Process and write to staging\n        processed_key = key.replace('party_raw/', 'party_staging/')\n        s3_client.put_object(\n            Bucket=staging_bucket,\n            Key=processed_key,\n            Body=data\n        )\n    \n    return {'statusCode': 200, 'body': 'Party data processed'}"
+    filename = "index.py"
+  }
+}
+
+resource "aws_iam_role" "batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_role" {
+  name = "batch-data-processing-pipeline-engineering-cc001-la-92aff1f-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_iam_role_policy" "batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_policy" {
+  name = "batch-data-processing-pipeline-engineering-cc001-92aff1f-policy"
+  role = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject",
+          "s3:DeleteObject"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_lg" {
+  name              = "/aws/lambda/batch-data-processing-pipeline-engineering-cc001-lambda-c347a52"
+  retention_in_days = 7
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_lambda_function" "batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2" {
+  function_name    = "batch-data-processing-pipeline-engineering-cc001-lambda-c347a52"
+  role             = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_role.arn
+  runtime          = "python3.12"
+  handler          = "index.handler"
+  memory_size      = 128
+  timeout          = 300
+  filename         = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_placeholder.output_path
+  source_code_hash = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_placeholder.output_base64sha256
+
+  environment {
+    variables = {
+      PARTY_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_bucket_2.id
+      PARTY_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.id
+    }
+  }
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+
+  depends_on = [aws_cloudwatch_log_group.batch_data_processing_pipeline_engineering_cc001_lambda_party_processor_2_lg]
+}
+
+# --- victim_processor ---
+data "archive_file" "batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_placeholder" {
+  type        = "zip"
+  output_path = "${path.module}/batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_placeholder.zip"
+  source {
+    content  = "import json\nimport os\nimport boto3\n\ndef handler(event, context):\n    s3_client = boto3.client('s3')\n    staging_bucket = os.environ.get('VICTIM_STAGING_BUCKET_NAME')\n    \n    for record in event['Records']:\n        bucket = record['s3']['bucket']['name']\n        key = record['s3']['object']['key']\n        print(f'Processing victim data: s3://{bucket}/{key}')\n        \n        # Read source data\n        response = s3_client.get_object(Bucket=bucket, Key=key)\n        data = response['Body'].read().decode('utf-8')\n        \n        # Process and write to staging\n        processed_key = key.replace('victim_raw/', 'victim_staging/')\n        s3_client.put_object(\n            Bucket=staging_bucket,\n            Key=processed_key,\n            Body=data\n        )\n    \n    return {'statusCode': 200, 'body': 'Victim data processed'}"
+    filename = "index.py"
+  }
+}
+
+resource "aws_iam_role" "batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_role" {
+  name = "batch-data-processing-pipeline-engineering-cc001-la-dcd94b6-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_iam_role_policy" "batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_policy" {
+  name = "batch-data-processing-pipeline-engineering-cc001-dcd94b6-policy"
+  role = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject",
+          "s3:DeleteObject"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_lg" {
+  name              = "/aws/lambda/batch-data-processing-pipeline-engineering-cc001-lambda-3ff0c6a"
+  retention_in_days = 7
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_lambda_function" "batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3" {
+  function_name    = "batch-data-processing-pipeline-engineering-cc001-lambda-3ff0c6a"
+  role             = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_role.arn
+  runtime          = "python3.12"
+  handler          = "index.handler"
+  memory_size      = 128
+  timeout          = 300
+  filename         = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_placeholder.output_path
+  source_code_hash = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_placeholder.output_base64sha256
+
+  environment {
+    variables = {
+      VICTIM_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_bucket_3.id
+      VICTIM_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.id
+    }
+  }
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+
+  depends_on = [aws_cloudwatch_log_group.batch_data_processing_pipeline_engineering_cc001_lambda_victim_processor_3_lg]
+}
+
+# --- case_processor ---
+data "archive_file" "batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_placeholder" {
+  type        = "zip"
+  output_path = "${path.module}/batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_placeholder.zip"
+  source {
+    content  = "import json\nimport os\nimport boto3\n\ndef handler(event, context):\n    s3_client = boto3.client('s3')\n    staging_bucket = os.environ.get('CASE_STAGING_BUCKET_NAME')\n    \n    for record in event['Records']:\n        bucket = record['s3']['bucket']['name']\n        key = record['s3']['object']['key']\n        print(f'Processing case data: s3://{bucket}/{key}')\n        \n        # Read source data\n        response = s3_client.get_object(Bucket=bucket, Key=key)\n        data = response['Body'].read().decode('utf-8')\n        \n        # Process and write to staging\n        processed_key = key.replace('case_raw/', 'case_staging/')\n        s3_client.put_object(\n            Bucket=staging_bucket,\n            Key=processed_key,\n            Body=data\n        )\n    \n    return {'statusCode': 200, 'body': 'Case data processed'}"
+    filename = "index.py"
+  }
+}
+
+resource "aws_iam_role" "batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_role" {
+  name = "batch-data-processing-pipeline-engineering-cc001-la-be18dfe-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_iam_role_policy" "batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_policy" {
+  name = "batch-data-processing-pipeline-engineering-cc001-be18dfe-policy"
+  role = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject",
+          "s3:DeleteObject"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_lg" {
+  name              = "/aws/lambda/batch-data-processing-pipeline-engineering-cc001-lambda-2295c69"
+  retention_in_days = 7
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_lambda_function" "batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4" {
+  function_name    = "batch-data-processing-pipeline-engineering-cc001-lambda-2295c69"
+  role             = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_role.arn
+  runtime          = "python3.12"
+  handler          = "index.handler"
+  memory_size      = 128
+  timeout          = 300
+  filename         = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_placeholder.output_path
+  source_code_hash = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_placeholder.output_base64sha256
+
+  environment {
+    variables = {
+      CASE_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_bucket_4.id
+      CASE_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.id
+    }
+  }
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+
+  depends_on = [aws_cloudwatch_log_group.batch_data_processing_pipeline_engineering_cc001_lambda_case_processor_4_lg]
+}
+
+# --- collision_staging_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-col-04d532d"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5-batc-31dc2bb3"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5"
+    filter_prefix       = "collision_staging/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5_collision_staging_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.id
+
+  key = "collision_staging/"
+
+  content_type = "application/x-directory"
+}
+
+# --- party_staging_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-par-be215f8"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6-batch_da-5737baf0"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5"
+    filter_prefix       = "party_staging/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6_party_staging_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.id
+
+  key = "party_staging/"
+
+  content_type = "application/x-directory"
+}
+
+# --- victim_staging_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-vic-d91ab14"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7-batch_d-597fd336"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5"
+    filter_prefix       = "victim_staging/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7_victim_staging_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.id
+
+  key = "victim_staging/"
+
+  content_type = "application/x-directory"
+}
+
+# --- case_staging_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-cas-b1d29e8"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_lambda_permission" "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5" {
+  statement_id  = "AllowS3-batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8-batch_dat-b33c8aa6"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.arn
+}
+
+resource "aws_s3_bucket_notification" "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_notification" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.id
+
+  lambda_function {
+    id                  = "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5"
+    filter_prefix       = "case_staging/"
+    lambda_function_arn = aws_lambda_function.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+  depends_on = [aws_lambda_permission.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_invoke_batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5]
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8_case_staging_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.id
+
+  key = "case_staging/"
+
+  content_type = "application/x-directory"
+}
+
+# --- refine_data ---
+data "archive_file" "batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_placeholder" {
+  type        = "zip"
+  output_path = "${path.module}/batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_placeholder.zip"
+  source {
+    content  = "import json\nimport os\nimport boto3\n\ndef handler(event, context):\n    s3_client = boto3.client('s3')\n    minilake_bucket = os.environ.get('MINILAKE_BUCKET_NAME')\n    \n    for record in event['Records']:\n        bucket = record['s3']['bucket']['name']\n        key = record['s3']['object']['key']\n        print(f'Refining data: s3://{bucket}/{key}')\n        \n        # Read staging data\n        response = s3_client.get_object(Bucket=bucket, Key=key)\n        data = response['Body'].read().decode('utf-8')\n        \n        # Determine target path in minilake\n        if 'collision_staging' in key:\n            target_key = key.replace('collision_staging/', 'collision/')\n        elif 'party_staging' in key:\n            target_key = key.replace('party_staging/', 'party/')\n        elif 'victim_staging' in key:\n            target_key = key.replace('victim_staging/', 'victim/')\n        elif 'case_staging' in key:\n            target_key = key.replace('case_staging/', 'case/')\n        else:\n            target_key = key\n        \n        # Write refined data to minilake\n        s3_client.put_object(\n            Bucket=minilake_bucket,\n            Key=target_key,\n            Body=data\n        )\n    \n    return {'statusCode': 200, 'body': 'Data refined and loaded to minilake'}"
+    filename = "index.py"
+  }
+}
+
+resource "aws_iam_role" "batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_role" {
+  name = "batch-data-processing-pipeline-engineering-cc001-la-bb00827-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_iam_role_policy" "batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_policy" {
+  name = "batch-data-processing-pipeline-engineering-cc001-bb00827-policy"
+  role = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject",
+          "s3:DeleteObject"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_lg" {
+  name              = "/aws/lambda/batch-data-processing-pipeline-engineering-cc001-lambda-6b52a3e"
+  retention_in_days = 7
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_lambda_function" "batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5" {
+  function_name    = "batch-data-processing-pipeline-engineering-cc001-lambda-6b52a3e"
+  role             = aws_iam_role.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_role.arn
+  runtime          = "python3.12"
+  handler          = "index.handler"
+  memory_size      = 256
+  timeout          = 600
+  filename         = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_placeholder.output_path
+  source_code_hash = data.archive_file.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_placeholder.output_base64sha256
+
+  environment {
+    variables = {
+      COLLISION_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_collision_staging_bucket_5.id
+      PARTY_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_party_staging_bucket_6.id
+      VICTIM_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_victim_staging_bucket_7.id
+      CASE_STAGING_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_case_staging_bucket_8.id
+      MINILAKE_BUCKET_BUCKET = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+    }
+  }
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+
+  depends_on = [aws_cloudwatch_log_group.batch_data_processing_pipeline_engineering_cc001_lambda_refine_data_5_lg]
+}
+
+# --- minilake_bucket ---
+resource "aws_s3_bucket" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9" {
+  bucket        = "batch-data-processing-pipeline-engineering-cc001-s3-min-432f547"
+  force_destroy = true
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9_versioning" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+
+  versioning_configuration {
+    status = "Suspended"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9_sse" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9_collision_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+
+  key = "collision/"
+
+  content_type = "application/x-directory"
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9_party_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+
+  key = "party/"
+
+  content_type = "application/x-directory"
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9_victim_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+
+  key = "victim/"
+
+  content_type = "application/x-directory"
+}
+
+resource "aws_s3_object" "batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9_case_prefix" {
+  bucket = aws_s3_bucket.batch_data_processing_pipeline_engineering_cc001_s3_minilake_bucket_9.id
+
+  key = "case/"
+
+  content_type = "application/x-directory"
+}
+
+# --- minilake_database ---
+resource "aws_glue_catalog_database" "batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database" {
+  name        = "batch_data_processing_pipeline_engineering_cc001_glue_d_4a52de3"
+  description = "Glue Data Catalog database"
+}
+
+resource "aws_glue_catalog_table" "batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database_collision_table" {
+  database_name = aws_glue_catalog_database.batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database.name
+
+  name = "collision"
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters {
+    EXTERNAL = "TRUE"
+  }
+
+  storage_descriptor {
+    location = "s3://minilake_bucket/collision/"
+
+    input_format = "org.apache.hadoop.mapred.TextInputFormat"
+
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+    }
+
+    columns {
+      name = "collision_id"
+      type = "string"
+    }
+
+    columns {
+      name = "timestamp"
+      type = "timestamp"
+    }
+
+    columns {
+      name = "location"
+      type = "string"
+    }
+  }
+}
+
+resource "aws_glue_catalog_table" "batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database_party_table" {
+  database_name = aws_glue_catalog_database.batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database.name
+
+  name = "party"
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters {
+    EXTERNAL = "TRUE"
+  }
+
+  storage_descriptor {
+    location = "s3://minilake_bucket/party/"
+
+    input_format = "org.apache.hadoop.mapred.TextInputFormat"
+
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+    }
+
+    columns {
+      name = "party_id"
+      type = "string"
+    }
+
+    columns {
+      name = "name"
+      type = "string"
+    }
+
+    columns {
+      name = "type"
+      type = "string"
+    }
+  }
+}
+
+resource "aws_glue_catalog_table" "batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database_victim_table" {
+  database_name = aws_glue_catalog_database.batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database.name
+
+  name = "victim"
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters {
+    EXTERNAL = "TRUE"
+  }
+
+  storage_descriptor {
+    location = "s3://minilake_bucket/victim/"
+
+    input_format = "org.apache.hadoop.mapred.TextInputFormat"
+
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+    }
+
+    columns {
+      name = "victim_id"
+      type = "string"
+    }
+
+    columns {
+      name = "name"
+      type = "string"
+    }
+
+    columns {
+      name = "age"
+      type = "int"
+    }
+  }
+}
+
+resource "aws_glue_catalog_table" "batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database_case_table" {
+  database_name = aws_glue_catalog_database.batch_data_processing_pipeline_engineering_cc001_glue_data_catalog_minilake_database.name
+
+  name = "case"
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters {
+    EXTERNAL = "TRUE"
+  }
+
+  storage_descriptor {
+    location = "s3://minilake_bucket/case/"
+
+    input_format = "org.apache.hadoop.mapred.TextInputFormat"
+
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+    }
+
+    columns {
+      name = "case_id"
+      type = "string"
+    }
+
+    columns {
+      name = "status"
+      type = "string"
+    }
+
+    columns {
+      name = "date"
+      type = "date"
+    }
+  }
+}
+
+# --- athena_workgroup ---
+# ⚠️  WARNING: athena is NOT AWS Free Tier eligible.
+# Costs will be incurred when this resource is deployed.
+# Defaults are set to minimum viable size to reduce cost.
+
+resource "aws_cloudwatch_log_group" "batch_data_processing_pipeline_engineering_cc001_athena_athena_workgroup_lg" {
+  name              = "/aws/athena/batch-data-processing-pipeline-engineering-cc001-athena-athena-workgroup"
+  retention_in_days = 7
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}
+
+resource "aws_athena_workgroup" "batch_data_processing_pipeline_engineering_cc001_athena_athena_workgroup" {
+  name = "batch-data-processing-pipeline-engineering-cc001-athena-athena-workgroup"
+
+  configuration {
+    enforce_workgroup_configuration    = true
+    publish_cloudwatch_metrics_enabled = false
+
+    result_configuration {
+      output_location = "s3://batch-data-processing-pipeline-engineering-cc001-s3-min-432f547/query-results/"
+    }
+
+    engine_version {
+      selected_engine_version = "AUTO"
+    }
+  }
+
+  tags = {
+    Pipeline      = "batch_data_processing_pipeline"
+    BusinessUnit  = "engineering"
+    CostCenter    = "cc001"
+    ManagedBy     = "aws-pipeline-engine"
+  }
+}

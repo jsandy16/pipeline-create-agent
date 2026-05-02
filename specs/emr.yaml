@@ -1,0 +1,143 @@
+service_type: emr
+is_principal: true
+terraform_resource: aws_emr_cluster
+description: "Amazon EMR cluster — managed big-data platform running Spark, Hive, and other frameworks"
+
+defaults:
+  release_label: "emr-6.15.0"
+  master_instance_type: "m4.large"   # smallest viable master; NOT free tier
+  core_instance_type: "m4.large"     # smallest viable core
+  core_instance_count: 1             # minimum core nodes
+  keep_job_flow_alive_when_no_steps: false
+  termination_protection: false
+  applications:
+    - "Spark"
+    - "Hive"
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "ec2:DescribeInstances"
+    - "ec2:DescribeVolumes"
+  as_target_of:
+    stepfunctions:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+    lambda:
+      - "elasticmapreduce:AddJobFlowSteps"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:BatchWriteItem"
+    glue:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka:DescribeClusterV2"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+vpc_triggers:
+  - aurora
+  - msk
+  - redshift
+
+invocation:
+  description: >
+    Lambda/StepFunctions submits steps via add_job_flow_steps(JobFlowId=cluster_id, Steps=[...]).
+    Cluster ID from env var {SELF_UPPER}_CLUSTER_ID. Caller needs iam:PassRole for the
+    EMR service role when RunJobFlow is used.
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_CLUSTER_ID"
+      ref: "aws_emr_cluster.{self_label}.id"
+      boto3_param: "JobFlowId"
+      description: "EMR cluster ID — passed as JobFlowId in add_job_flow_steps()"
+  caller_iam:
+    - "elasticmapreduce:AddJobFlowSteps"
+    - "elasticmapreduce:DescribeStep"
+    - "elasticmapreduce:ListSteps"
+    - "elasticmapreduce:DescribeCluster"
+    - "iam:PassRole"
+  passrole_required: true
+  passrole_resource: "aws_iam_role.{self_label}_role.arn"
+
+code_update:
+  method: s3_script
+  boto3_client: elasticmapreduce
+  description: >
+    EMR step scripts (Spark/Hive) are stored in S3. Add new steps to a running cluster via
+    add_job_flow_steps(). Existing steps cannot be modified; add a new step with the corrected script.
+    Update S3 script content via s3.put_object() before submitting the step.
+  config_update:
+    client: elasticmapreduce
+    operation: add_job_flow_steps
+    id_param: JobFlowId
+    note: "Cluster ID from aws_emr_cluster terraform output or describe_cluster()"
+  code_update_steps:
+    - "emr_client = boto3.client('emr', region_name=region)"
+    - "clusters = emr_client.list_clusters(ClusterStates=['WAITING','RUNNING'])['Clusters']"
+    - "cluster = next(c for c in clusters if c['Name'] == resource_name)"
+    - "Update script at S3 path via s3.put_object()"
+    - "emr_client.add_job_flow_steps(JobFlowId=cluster['Id'], Steps=[{Name:'fix-step', ActionOnFailure:'CONTINUE', HadoopJarStep:{Jar:'command-runner.jar', Args:['spark-submit','s3://bucket/script.py']}}])"
+  discovery_ops:
+    - op: describe_cluster
+      id_param: ClusterId
+      returns: ["Cluster.Id", "Cluster.Name", "Cluster.Status.State", "Cluster.LogUri", "Cluster.Ec2InstanceAttributes"]
+    - op: list_clusters
+      filter: "ClusterStates=['WAITING','RUNNING','BOOTSTRAPPING']"
+      returns: ["Clusters[].Id", "Clusters[].Name", "Clusters[].Status.State"]
+    - op: list_steps
+      id_param: ClusterId
+      returns: ["Steps[].Id", "Steps[].Name", "Steps[].Status.State", "Steps[].Config.Args"]
+
+runtime_diagnostics:
+  - pattern: "BOOTSTRAP_FAILURE|bootstrap.*failed"
+    category: CONFIG
+    cause: "EMR bootstrap action failed — check bootstrap script in S3"
+    fix_type: manual
+    resolution: "Check bootstrap script S3 path. View bootstrap logs via describe_cluster()['Cluster']['LogUri']"
+  - pattern: "FAILED.*step|step.*FAILED"
+    category: CONFIG
+    cause: "EMR step failed — check step logs in S3 at cluster LogUri"
+    fix_type: check_logs
+    resolution: "Get step logs: s3://log-uri/cluster-id/steps/step-id/. View stderr for Python traceback."

@@ -1,0 +1,90 @@
+service_type: dms
+is_principal: true
+terraform_resource: aws_dms_replication_instance
+description: "AWS Database Migration Service replication instance — migrates data between source and target databases"
+
+defaults:
+  replication_instance_class: "dms.t2.micro"  # smallest; NOT free tier (~$0.018/hr)
+  allocated_storage: 20                         # minimum GB
+  engine_name: "aurora-postgresql"
+  multi_az: false
+  publicly_accessible: false
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+  as_target_of:
+    aurora:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:GetObject"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:DescribeTable"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift:ModifyCluster"
+    aurora:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+      - "rds:ModifyDBCluster"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:DescribeStream"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+vpc_triggers:
+  - aurora
+  - redshift
+
+code_update:
+  method: api_config
+  boto3_client: dms
+  description: >
+    DMS replication task settings and column mappings updated via modify_replication_task().
+    Task must be stopped first. Table mappings (JSON) define which tables to replicate.
+  config_update:
+    client: dms
+    operation: modify_replication_task
+    id_param: ReplicationTaskArn
+    note: "Must stop task first: stop_replication_task(). Wait for status 'stopped' before modifying."
+  code_update_steps:
+    - "dms = boto3.client('dms', region_name=region)"
+    - "tasks = dms.describe_replication_tasks()['ReplicationTasks']"
+    - "task = next(t for t in tasks if resource_name in t['ReplicationTaskIdentifier'])"
+    - "dms.stop_replication_task(ReplicationTaskArn=task['ReplicationTaskArn'])"
+    - "Poll task status until 'stopped'"
+    - "dms.modify_replication_task(ReplicationTaskArn=task['ReplicationTaskArn'], TableMappings=json.dumps(new_mappings))"
+    - "dms.start_replication_task(ReplicationTaskArn=task['ReplicationTaskArn'], StartReplicationTaskType='resume-processing')"
+  discovery_ops:
+    - op: describe_replication_tasks
+      returns: ["ReplicationTasks[].ReplicationTaskArn", "ReplicationTasks[].Status", "ReplicationTasks[].ReplicationTaskIdentifier"]
+    - op: describe_replication_instances
+      returns: ["ReplicationInstances[].ReplicationInstanceArn", "ReplicationInstances[].ReplicationInstanceStatus"]
+runtime_diagnostics:
+  - pattern: "TestConnectionFailed|Connection.*failed"
+    category: CONFIG
+    cause: "DMS cannot connect to source or target — check VPC, security groups, or credentials"
+    fix_type: manual
+    resolution: "dms.test_connection(ReplicationInstanceArn=ri_arn, EndpointArn=ep_arn) to diagnose"

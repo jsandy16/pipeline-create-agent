@@ -1,0 +1,1214 @@
+# ============================================================================
+# SageMaker Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL SageMaker knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/sagemaker.yaml with exhaustive
+# coverage of SageMaker capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — resource name constraints
+#   3. defaults            — Terraform attribute defaults (minimum-cost)
+#   4. quotas              — AWS service limits
+#   5. container_images    — pre-built DLC images, custom ECR, framework map
+#   6. training_jobs       — training job configuration, instance types, modes
+#   7. models              — model registration, containers, multi-model
+#   8. endpoints           — real-time inference, endpoint configs, autoscaling
+#   9. processing_jobs     — data processing, evaluation, feature engineering
+#  10. batch_transform     — offline batch inference
+#  11. pipelines           — SageMaker Pipelines (ML workflows)
+#  12. feature_store       — feature groups, online/offline store
+#  13. model_registry      — model packages, versioning, approval
+#  14. instance_types      — complete instance type catalog
+#  15. encryption          — KMS, inter-container, volume encryption
+#  16. iam                 — complete IAM action catalog & integration graph rules
+#  17. env_vars            — auto-wired environment variables
+#  18. vpc_triggers        — VPC placement rules
+#  19. integrations        — wiring ownership with all connected services
+#  20. terraform_resources — all TF resource types
+#  21. boto3_operations    — complete API operation reference
+#  22. runtime_diagnostics — error patterns & auto-fix rules
+#  23. tags                — tagging constraints
+#  24. code_update         — developer agent instructions
+#  25. logging             — CloudWatch log groups, metrics
+# ============================================================================
+
+# -- 1. Identity ------------------------------------------------------------
+identity:
+  service_type: sagemaker
+  aws_service_name: "Amazon SageMaker"
+  is_principal: true            # SageMaker has an IAM execution role
+  terraform_resource: aws_sagemaker_endpoint
+  description: >
+    Amazon SageMaker — managed ML platform for training, deploying, and invoking
+    real-time inference endpoints. The generated Terraform creates an IAM execution
+    role, a SageMaker model (container + model artifacts), an endpoint configuration,
+    and a real-time endpoint. A CloudWatch log group captures endpoint logs.
+  free_tier:
+    status: never_free
+    details: >
+      SageMaker has NO free tier for inference endpoints. ml.t2.medium costs
+      ~$0.065/hour (~$47/month). Training instances are billed per second with
+      a 1-minute minimum. Even ml.t2.medium for notebooks only has a 2-month
+      trial (250 hours/month), not a permanent free tier.
+    warning: >
+      NEVER FREE TIER. The HCL renderer emits a cost warning comment at the top
+      of every SageMaker resource block. Always use ml.t2.medium as the minimum
+      instance type.
+  pricing_model: per_instance_hour  # billed per instance-second (1-min minimum)
+
+# -- 2. Naming --------------------------------------------------------------
+naming:
+  resource_name_limit: 63        # max characters for SageMaker resource names
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9-"  # letters, digits, hyphens
+  rules:
+    - "Model name: max 63 characters, ^[a-zA-Z0-9](-*[a-zA-Z0-9])*"
+    - "Endpoint name: max 63 characters, ^[a-zA-Z0-9](-*[a-zA-Z0-9])*"
+    - "Endpoint config name: max 63 characters, ^[a-zA-Z0-9](-*[a-zA-Z0-9])*"
+    - "Training job name: max 63 characters, ^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}"
+    - "Processing job name: max 63 characters"
+    - "Transform job name: max 63 characters"
+    - "Pipeline name: max 256 characters, ^[a-zA-Z0-9](-*[a-zA-Z0-9])*"
+    - "No consecutive hyphens in any name"
+    - "Must start and end with alphanumeric"
+  suffixes_used_by_renderer:
+    - "-model"   # suffixed_name(bp.resource_name, "-model", limit=63)
+    - "-cfg"     # suffixed_name(bp.resource_name, "-cfg", limit=63)
+    - "-role"    # IAM role name
+    - "-policy"  # IAM policy name
+
+# -- 3. Defaults (minimum-cost) ---------------------------------------------
+defaults:
+  # Compute — cheapest SageMaker inference instance. Not free tier.
+  instance_type: "ml.t2.medium"
+  initial_instance_count: 1
+
+  # Pre-built image selection (used when container_image is NOT set)
+  framework: "sagemaker-scikit-learn"
+  image_tag: "1.2-1-cpu-py3"
+
+  # Model artifacts — S3 URI of serialised model (model.tar.gz)
+  # Auto-resolved to the connected S3 bucket when an S3 -> SageMaker integration exists
+  model_data_url: "s3://placeholder-model-bucket/model.tar.gz"
+
+  # Custom container image (optional override)
+  # container_image: "123456789.dkr.ecr.us-east-1.amazonaws.com/my-model:latest"
+
+# -- 4. Quotas --------------------------------------------------------------
+quotas:
+  # Endpoint limits
+  max_endpoints_per_region: 200           # adjustable
+  max_endpoint_configs_per_region: 200    # adjustable
+  max_models_per_region: 200              # adjustable
+  max_variants_per_endpoint: 10
+  max_instance_count_per_variant: 100
+  max_model_size: "100 GB"               # uncompressed model artifacts
+  max_model_tar_gz: "30 GB"             # compressed model.tar.gz
+
+  # Training limits
+  max_training_jobs_concurrent: 24        # adjustable, per region
+  max_training_job_duration: "432000 seconds"  # 5 days
+  max_training_instances: 20              # per job
+  max_training_volume_size: "30 TB"       # EBS volume
+
+  # Processing limits
+  max_processing_jobs_concurrent: 24      # adjustable
+  max_processing_instances: 20
+  max_processing_volume_size: "30 TB"
+
+  # Transform limits
+  max_transform_jobs_concurrent: 24
+  max_transform_instances: 20
+
+  # General
+  max_tags_per_resource: 50
+  max_tag_key_length: 128
+  max_tag_value_length: 256
+  max_pipeline_steps: 50                  # SageMaker Pipeline steps
+
+# -- 5. Container Images ----------------------------------------------------
+container_images:
+  # DEFAULT PATH (recommended): leave container_image unset.
+  # The renderer uses aws_sagemaker_prebuilt_ecr_image Terraform data source,
+  # which resolves the correct DLC registry URI for your account and region
+  # automatically. This avoids the "does not grant permission to
+  # sagemaker.amazonaws.com service principal" error.
+  default_method: "aws_sagemaker_prebuilt_ecr_image"
+
+  # Supported framework repository_name values + example image_tag
+  frameworks:
+    sklearn:
+      repository_name: "sagemaker-scikit-learn"
+      example_tags:
+        - "1.2-1-cpu-py3"
+        - "0.23-1-cpu-py3"
+      use_cases: ["classification", "regression", "clustering"]
+
+    xgboost:
+      repository_name: "sagemaker-xgboost"
+      example_tags:
+        - "1.7-1"
+        - "1.5-1"
+      use_cases: ["gradient boosting", "classification", "regression", "ranking"]
+
+    pytorch_inference:
+      repository_name: "pytorch-inference"
+      example_tags:
+        cpu: "2.1.0-cpu-py310"
+        gpu: "2.1.0-gpu-py310-cu121"
+      use_cases: ["deep learning inference", "NLP", "computer vision"]
+
+    pytorch_training:
+      repository_name: "pytorch-training"
+      example_tags:
+        cpu: "2.1.0-cpu-py310"
+        gpu: "2.1.0-gpu-py310-cu121"
+      use_cases: ["deep learning training"]
+
+    tensorflow_inference:
+      repository_name: "tensorflow-inference"
+      example_tags:
+        cpu: "2.13.0-cpu"
+        gpu: "2.13.0-gpu"
+      use_cases: ["deep learning inference", "NLP", "image classification"]
+
+    tensorflow_training:
+      repository_name: "tensorflow-training"
+      example_tags:
+        cpu: "2.13.0-cpu"
+        gpu: "2.13.0-gpu"
+      use_cases: ["deep learning training"]
+
+    huggingface_pytorch_inference:
+      repository_name: "huggingface-pytorch-inference"
+      example_tags:
+        - "2.0.0-transformers4.28.1-cpu-py310"
+        - "2.0.0-transformers4.28.1-gpu-py310-cu118"
+      use_cases: ["NLP", "transformers", "text generation", "sentiment analysis"]
+
+    mxnet_inference:
+      repository_name: "mxnet-inference"
+      example_tags:
+        - "1.9.0-cpu-py38"
+      use_cases: ["deep learning inference", "legacy models"]
+
+  # CUSTOM IMAGE PATH
+  custom_image:
+    description: >
+      Set container_image to a fully-qualified ECR URI from your own account's
+      registry. You must add an aws_ecr_repository_policy granting
+      sagemaker.amazonaws.com the ecr:GetDownloadUrlForLayer,
+      ecr:BatchGetImage, and ecr:BatchCheckLayerAvailability actions.
+    required_ecr_permissions:
+      - "ecr:GetDownloadUrlForLayer"
+      - "ecr:BatchGetImage"
+      - "ecr:BatchCheckLayerAvailability"
+    format: "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/REPO:TAG"
+
+  # Built-in SageMaker algorithms (use algorithm ARN instead of container image)
+  builtin_algorithms:
+    - name: "Linear Learner"
+      algorithm_arn_suffix: "linear-learner"
+    - name: "XGBoost"
+      algorithm_arn_suffix: "xgboost"
+    - name: "K-Means"
+      algorithm_arn_suffix: "kmeans"
+    - name: "PCA"
+      algorithm_arn_suffix: "pca"
+    - name: "Factorization Machines"
+      algorithm_arn_suffix: "factorization-machines"
+    - name: "Image Classification"
+      algorithm_arn_suffix: "image-classification"
+    - name: "Object Detection"
+      algorithm_arn_suffix: "object-detection"
+    - name: "Semantic Segmentation"
+      algorithm_arn_suffix: "semantic-segmentation"
+    - name: "BlazingText"
+      algorithm_arn_suffix: "blazingtext"
+    - name: "DeepAR"
+      algorithm_arn_suffix: "forecasting-deepar"
+    - name: "Random Cut Forest"
+      algorithm_arn_suffix: "randomcutforest"
+    - name: "IP Insights"
+      algorithm_arn_suffix: "ipinsights"
+
+# -- 6. Training Jobs -------------------------------------------------------
+training_jobs:
+  description: >
+    SageMaker training jobs run your training code on managed compute clusters.
+    Specify the algorithm/container, input data channels (S3), output location (S3),
+    instance type, and hyperparameters. SageMaker handles provisioning, running,
+    and shutting down the cluster.
+
+  input_modes:
+    File: "Downloads all training data from S3 to local EBS before training starts"
+    Pipe: "Streams data from S3 to the training container via Linux pipe"
+    FastFile: "POSIX-compatible streaming access to S3 (recommended for large datasets)"
+
+  training_flow:
+    - "1. Upload training data to S3"
+    - "2. Call create_training_job with algorithm spec, input channels, output S3, resources"
+    - "3. SageMaker provisions cluster, pulls container, downloads data"
+    - "4. Training runs (logs go to CloudWatch /aws/sagemaker/TrainingJobs)"
+    - "5. Model artifacts written to S3 OutputDataConfig.S3OutputPath"
+    - "6. Cluster terminated automatically"
+
+  resource_config:
+    instance_type: "ml.m5.large (balanced), ml.c5.xlarge (CPU), ml.p3.2xlarge (GPU)"
+    instance_count: "1-20 (distributed training with multiple instances)"
+    volume_size_gb: "1-30720 (EBS volume per instance)"
+    volume_kms_key: "Optional KMS key for volume encryption"
+
+  stopping_condition:
+    max_runtime_seconds: "3600 (default 1 hour, max 432000 = 5 days)"
+    max_wait_seconds: "For managed spot training, max time to wait for spot capacity"
+
+  spot_training:
+    description: "Up to 90% cost savings using EC2 Spot Instances"
+    terraform_attribute: "enable_managed_spot_training = true"
+    max_wait_time: "Must be set when using spot training"
+    checkpoint_s3_uri: "Optional checkpoint S3 location for spot interruption recovery"
+
+  distributed_training:
+    data_parallel: "Split training data across multiple instances"
+    model_parallel: "Split large model across multiple instances (GPUs)"
+    note: "Requires framework support (PyTorch DDP, TensorFlow MirroredStrategy)"
+
+  hyperparameter_tuning:
+    description: "Automatic model tuning (hyperparameter optimization)"
+    boto3_op: "create_hyper_parameter_tuning_job"
+    strategies: ["Bayesian", "Random", "Hyperband", "Grid"]
+    max_parallel_jobs: 10
+    max_training_jobs: 500
+
+# -- 7. Models ---------------------------------------------------------------
+models:
+  description: >
+    A SageMaker model specifies the container image and model artifacts (S3 URI)
+    needed for inference. Models are registered definitions, not running resources.
+    They are referenced by endpoint configurations.
+
+  primary_container:
+    image: "ECR image URI or data source reference"
+    model_data_url: "S3 URI of model.tar.gz"
+    environment: "Dict of environment variables passed to container"
+
+  model_artifacts:
+    format: "model.tar.gz — a gzipped tar archive"
+    contents: "Framework-specific serialized model files"
+    max_size: "30 GB compressed, 100 GB uncompressed"
+    s3_path_pattern: "s3://BUCKET/model-output/MODEL-NAME/output/model.tar.gz"
+
+  inference_container:
+    ports:
+      health_check: 8080    # GET /ping — must return 200
+      inference: 8080        # POST /invocations — inference endpoint
+
+  multi_model_endpoints:
+    description: "Host multiple models behind a single endpoint"
+    terraform_attribute: "mode = 'MultiModel'"
+    model_data_url: "S3 prefix containing multiple model.tar.gz files"
+
+  multi_container_endpoints:
+    description: "Chain multiple containers in serial or direct invocation"
+    max_containers: 15
+    modes: ["Direct (invoke specific container)", "Serial (pipeline)"]
+
+# -- 8. Endpoints ------------------------------------------------------------
+endpoints:
+  description: >
+    Real-time inference endpoints. An endpoint references an endpoint configuration,
+    which references one or more model variants. The endpoint provisions ML instances
+    and deploys the model container.
+
+  lifecycle:
+    states:
+      Creating: "Provisioning instances and deploying model"
+      InService: "Endpoint is ready for inference"
+      Updating: "Rolling update to new configuration"
+      Deleting: "Shutting down instances"
+      Failed: "Endpoint creation failed"
+      RollingBack: "Rolling back a failed update"
+    typical_creation_time: "5-15 minutes"
+
+  production_variants:
+    variant_name: "Unique name for this variant (e.g., 'primary', 'canary')"
+    model_name: "Reference to a registered SageMaker model"
+    instance_type: "ml.t2.medium, ml.m5.large, etc."
+    initial_instance_count: 1
+    initial_variant_weight: 1.0  # traffic distribution weight
+
+  autoscaling:
+    terraform_resource: "aws_appautoscaling_target + aws_appautoscaling_policy"
+    scaling_dimension: "sagemaker:variant:DesiredInstanceCount"
+    metrics:
+      - "SageMakerVariantInvocationsPerInstance"
+      - "CPUUtilization"
+      - "MemoryUtilization"
+      - "GPUUtilization"
+    min_capacity: 1
+    max_capacity: "up to 100 instances per variant"
+
+  data_capture:
+    description: "Log inference request/response data to S3 for monitoring"
+    terraform_block: "data_capture_config"
+    capture_modes: ["Input", "Output"]
+    sampling_percentage: "1-100"
+    destination_s3_uri: "S3 path for captured data"
+
+  invoke_endpoint:
+    boto3_op: "invoke_endpoint"
+    parameters:
+      EndpointName: "Name of the endpoint"
+      Body: "Inference input payload"
+      ContentType: "application/json, text/csv, etc."
+      Accept: "Response content type"
+      TargetVariant: "Optional: specific variant to invoke"
+    response: "Body (StreamingBody), ContentType, InvokedProductionVariant"
+
+  serverless_inference:
+    description: "Auto-scaling to zero, pay-per-use inference"
+    terraform_block: "serverless_config"
+    memory_size_mb: [1024, 2048, 3072, 4096, 5120, 6144]
+    max_concurrency: "1-200"
+    provisioned_concurrency: "Optional: keep instances warm"
+
+# -- 9. Processing Jobs -------------------------------------------------------
+processing_jobs:
+  description: >
+    Run data processing, feature engineering, model evaluation, or any
+    arbitrary script on managed compute. Not tied to training or inference.
+
+  app_specification:
+    image_uri: "ECR container image with processing logic"
+    container_entrypoint: "Optional: override container CMD"
+    container_arguments: "Optional: arguments to the container"
+
+  processing_inputs:
+    - source: "S3 or filesystem"
+      destination: "/opt/ml/processing/input/INPUT_NAME"
+      s3_data_type: "S3Prefix or ManifestFile"
+
+  processing_outputs:
+    - source: "/opt/ml/processing/output/OUTPUT_NAME"
+      destination: "S3 URI"
+      s3_upload_mode: "EndOfJob or Continuous"
+
+  processing_resources:
+    instance_type: "ml.m5.xlarge (recommended for general processing)"
+    instance_count: 1
+    volume_size_gb: 30
+
+  common_use_cases:
+    - "Data preprocessing / feature engineering"
+    - "Model evaluation (compute metrics on test set)"
+    - "Data quality checks"
+    - "Generating bias reports"
+
+# -- 10. Batch Transform ------------------------------------------------------
+batch_transform:
+  description: >
+    Run offline batch inference on a dataset in S3. Creates temporary instances,
+    processes the data, writes predictions to S3, then shuts down.
+
+  transform_input:
+    data_source: "S3 URI of input dataset"
+    content_type: "text/csv, application/json, etc."
+    split_type: "Line, RecordIO, TFRecord, None"
+
+  transform_output:
+    s3_output_path: "S3 URI for predictions"
+    accept: "Output content type"
+    assemble_with: "Line or None"
+
+  batch_strategy:
+    MultiRecord: "Pack multiple records per inference request (faster)"
+    SingleRecord: "One record per inference request (safer for large records)"
+
+  max_concurrent_transforms: 0  # 0 = auto
+  max_payload_mb: 100           # per inference request
+
+# -- 11. SageMaker Pipelines --------------------------------------------------
+pipelines:
+  description: >
+    SageMaker Pipelines is a native ML workflow orchestration service.
+    Define DAGs of steps (training, processing, transform, model registration,
+    condition, callback) as code.
+
+  step_types:
+    - "TrainingStep"
+    - "ProcessingStep"
+    - "TransformStep"
+    - "CreateModelStep"
+    - "RegisterModel"
+    - "ConditionStep"
+    - "CallbackStep"
+    - "LambdaStep"
+    - "QualityCheckStep"
+    - "ClarifyCheckStep"
+    - "FailStep"
+
+  max_steps: 50
+  max_parallel_steps: "Limited by account quotas"
+  execution_role: "Same IAM execution role as the SageMaker model"
+
+  parameters:
+    - "ParameterString"
+    - "ParameterInteger"
+    - "ParameterFloat"
+    - "ParameterBoolean"
+
+# -- 12. Feature Store --------------------------------------------------------
+feature_store:
+  description: >
+    Centralized repository for storing, retrieving, and sharing ML features.
+    Supports both online (low-latency reads) and offline (S3-based) stores.
+
+  feature_group:
+    record_identifier: "Unique identifier for each record"
+    event_time: "Timestamp for the record"
+    online_store: "DynamoDB-backed for low-latency lookups"
+    offline_store: "S3-backed for batch training data"
+
+  terraform_resource: "aws_sagemaker_feature_group"
+
+# -- 13. Model Registry -------------------------------------------------------
+model_registry:
+  description: >
+    Central catalog for managing model versions. Model packages can be
+    approved/rejected for deployment via approval status.
+
+  model_package_group: "Named group containing model package versions"
+  model_package: "A specific version with metadata, metrics, artifacts"
+  approval_statuses: ["PendingManualApproval", "Approved", "Rejected"]
+  terraform_resource: "aws_sagemaker_model_package_group"
+
+# -- 14. Instance Types -------------------------------------------------------
+instance_types:
+  inference:
+    general_purpose:
+      - type: "ml.t2.medium"
+        vcpu: 2
+        memory_gb: 4
+        gpu: 0
+        cost_per_hour_approx: "$0.065"
+        note: "Cheapest. Burstable. Good for dev/test."
+      - type: "ml.m5.large"
+        vcpu: 2
+        memory_gb: 8
+        gpu: 0
+        cost_per_hour_approx: "$0.134"
+        note: "Balanced. Good for small production models."
+      - type: "ml.m5.xlarge"
+        vcpu: 4
+        memory_gb: 16
+        gpu: 0
+        cost_per_hour_approx: "$0.269"
+      - type: "ml.m5.2xlarge"
+        vcpu: 8
+        memory_gb: 32
+        gpu: 0
+        cost_per_hour_approx: "$0.538"
+    compute_optimized:
+      - type: "ml.c5.large"
+        vcpu: 2
+        memory_gb: 4
+        gpu: 0
+        cost_per_hour_approx: "$0.119"
+      - type: "ml.c5.xlarge"
+        vcpu: 4
+        memory_gb: 8
+        gpu: 0
+        cost_per_hour_approx: "$0.238"
+    gpu:
+      - type: "ml.g4dn.xlarge"
+        vcpu: 4
+        memory_gb: 16
+        gpu: 1
+        gpu_type: "NVIDIA T4"
+        cost_per_hour_approx: "$0.736"
+        note: "Best value GPU for inference"
+      - type: "ml.p3.2xlarge"
+        vcpu: 8
+        memory_gb: 61
+        gpu: 1
+        gpu_type: "NVIDIA V100"
+        cost_per_hour_approx: "$4.284"
+      - type: "ml.g5.xlarge"
+        vcpu: 4
+        memory_gb: 16
+        gpu: 1
+        gpu_type: "NVIDIA A10G"
+        cost_per_hour_approx: "$1.408"
+    inferentia:
+      - type: "ml.inf1.xlarge"
+        vcpu: 4
+        memory_gb: 8
+        inferentia_chips: 1
+        cost_per_hour_approx: "$0.297"
+        note: "AWS Inferentia for high-throughput inference"
+      - type: "ml.inf2.xlarge"
+        vcpu: 4
+        memory_gb: 32
+        inferentia_chips: 1
+        cost_per_hour_approx: "$0.758"
+        note: "AWS Inferentia2 for generative AI"
+
+  training:
+    note: >
+      Training supports the same general-purpose, compute, GPU families plus
+      larger instances. Most common: ml.m5.xlarge (CPU), ml.p3.2xlarge (GPU),
+      ml.g4dn.xlarge (cost-effective GPU).
+
+# -- 15. Encryption -----------------------------------------------------------
+encryption:
+  in_transit:
+    description: "All SageMaker API calls use HTTPS. Endpoint invocations use TLS."
+    enforced: true
+
+  at_rest:
+    model_artifacts:
+      description: "S3 server-side encryption (SSE-S3, SSE-KMS, or SSE-C)"
+    training_volume:
+      description: "EBS volume encryption for training instances"
+      terraform_attribute: "resource_config { volume_kms_key_id = 'KEY_ARN' }"
+    endpoint_storage:
+      description: "EBS volumes on endpoint instances encrypted with KMS"
+      terraform_attribute: "kms_key_arn"  # on aws_sagemaker_endpoint_configuration
+
+  inter_container:
+    description: "Encrypt traffic between training containers in distributed training"
+    terraform_attribute: "enable_inter_container_traffic_encryption = true"
+    note: "Increases training time due to encryption overhead"
+
+  kms_permissions_required:
+    - "kms:CreateGrant"
+    - "kms:Decrypt"
+    - "kms:DescribeKey"
+    - "kms:GenerateDataKey"
+    - "kms:GenerateDataKeyWithoutPlaintext"
+    - "kms:ReEncryptFrom"
+    - "kms:ReEncryptTo"
+
+# -- 16. IAM -----------------------------------------------------------------
+iam:
+  # Service principal for trust policy
+  service_principal: "sagemaker.amazonaws.com"
+
+  # ARN formats
+  arn_formats:
+    endpoint: "arn:aws:sagemaker:REGION:ACCOUNT:endpoint/ENDPOINT_NAME"
+    endpoint_config: "arn:aws:sagemaker:REGION:ACCOUNT:endpoint-config/CONFIG_NAME"
+    model: "arn:aws:sagemaker:REGION:ACCOUNT:model/MODEL_NAME"
+    training_job: "arn:aws:sagemaker:REGION:ACCOUNT:training-job/JOB_NAME"
+    processing_job: "arn:aws:sagemaker:REGION:ACCOUNT:processing-job/JOB_NAME"
+    transform_job: "arn:aws:sagemaker:REGION:ACCOUNT:transform-job/JOB_NAME"
+    pipeline: "arn:aws:sagemaker:REGION:ACCOUNT:pipeline/PIPELINE_NAME"
+    feature_group: "arn:aws:sagemaker:REGION:ACCOUNT:feature-group/GROUP_NAME"
+    model_package_group: "arn:aws:sagemaker:REGION:ACCOUNT:model-package-group/GROUP_NAME"
+    notebook_instance: "arn:aws:sagemaker:REGION:ACCOUNT:notebook-instance/INSTANCE_NAME"
+
+  # AWS managed policy (attached by renderer in addition to inline policy)
+  managed_policy:
+    arn: "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+    description: >
+      Provides ECR pull access, CloudWatch metrics, and other SageMaker APIs
+      without enumerating every action individually.
+
+  # Permissions always required by SageMaker execution role
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "logs:DescribeLogStreams"
+    - "ecr:GetAuthorizationToken"
+    - "ecr:BatchCheckLayerAvailability"
+    - "ecr:GetDownloadUrlForLayer"
+    - "ecr:BatchGetImage"
+    - "s3:GetObject"
+    - "s3:ListBucket"
+    - "s3:GetBucketLocation"
+    - "cloudwatch:PutMetricData"
+    - "cloudwatch:GetMetricStatistics"
+    - "cloudwatch:ListMetrics"
+
+  # Complete IAM action catalog
+  actions:
+    endpoint_management:
+      - "sagemaker:CreateEndpoint"
+      - "sagemaker:DeleteEndpoint"
+      - "sagemaker:UpdateEndpoint"
+      - "sagemaker:DescribeEndpoint"
+      - "sagemaker:InvokeEndpoint"
+      - "sagemaker:InvokeEndpointAsync"
+      - "sagemaker:InvokeEndpointWithResponseStream"
+      - "sagemaker:ListEndpoints"
+    endpoint_config_management:
+      - "sagemaker:CreateEndpointConfig"
+      - "sagemaker:DeleteEndpointConfig"
+      - "sagemaker:DescribeEndpointConfig"
+      - "sagemaker:ListEndpointConfigs"
+    model_management:
+      - "sagemaker:CreateModel"
+      - "sagemaker:DeleteModel"
+      - "sagemaker:DescribeModel"
+      - "sagemaker:ListModels"
+    training:
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:StopTrainingJob"
+      - "sagemaker:ListTrainingJobs"
+      - "sagemaker:CreateHyperParameterTuningJob"
+      - "sagemaker:DescribeHyperParameterTuningJob"
+      - "sagemaker:StopHyperParameterTuningJob"
+      - "sagemaker:ListHyperParameterTuningJobs"
+    processing:
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:StopProcessingJob"
+      - "sagemaker:ListProcessingJobs"
+    transform:
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+      - "sagemaker:StopTransformJob"
+      - "sagemaker:ListTransformJobs"
+    pipeline:
+      - "sagemaker:CreatePipeline"
+      - "sagemaker:DeletePipeline"
+      - "sagemaker:UpdatePipeline"
+      - "sagemaker:DescribePipeline"
+      - "sagemaker:StartPipelineExecution"
+      - "sagemaker:StopPipelineExecution"
+      - "sagemaker:DescribePipelineExecution"
+      - "sagemaker:ListPipelineExecutions"
+      - "sagemaker:ListPipelines"
+    feature_store:
+      - "sagemaker:CreateFeatureGroup"
+      - "sagemaker:DeleteFeatureGroup"
+      - "sagemaker:DescribeFeatureGroup"
+      - "sagemaker:PutRecord"
+      - "sagemaker:GetRecord"
+      - "sagemaker:BatchGetRecord"
+      - "sagemaker:DeleteRecord"
+    model_registry:
+      - "sagemaker:CreateModelPackageGroup"
+      - "sagemaker:DeleteModelPackageGroup"
+      - "sagemaker:DescribeModelPackageGroup"
+      - "sagemaker:CreateModelPackage"
+      - "sagemaker:UpdateModelPackage"
+      - "sagemaker:DescribeModelPackage"
+      - "sagemaker:ListModelPackages"
+    monitoring:
+      - "sagemaker:CreateMonitoringSchedule"
+      - "sagemaker:DeleteMonitoringSchedule"
+      - "sagemaker:DescribeMonitoringSchedule"
+      - "sagemaker:ListMonitoringSchedules"
+      - "sagemaker:ListMonitoringExecutions"
+    tagging:
+      - "sagemaker:AddTags"
+      - "sagemaker:DeleteTags"
+      - "sagemaker:ListTags"
+    iam_passrole:
+      - "iam:PassRole"  # required when creating models/endpoints with execution role
+
+  # Integration graph rules (used by spec_builder)
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+      - "s3:GetObjectVersion"
+    stepfunctions:
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:StopTrainingJob"
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:StopProcessingJob"
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+      - "sagemaker:StopTransformJob"
+    lambda:
+      - "sagemaker:InvokeEndpoint"
+
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:AbortMultipartUpload"
+      - "s3:ListMultipartUploadParts"
+    lambda:
+      - "lambda:InvokeFunction"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:BatchWriteItem"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    sns:
+      - "sns:Publish"
+    sqs:
+      - "sqs:SendMessage"
+
+  # S3 condition keys relevant to SageMaker
+  condition_keys:
+    - "sagemaker:InstanceType"          # restrict allowed instance types
+    - "sagemaker:VolumeKmsKey"          # require encryption
+    - "sagemaker:NetworkIsolation"      # require network isolation
+    - "sagemaker:VpcSecurityGroupIds"   # require VPC
+    - "sagemaker:VpcSubnets"
+
+# -- 17. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+# -- 18. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - redshift
+
+# -- 19. Integration Wiring Ownership ----------------------------------------
+integrations:
+  s3_to_sagemaker:
+    description: >
+      S3 bucket provides model artifacts. Renderer auto-resolves model_data_url
+      to the connected S3 bucket and uploads a placeholder model.tar.gz.
+    owned_by: "sagemaker"
+    terraform_resources:
+      - "aws_s3_object (placeholder model artifact)"
+    auto_behavior: >
+      When S3 -> SageMaker integration detected:
+      1. model_data_url set to s3://${aws_s3_bucket.LABEL.id}/model.tar.gz
+      2. aws_s3_object resource created for placeholder model.tar.gz
+      3. aws_sagemaker_model gets depends_on = [aws_s3_object.LABEL]
+
+  lambda_invokes_sagemaker:
+    description: "Lambda function calls invoke_endpoint on the SageMaker endpoint"
+    owned_by: "lambda"
+    caller_env_var: "{SELF_UPPER}_ENDPOINT_NAME"
+    caller_iam: ["sagemaker:InvokeEndpoint"]
+
+  stepfunctions_orchestrates_sagemaker:
+    description: "Step Functions orchestrates SageMaker training/processing/transform jobs"
+    owned_by: "stepfunctions"
+    caller_iam:
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+
+  sagemaker_to_s3:
+    description: "SageMaker writes predictions/artifacts back to S3"
+    owned_by: "sagemaker"
+    iam_permissions_on_self:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+  sagemaker_to_dynamodb:
+    description: "SageMaker writes inference results to DynamoDB"
+    owned_by: "sagemaker"
+    iam_permissions_on_self:
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+
+# -- 20. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_sagemaker_model"
+      description: "Model definition (container + artifacts)"
+      always_created: true
+    - resource: "aws_sagemaker_endpoint_configuration"
+      description: "Endpoint config (instance type, variant weights)"
+      always_created: true
+    - resource: "aws_sagemaker_endpoint"
+      description: "Real-time inference endpoint"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Execution role assumed by sagemaker.amazonaws.com"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy with computed permissions"
+      always_created: true
+    - resource: "aws_iam_role_policy_attachment"
+      description: "AmazonSageMakerFullAccess managed policy"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group /aws/sagemaker/Endpoints/ENDPOINT_NAME"
+      always_created: true
+
+  conditional:
+    - resource: "data.aws_sagemaker_prebuilt_ecr_image"
+      condition: "When container_image is NOT set (default path)"
+    - resource: "aws_s3_object"
+      condition: "When S3 integration exists (placeholder model artifact)"
+
+  not_created_but_available:
+    - resource: "aws_sagemaker_feature_group"
+      description: "Feature Store feature group"
+    - resource: "aws_sagemaker_model_package_group"
+      description: "Model Registry package group"
+    - resource: "aws_sagemaker_domain"
+      description: "SageMaker Studio domain"
+    - resource: "aws_sagemaker_user_profile"
+      description: "SageMaker Studio user profile"
+    - resource: "aws_sagemaker_app"
+      description: "SageMaker Studio app (JupyterServer, KernelGateway)"
+    - resource: "aws_appautoscaling_target"
+      description: "Endpoint autoscaling target"
+    - resource: "aws_appautoscaling_policy"
+      description: "Endpoint autoscaling policy"
+
+# -- 21. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "sagemaker"
+  runtime_client: "sagemaker-runtime"  # for invoke_endpoint
+
+  # Endpoint operations
+  endpoint_operations:
+    create_endpoint:
+      description: "Deploy a model endpoint using an endpoint configuration"
+      parameters:
+        EndpointName: {type: string, required: true}
+        EndpointConfigName: {type: string, required: true}
+        Tags: {type: list}
+
+    update_endpoint:
+      description: "Update a live endpoint to use a new configuration (rolling update)"
+      parameters:
+        EndpointName: {type: string, required: true}
+        EndpointConfigName: {type: string, required: true}
+
+    describe_endpoint:
+      description: "Get the status and ARN of an endpoint"
+      parameters:
+        EndpointName: {type: string, required: true}
+      returns: ["EndpointName", "EndpointArn", "EndpointStatus", "EndpointConfigName",
+                "CreationTime", "LastModifiedTime", "ProductionVariants",
+                "FailureReason", "DataCaptureConfig"]
+
+    delete_endpoint:
+      description: "Delete a deployed endpoint (stops billing immediately)"
+      parameters:
+        EndpointName: {type: string, required: true}
+
+    list_endpoints:
+      description: "List all SageMaker endpoints"
+      parameters:
+        StatusEquals: {type: string, description: "InService, Creating, Updating, Failed"}
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+
+    invoke_endpoint:
+      description: "Call inference on a deployed endpoint"
+      client: "sagemaker-runtime"
+      parameters:
+        EndpointName: {type: string, required: true}
+        Body: {type: bytes, required: true}
+        ContentType: {type: string}
+        Accept: {type: string}
+        TargetVariant: {type: string}
+      returns: ["Body (StreamingBody)", "ContentType", "InvokedProductionVariant"]
+
+  # Endpoint config operations
+  endpoint_config_operations:
+    create_endpoint_config:
+      description: "Create endpoint configuration"
+      parameters:
+        EndpointConfigName: {type: string, required: true}
+        ProductionVariants: {type: list, required: true}
+        DataCaptureConfig: {type: object}
+        Tags: {type: list}
+
+    describe_endpoint_config:
+      description: "Get details of an endpoint configuration"
+      parameters:
+        EndpointConfigName: {type: string, required: true}
+      returns: ["EndpointConfigName", "ProductionVariants", "DataCaptureConfig", "CreationTime"]
+
+    delete_endpoint_config:
+      description: "Delete an endpoint configuration"
+      parameters:
+        EndpointConfigName: {type: string, required: true}
+
+  # Model operations
+  model_operations:
+    create_model:
+      description: "Register a model definition"
+      parameters:
+        ModelName: {type: string, required: true}
+        ExecutionRoleArn: {type: string, required: true}
+        PrimaryContainer: {type: object, required: true}
+        Containers: {type: list}
+        Tags: {type: list}
+
+    describe_model:
+      description: "Get details of a registered model"
+      parameters:
+        ModelName: {type: string, required: true}
+      returns: ["ModelName", "ModelArn", "PrimaryContainer", "ExecutionRoleArn", "CreationTime"]
+
+    delete_model:
+      description: "Delete a model definition"
+      parameters:
+        ModelName: {type: string, required: true}
+
+    list_models:
+      description: "List all models"
+      parameters:
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+
+  # Training operations
+  training_operations:
+    create_training_job:
+      description: "Start a model training job"
+      parameters:
+        TrainingJobName: {type: string, required: true}
+        AlgorithmSpecification: {type: object, required: true}
+        RoleArn: {type: string, required: true}
+        InputDataConfig: {type: list, required: true}
+        OutputDataConfig: {type: object, required: true}
+        ResourceConfig: {type: object, required: true}
+        StoppingCondition: {type: object, required: true}
+        HyperParameters: {type: object}
+        Tags: {type: list}
+
+    describe_training_job:
+      description: "Get status and metrics of a training job"
+      parameters:
+        TrainingJobName: {type: string, required: true}
+      returns: ["TrainingJobName", "TrainingJobArn", "TrainingJobStatus",
+                "SecondaryStatus", "FailureReason", "FinalMetricDataList",
+                "OutputDataConfig", "ModelArtifacts"]
+
+    stop_training_job:
+      description: "Stop a running training job"
+      parameters:
+        TrainingJobName: {type: string, required: true}
+
+    list_training_jobs:
+      description: "List training jobs"
+      parameters:
+        StatusEquals: {type: string}
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+
+  # Processing operations
+  processing_operations:
+    create_processing_job:
+      description: "Run a data processing job"
+      parameters:
+        ProcessingJobName: {type: string, required: true}
+        ProcessingResources: {type: object, required: true}
+        AppSpecification: {type: object, required: true}
+        RoleArn: {type: string, required: true}
+        ProcessingInputs: {type: list}
+        ProcessingOutputConfig: {type: object}
+        StoppingCondition: {type: object}
+        Tags: {type: list}
+
+    describe_processing_job:
+      description: "Get status of a processing job"
+      parameters:
+        ProcessingJobName: {type: string, required: true}
+      returns: ["ProcessingJobName", "ProcessingJobArn", "ProcessingJobStatus",
+                "FailureReason", "ProcessingEndTime"]
+
+    stop_processing_job:
+      description: "Stop a running processing job"
+      parameters:
+        ProcessingJobName: {type: string, required: true}
+
+  # Transform operations
+  transform_operations:
+    create_transform_job:
+      description: "Run batch inference"
+      parameters:
+        TransformJobName: {type: string, required: true}
+        ModelName: {type: string, required: true}
+        TransformInput: {type: object, required: true}
+        TransformOutput: {type: object, required: true}
+        TransformResources: {type: object, required: true}
+        BatchStrategy: {type: string}
+        Tags: {type: list}
+
+    describe_transform_job:
+      description: "Get status of a batch transform job"
+      parameters:
+        TransformJobName: {type: string, required: true}
+      returns: ["TransformJobName", "TransformJobArn", "TransformJobStatus",
+                "FailureReason", "TransformOutput"]
+
+    stop_transform_job:
+      description: "Stop a running transform job"
+      parameters:
+        TransformJobName: {type: string, required: true}
+
+# -- 22. Runtime Diagnostics ---------------------------------------------------
+runtime_diagnostics:
+  - pattern: "EndpointNotFound|Endpoint.*does not exist"
+    category: RESOURCE_NOT_FOUND
+    cause: "SageMaker endpoint not deployed or still creating"
+    fix_type: wait_or_create
+    resolution: "sm.describe_endpoint(EndpointName=name) to check status. Wait for InService."
+
+  - pattern: "ModelError|ModelNotReady"
+    category: RUNTIME
+    cause: "Model container returned an error during inference"
+    fix_type: check_logs
+    resolution: "Check /aws/sagemaker/Endpoints/<name> CloudWatch log group for container stderr"
+
+  - pattern: "ValidationException.*instance type"
+    category: CONFIG
+    cause: "Unsupported instance type for the region or service"
+    fix_type: config_change
+    resolution: "Use ml.t2.medium (cheapest) or check region instance availability"
+
+  - pattern: "ResourceLimitExceeded"
+    category: QUOTA
+    cause: "Exceeded SageMaker service quota for endpoints/instances/jobs"
+    fix_type: quota_request
+    resolution: "Request quota increase via Service Quotas console. Delete unused resources."
+
+  - pattern: "does not grant permission.*sagemaker.amazonaws.com"
+    category: PERMISSION
+    cause: "ECR repository policy does not allow SageMaker to pull the container image"
+    fix_type: ecr_policy
+    resolution: >
+      Use aws_sagemaker_prebuilt_ecr_image data source (default path) instead of
+      hardcoding DLC URI. If using custom ECR image, add repository policy granting
+      sagemaker.amazonaws.com ecr:GetDownloadUrlForLayer + ecr:BatchGetImage.
+
+  - pattern: "Could not assume role"
+    category: PERMISSION
+    cause: "SageMaker cannot assume the execution role"
+    fix_type: trust_policy
+    resolution: "Ensure IAM role trust policy allows sagemaker.amazonaws.com to assume the role"
+
+  - pattern: "ClientError.*model_data_url|Could not find model data"
+    category: RESOURCE_NOT_FOUND
+    cause: "Model artifacts not found at the specified S3 URI"
+    fix_type: upload_model
+    resolution: "Upload model.tar.gz to the S3 URI specified in model_data_url"
+
+  - pattern: "InternalServerError.*endpoint"
+    category: RUNTIME
+    cause: "Model container crashed or returned 5xx"
+    fix_type: check_logs
+    resolution: >
+      Check CloudWatch logs at /aws/sagemaker/Endpoints/<name>.
+      Common causes: OOM (increase instance type), missing dependencies,
+      incorrect model format.
+
+  - pattern: "ThrottlingException"
+    category: THROTTLE
+    cause: "Too many API calls or endpoint invocations"
+    fix_type: retry
+    resolution: "Implement exponential backoff. Consider using SageMaker batch transform for bulk inference."
+
+  - pattern: "ModelNotApproved"
+    category: VALIDATION
+    cause: "Model package has not been approved in Model Registry"
+    fix_type: manual
+    resolution: "Update model package approval status to 'Approved' before deploying"
+
+# -- 23. Tags ------------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  propagation: >
+    Tags set on endpoint are NOT automatically propagated to the underlying
+    EC2 instances. Tags on training jobs are propagated to the training container.
+
+# -- 24. Code Update (Developer Agent) -----------------------------------------
+code_update:
+  method: api_config
+  boto3_client: sagemaker
+  description: >
+    Model artifacts (model.tar.gz) live in S3. To update: upload new model.tar.gz to S3,
+    create new SageMaker model, create new endpoint config pointing to new model,
+    then update_endpoint() to swap with zero-downtime rolling update.
+  code_update_steps:
+    - "Upload new model.tar.gz to S3 via s3.put_object()"
+    - "sm.create_model(ModelName='new-model', ExecutionRoleArn=role_arn, PrimaryContainer={Image: image, ModelDataUrl: s3_uri})"
+    - "sm.create_endpoint_config(EndpointConfigName='new-config', ProductionVariants=[{VariantName:'AllTraffic', ModelName:'new-model', InstanceType:'ml.t2.medium', InitialInstanceCount:1}])"
+    - "sm.update_endpoint(EndpointName=resource_name, EndpointConfigName='new-config')"
+    - "Poll sm.describe_endpoint(EndpointName=resource_name)['EndpointStatus'] until 'InService'"
+  discovery_ops:
+    - op: describe_endpoint
+      id_param: EndpointName
+      returns: ["EndpointStatus", "EndpointConfigName", "CreationTime", "LastModifiedTime"]
+    - op: describe_endpoint_config
+      id_param: EndpointConfigName
+      returns: ["ProductionVariants", "DataCaptureConfig"]
+    - op: describe_model
+      id_param: ModelName
+      returns: ["PrimaryContainer", "ExecutionRoleArn"]
+
+invocation:
+  description: >
+    Lambda invokes the endpoint via invoke_endpoint(EndpointName=name, Body=payload).
+    Endpoint must be InService. Model artifacts in S3 at model_data_url.
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_ENDPOINT_NAME"
+      ref: "aws_sagemaker_endpoint.{self_label}.name"
+      boto3_param: "EndpointName"
+      description: "SageMaker endpoint name for invoke_endpoint()"
+  caller_iam:
+    - "sagemaker:InvokeEndpoint"
+  passrole_required: false
+
+# -- 25. Logging ---------------------------------------------------------------
+logging:
+  cloudwatch_log_groups:
+    endpoints: "/aws/sagemaker/Endpoints/{endpoint_name}"
+    training_jobs: "/aws/sagemaker/TrainingJobs"
+    processing_jobs: "/aws/sagemaker/ProcessingJobs"
+    transform_jobs: "/aws/sagemaker/TransformJobs"
+    notebook_instances: "/aws/sagemaker/NotebookInstances/{instance_name}"
+    studio: "/aws/sagemaker/studio"
+
+  pipeline_monitoring:
+    method: "cloudwatch_logs"
+    log_group_pattern: "/aws/sagemaker/Endpoints/{resource_name}"
+    service_to_tf: "aws_sagemaker_endpoint"
+    tf_name_attr: "name"
+
+  cloudwatch_metrics:
+    namespace: "AWS/SageMaker"
+    endpoint_metrics:
+      - "Invocations"
+      - "InvocationModelErrors"
+      - "InvocationsPerInstance"
+      - "ModelLatency"
+      - "OverheadLatency"
+      - "Invocation4XXErrors"
+      - "Invocation5XXErrors"
+      - "CPUUtilization"
+      - "MemoryUtilization"
+      - "GPUUtilization"
+      - "GPUMemoryUtilization"
+      - "DiskUtilization"
+    training_metrics:
+      - "train:loss"
+      - "validation:accuracy"
+      - custom: "User-defined metrics via regex pattern in TrainingJobDefinition"

@@ -1,0 +1,86 @@
+service_type: aurora
+is_principal: false
+terraform_resource: aws_rds_cluster
+description: "Amazon Aurora serverless v2 cluster — MySQL/PostgreSQL-compatible relational database"
+
+defaults:
+  engine: "aurora-postgresql"
+  engine_version: "15.4"
+  database_name: "appdb"
+  master_username: "admin"
+  skip_final_snapshot: true
+  deletion_protection: false
+  min_capacity: 0.5   # minimum Aurora Serverless v2 ACU; NOT free tier (~$0.12/ACU-hr)
+  max_capacity: 1.0   # hard cap at 1 ACU to minimise cost in MVP
+
+iam:
+  always: []
+  as_target_of:
+    dms:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+    lambda:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+    glue:
+      - "rds:DescribeDBClusters"
+    emr:
+      - "rds:DescribeDBClusters"
+    stepfunctions:
+      - "rds-data:ExecuteStatement"
+    ec2:
+      - "rds-data:ExecuteStatement"
+    sagemaker_notebook:
+      - "rds:DescribeDBClusters"
+  as_source_to:
+    lambda:
+      - "lambda:InvokeFunction"
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers:
+  - lambda
+  - ec2
+  - emr
+  - dms
+
+code_update:
+  method: sql
+  boto3_client: rds-data
+  description: >
+    Schema/procedure changes via rds-data.execute_statement() using Aurora Data API.
+    Cluster config (capacity, parameter group) via rds.modify_db_cluster().
+    Cluster ARN from describe_db_clusters(). Must enable Data API in cluster config.
+  config_update:
+    client: rds
+    operation: modify_db_cluster
+    id_param: DBClusterIdentifier
+    id_value: "{resource_name}"
+    note: "Some changes require apply_immediately=True; others take effect at next maintenance window"
+  code_update_steps:
+    - "rds = boto3.client('rds', region_name=region)"
+    - "rds_data = boto3.client('rds-data', region_name=region)"
+    - "cluster = rds.describe_db_clusters(DBClusterIdentifier=resource_name)['DBClusters'][0]"
+    - "cluster_arn = cluster['DBClusterArn']"
+    - "secret_arn = cluster.get('MasterUserSecret', {}).get('SecretArn', '')  # if Secrets Manager managed"
+    - "resp = rds_data.execute_statement(resourceArn=cluster_arn, secretArn=secret_arn, database=cluster['DatabaseName'], sql='SELECT 1')"
+  discovery_ops:
+    - op: describe_db_clusters
+      id_param: DBClusterIdentifier
+      returns: ["DBClusterArn", "Status", "Endpoint", "ReaderEndpoint", "DatabaseName", "MasterUsername", "EngineMode", "MasterUserSecret"]
+runtime_diagnostics:
+  - pattern: "Communications link failure|timeout.*aurora|aurora.*timeout"
+    category: NETWORK
+    cause: "Cannot connect to Aurora — check VPC security group allows DB port (5432 PostgreSQL / 3306 MySQL)"
+    fix_type: update_sg
+    resolution: "Add inbound rule to Aurora security group: TCP 5432/3306 from caller security group"
+  - pattern: "BadRequestException.*Data API|Data API is not enabled"
+    category: CONFIG
+    cause: "Aurora Data API is not enabled on the cluster"
+    fix_type: update_config
+    resolution: "rds.modify_db_cluster(DBClusterIdentifier=resource_name, EnableHttpEndpoint=True)"

@@ -1,0 +1,16 @@
+templates:
+  minimal:
+    display_name: "Minimal MSK"
+    description: "Smallest broker type for development"
+    config:
+      broker_instance_type: "kafka.t3.small"
+      number_of_broker_nodes: 3
+      volume_size: 10
+
+  production:
+    display_name: "Production MSK"
+    description: "Production-grade Kafka cluster"
+    config:
+      broker_instance_type: "kafka.m5.xlarge"
+      number_of_broker_nodes: 3
+      volume_size: 500

@@ -1,0 +1,6 @@
+templates:
+  express:
+    display_name: "Express Workflow"
+    description: "High-volume, short-duration workflows (up to 5 min)"
+    config:
+      type: "EXPRESS"

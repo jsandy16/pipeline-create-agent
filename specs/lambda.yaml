@@ -1,0 +1,301 @@
+service_type: lambda
+is_principal: true
+terraform_resource: aws_lambda_function
+description: "Serverless compute function with IAM role, log group, and event wiring"
+
+defaults:
+  runtime: "python3.12"
+  handler: "index.handler"
+  memory_size: 128
+  timeout: 30
+  architectures: "arm64"
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+    sqs:
+      - "sqs:ReceiveMessage"
+      - "sqs:DeleteMessage"
+      - "sqs:GetQueueAttributes"
+    kinesis_streams:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+    sns:
+      - "sns:Subscribe"
+      - "sns:Receive"
+    dynamodb:
+      - "dynamodb:GetRecords"
+      - "dynamodb:GetShardIterator"
+      - "dynamodb:DescribeStream"
+      - "dynamodb:ListStreams"
+    eventbridge:
+      - "logs:CreateLogGroup"
+    cloudwatch:
+      - "logs:CreateLogGroup"
+    stepfunctions:
+      - "logs:CreateLogGroup"
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    sqs:
+      - "sqs:SendMessage"
+    sns:
+      - "sns:Publish"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:BatchWriteItem"
+    stepfunctions:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    lambda:
+      - "lambda:InvokeFunction"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    kinesis_firehose:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    redshift:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+      - "redshift:GetClusterCredentials"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    sagemaker:
+      - "sagemaker:InvokeEndpoint"
+    eventbridge:
+      - "events:PutEvents"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    # EMR Serverless: Lambda calls start_job_run(); must pass the EMR execution role.
+    # iam:PassRole is MANDATORY — without it the SDK raises ValidationException
+    # "executionRoleArn" before the request even reaches AWS.
+    emr_serverless:
+      - "emr-serverless:StartJobRun"
+      - "emr-serverless:GetJobRun"
+      - "emr-serverless:CancelJobRun"
+      - "emr-serverless:ListJobRuns"
+      - "emr-serverless:GetApplication"
+      - "iam:PassRole"
+    # EMR: Lambda submits steps to a running cluster.
+    # iam:PassRole is needed when RunJobFlow or add steps with a custom service role.
+    emr:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:ListSteps"
+      - "elasticmapreduce:DescribeCluster"
+      - "iam:PassRole"
+    glue:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:StartCrawler"
+      - "glue:GetCrawler"
+      - "glue:GetCrawlerMetrics"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:WriteData"
+      - "kafka-cluster:DescribeClusterDynamicConfiguration"
+    glue_databrew:
+      - "databrew:StartJobRun"
+      - "databrew:DescribeJobRun"
+    dms:
+      - "dms:StartReplicationTask"
+      - "dms:StopReplicationTask"
+      - "dms:DescribeReplicationTasks"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    sqs:
+      pattern: "{PEER_UPPER}_QUEUE_URL"
+      ref: "aws_sqs_queue.{peer_label}.url"
+    sns:
+      pattern: "{PEER_UPPER}_TOPIC_ARN"
+      ref: "aws_sns_topic.{peer_label}.arn"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+    stepfunctions:
+      pattern: "{PEER_UPPER}_STATE_MACHINE_ARN"
+      ref: "aws_sfn_state_machine.{peer_label}.arn"
+    lambda:
+      pattern: "{PEER_UPPER}_FUNCTION_ARN"
+      ref: "aws_lambda_function.{peer_label}.arn"
+    kinesis_streams:
+      pattern: "{PEER_UPPER}_STREAM_NAME"
+      ref: "aws_kinesis_stream.{peer_label}.name"
+    kinesis_firehose:
+      pattern: "{PEER_UPPER}_DELIVERY_STREAM"
+      ref: "aws_kinesis_firehose_delivery_stream.{peer_label}.name"
+    eventbridge:
+      pattern: "{PEER_UPPER}_EVENT_BUS"
+      ref: "aws_cloudwatch_event_bus.{peer_label}.name"
+    # EMR Serverless: two env vars are BOTH required by start_job_run().
+    # APPLICATION_ID  → applicationId param
+    # EXECUTION_ROLE_ARN → executionRoleArn param (min 20 chars; empty = ValidationException)
+    emr_serverless:
+      - pattern: "{PEER_UPPER}_APPLICATION_ID"
+        ref: "aws_emrserverless_application.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_EXECUTION_ROLE_ARN"
+        ref: "aws_iam_role.{peer_label}_role.arn"
+    # EMR: CLUSTER_ID used by add_job_flow_steps() JobFlowId param.
+    emr:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_emr_cluster.{peer_label}.id"
+    # Glue: crawler name used by start_crawler() / start_job_run().
+    glue:
+      - pattern: "{PEER_UPPER}_CRAWLER_NAME"
+        ref: "aws_glue_crawler.{peer_label}.name"
+    # Athena: workgroup name used by start_query_execution().
+    athena:
+      - pattern: "{PEER_UPPER}_WORKGROUP"
+        ref: "aws_athena_workgroup.{peer_label}.name"
+    # MSK: bootstrap brokers connection string for Kafka producer/consumer.
+    msk:
+      - pattern: "{PEER_UPPER}_BOOTSTRAP_BROKERS"
+        ref: "aws_msk_cluster.{peer_label}.bootstrap_brokers"
+    # Redshift: cluster ID + database for redshift-data API calls.
+    redshift:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_redshift_cluster.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_DATABASE"
+        ref: "aws_redshift_cluster.{peer_label}.database_name"
+    # Aurora: cluster ARN + database name for rds-data API calls.
+    aurora:
+      - pattern: "{PEER_UPPER}_CLUSTER_ARN"
+        ref: "aws_rds_cluster.{peer_label}.arn"
+      - pattern: "{PEER_UPPER}_DATABASE"
+        ref: "aws_rds_cluster.{peer_label}.database_name"
+    # SageMaker: endpoint name for invoke_endpoint() calls.
+    sagemaker:
+      - pattern: "{PEER_UPPER}_ENDPOINT_NAME"
+        ref: "aws_sagemaker_endpoint.{peer_label}.name"
+
+vpc_triggers:
+  - redshift
+  - aurora
+  - rds
+  - opensearch
+  - elasticache
+  - msk
+
+# ---------------------------------------------------------------------------
+# How to update this service's code/configuration after deployment.
+# Used by the Pipeline Inspector agent.
+# ---------------------------------------------------------------------------
+code_update:
+  method: lambda_zip
+  boto3_client: lambda
+  description: >
+    Lambda code is a ZIP deployment package managed by AWS.
+    ENV VAR UPDATES (most common fix): use update_function_configuration() —
+    no zip required, takes effect immediately.
+    CODE UPDATES: download zip via get_function()['Code']['Location'],
+    modify .py files in-memory with zipfile + io.BytesIO, re-upload via
+    update_function_code(ZipFile=bytes). Wait for LastUpdateStatus == 'Successful'.
+
+  env_update:
+    client: lambda
+    operation: update_function_configuration
+    id_param: FunctionName
+    id_value: "{resource_name}"
+    env_key: "Environment.Variables"
+    critical_note: >
+      ALWAYS fetch current vars first to avoid erasing existing wiring:
+      current = lam.get_function_configuration(FunctionName=name).get('Environment', {}).get('Variables', {})
+      Then merge: {**current, 'NEW_KEY': 'new_value'}
+
+  config_update:
+    client: lambda
+    operation: update_function_configuration
+    id_param: FunctionName
+    updatable: [Timeout, MemorySize, Handler, Runtime, Environment, Layers, VpcConfig, ReservedConcurrentExecutions]
+
+  code_update_steps:
+    - "import boto3, io, zipfile, urllib.request, time"
+    - "lam = boto3.client('lambda', region_name=region)"
+    - "info = lam.get_function(FunctionName=resource_name)"
+    - "Download zip bytes from info['Code']['Location'] using urllib.request.urlopen"
+    - "Modify .py files in memory: zipfile.ZipFile(io.BytesIO(zip_bytes)) → write modified files → io.BytesIO"
+    - "lam.update_function_code(FunctionName=resource_name, ZipFile=modified_zip.getvalue())"
+    - "Poll lam.get_function_configuration(FunctionName=name)['LastUpdateStatus'] until 'Successful'"
+    - "WAIT before re-triggering — Lambda needs ~5-30s to propagate new code"
+
+  discovery_ops:
+    - op: get_function
+      returns: ["Code.Location", "Configuration.FunctionArn", "Configuration.Role", "Configuration.Environment.Variables", "Configuration.Timeout", "Configuration.MemorySize"]
+    - op: get_function_configuration
+      returns: ["Environment.Variables", "Role", "Timeout", "MemorySize", "LastUpdateStatus", "LastUpdateStatusReason"]
+
+# ---------------------------------------------------------------------------
+# Common runtime errors with causes and fixes.
+# The inspector checks these patterns before making an LLM call.
+# ---------------------------------------------------------------------------
+runtime_diagnostics:
+  - pattern: "Task timed out after|Lambda\\.Unknown|timed out"
+    category: RUNTIME
+    cause: "Lambda exceeded its configured timeout (default 30s)"
+    fix_type: update_config
+    resolution: "lam.update_function_configuration(FunctionName=name, Timeout=300)"
+
+  - pattern: "Runtime exited|Process exited before completing|signal: killed|OOM|out of memory"
+    category: RUNTIME
+    cause: "Lambda ran out of memory (default 128 MB)"
+    fix_type: update_config
+    resolution: "lam.update_function_configuration(FunctionName=name, MemorySize=512)"
+
+  - pattern: "Unable to import module|No module named|ModuleNotFoundError|ImportError"
+    category: CONFIG
+    cause: "Missing Python dependency — package not bundled in deployment ZIP"
+    fix_type: update_code
+    resolution: "Download ZIP, install missing package into a temp dir alongside the handler, rebuild ZIP, re-upload via update_function_code"
+
+  - pattern: "AccessDenied|not authorized to perform|UnauthorizedAccess"
+    category: PERMISSION
+    cause: "Lambda's IAM role is missing the required permission"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={statement with missing action})"
+
+  - pattern: "Invalid length for parameter executionRoleArn, value: 0"
+    category: CONFIG
+    cause: "EMR Serverless executionRoleArn env var is empty — env var {PEER}_EXECUTION_ROLE_ARN was not set"
+    fix_type: update_env_vars
+    resolution: >
+      Get the EMR execution role ARN from IAM and set it as a Lambda env var:
+      iam = boto3.client('iam')
+      role_name = emr_resource_name + '-role'
+      role_arn = iam.get_role(RoleName=role_name)['Role']['Arn']
+      Also find APPLICATION_ID: emr_s.list_applications() filter by name.
+      Update both via update_function_configuration(Environment={'Variables': {**current, 'X_EXECUTION_ROLE_ARN': role_arn, 'X_APPLICATION_ID': app_id}})

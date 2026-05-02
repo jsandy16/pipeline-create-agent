@@ -1,0 +1,201 @@
+service_type: sagemaker
+is_principal: true
+terraform_resource: aws_sagemaker_endpoint
+description: >
+  Amazon SageMaker — managed ML platform for training, deploying, and invoking
+  real-time inference endpoints. The generated Terraform creates an IAM execution
+  role, a SageMaker model (container + model artifacts), an endpoint configuration,
+  and a real-time endpoint. A CloudWatch log group captures endpoint logs.
+
+# ── Container image ──────────────────────────────────────────────────────────
+#
+# DEFAULT PATH (recommended): leave container_image unset.
+# The renderer uses the `aws_sagemaker_prebuilt_ecr_image` Terraform data source,
+# which resolves the correct DLC registry URI for your account and region
+# automatically.  This avoids the "does not grant permission to
+# sagemaker.amazonaws.com service principal" error that occurs when hardcoding
+# the 763104351884.dkr.ecr.*.amazonaws.com URI.
+#
+# Set `framework` + `image_tag` to select the pre-built image:
+#
+#   Framework values              Example image_tag
+#   ─────────────────────────     ─────────────────────────────────
+#   sklearn                       1.2-1-cpu-py3
+#   xgboost                       1.7-1
+#   pytorch-inference             2.1.0-cpu-py310
+#   pytorch-inference (GPU)       2.1.0-gpu-py310-cu121
+#   tensorflow-inference          2.13.0-cpu
+#   tensorflow-inference (GPU)    2.13.0-gpu
+#   huggingface-pytorch-inference 2.0.0-transformers4.28.1-cpu-py310
+#   mxnet-inference               1.9.0-cpu-py38
+#   pytorch-training              2.1.0-cpu-py310
+#   tensorflow-training           2.13.0-cpu
+#
+# CUSTOM IMAGE PATH: set container_image to a fully-qualified ECR URI from your
+# own account's registry, e.g.:
+#   container_image: "123456789.dkr.ecr.us-east-1.amazonaws.com/my-model:v1"
+# You must add an aws_ecr_repository_policy granting sagemaker.amazonaws.com
+# the ecr:GetDownloadUrlForLayer, ecr:BatchGetImage, and
+# ecr:BatchCheckLayerAvailability actions on that repository.
+
+defaults:
+  # ── Compute ────────────────────────────────────────────────────────────────
+  # Cheapest SageMaker inference instance.  Not free-tier.
+  # Upgrade for production: ml.m5.large (balanced), ml.c5.xlarge (CPU-heavy),
+  # ml.g4dn.xlarge (GPU), ml.inf1.xlarge (AWS Inferentia).
+  instance_type: "ml.t2.medium"
+  initial_instance_count: 1
+
+  # ── Pre-built image selection (used when container_image is NOT set) ───────
+  framework: "sagemaker-scikit-learn"
+  image_tag: "1.2-1-cpu-py3"
+
+  # ── Model artifacts ────────────────────────────────────────────────────────
+  # S3 URI of the serialised model (model.tar.gz).
+  # Auto-resolved to the connected S3 bucket when an S3 → SageMaker integration
+  # is declared; override only if the artefact lives in a different bucket.
+  model_data_url: "s3://placeholder-model-bucket/model.tar.gz"
+
+  # ── Custom container image (optional override) ────────────────────────────
+  # Uncomment and set to use an image from your own ECR repository.
+  # container_image: "123456789.dkr.ecr.us-east-1.amazonaws.com/my-model:latest"
+
+# ── IAM permissions ──────────────────────────────────────────────────────────
+# The execution role is assumed by sagemaker.amazonaws.com (set in _iam_role()).
+# AmazonSageMakerFullAccess managed policy is also attached by the renderer —
+# this provides ECR pull access, CloudWatch metrics, and other SageMaker APIs.
+iam:
+  always:
+    # CloudWatch logging
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "logs:DescribeLogStreams"
+    # ECR: authenticate and pull container images
+    - "ecr:GetAuthorizationToken"
+    - "ecr:BatchCheckLayerAvailability"
+    - "ecr:GetDownloadUrlForLayer"
+    - "ecr:BatchGetImage"
+    # S3: read model artefacts
+    - "s3:GetObject"
+    - "s3:ListBucket"
+    - "s3:GetBucketLocation"
+    # CloudWatch metrics (endpoint invocation metrics)
+    - "cloudwatch:PutMetricData"
+    - "cloudwatch:GetMetricStatistics"
+    - "cloudwatch:ListMetrics"
+
+  as_target_of:
+    # When SageMaker reads model artefacts from an S3 bucket
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+      - "s3:GetObjectVersion"
+    # When Step Functions orchestrates SageMaker training / processing / transform jobs
+    stepfunctions:
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+      - "sagemaker:StopTrainingJob"
+      - "sagemaker:CreateProcessingJob"
+      - "sagemaker:DescribeProcessingJob"
+      - "sagemaker:StopProcessingJob"
+      - "sagemaker:CreateTransformJob"
+      - "sagemaker:DescribeTransformJob"
+      - "sagemaker:StopTransformJob"
+    # When a Lambda function invokes the endpoint
+    lambda:
+      - "sagemaker:InvokeEndpoint"
+
+  as_source_to:
+    # When SageMaker writes predictions / processed data back to S3
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:AbortMultipartUpload"
+      - "s3:ListMultipartUploadParts"
+    # When SageMaker triggers a Lambda after inference (e.g. post-processing)
+    lambda:
+      - "lambda:InvokeFunction"
+    # When SageMaker writes inference results to DynamoDB
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:BatchWriteItem"
+
+# ── Environment variable wiring ───────────────────────────────────────────────
+    # When SageMaker writes inference results to Kinesis
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    # When SageMaker sends notifications via SNS
+    sns:
+      - "sns:Publish"
+    # When SageMaker sends results to SQS
+    sqs:
+      - "sqs:SendMessage"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+# ── VPC placement triggers ────────────────────────────────────────────────────
+# Place the endpoint in a VPC when any of these service types appear as peers.
+vpc_triggers:
+  - aurora
+  - redshift
+
+invocation:
+  description: >
+    Lambda invokes the endpoint via invoke_endpoint(EndpointName=name, Body=payload).
+    Endpoint must be InService. Model artifacts in S3 at model_data_url.
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_ENDPOINT_NAME"
+      ref: "aws_sagemaker_endpoint.{self_label}.name"
+      boto3_param: "EndpointName"
+      description: "SageMaker endpoint name for invoke_endpoint()"
+  caller_iam:
+    - "sagemaker:InvokeEndpoint"
+  passrole_required: false
+code_update:
+  method: api_config
+  boto3_client: sagemaker
+  description: >
+    Model artifacts (model.tar.gz) live in S3. To update: upload new model.tar.gz to S3,
+    create new SageMaker model, create new endpoint config pointing to new model,
+    then update_endpoint() to swap with zero-downtime rolling update.
+  code_update_steps:
+    - "Upload new model.tar.gz to S3 via s3.put_object()"
+    - "sm.create_model(ModelName='new-model', ExecutionRoleArn=role_arn, PrimaryContainer={Image: image, ModelDataUrl: s3_uri})"
+    - "sm.create_endpoint_config(EndpointConfigName='new-config', ProductionVariants=[{VariantName:'AllTraffic', ModelName:'new-model', InstanceType:'ml.t2.medium', InitialInstanceCount:1}])"
+    - "sm.update_endpoint(EndpointName=resource_name, EndpointConfigName='new-config')"
+    - "Poll sm.describe_endpoint(EndpointName=resource_name)['EndpointStatus'] until 'InService'"
+  discovery_ops:
+    - op: describe_endpoint
+      id_param: EndpointName
+      returns: ["EndpointStatus", "EndpointConfigName", "CreationTime", "LastModifiedTime"]
+    - op: describe_endpoint_config
+      id_param: EndpointConfigName
+      returns: ["ProductionVariants", "DataCaptureConfig"]
+    - op: describe_model
+      id_param: ModelName
+      returns: ["PrimaryContainer", "ExecutionRoleArn"]
+runtime_diagnostics:
+  - pattern: "EndpointNotFound|Endpoint.*does not exist"
+    category: RESOURCE_NOT_FOUND
+    cause: "SageMaker endpoint not deployed or still creating"
+    fix_type: wait_or_create
+    resolution: "sm.describe_endpoint(EndpointName=name) to check status. Wait for InService."
+  - pattern: "ModelError|ModelNotReady"
+    category: RUNTIME
+    cause: "Model container returned an error during inference"
+    fix_type: check_logs
+    resolution: "Check /aws/sagemaker/Endpoints/<name> CloudWatch log group for container stderr"

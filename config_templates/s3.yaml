@@ -1,0 +1,6 @@
+templates:
+  versioning_enabled:
+    display_name: "Enable Versioning"
+    description: "Enable bucket versioning for data protection and recovery"
+    config:
+      versioning_status: "Enabled"

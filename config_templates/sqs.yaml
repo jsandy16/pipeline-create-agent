@@ -1,0 +1,19 @@
+templates:
+  long_processing:
+    display_name: "Long Processing"
+    description: "12 hour visibility timeout for long-running consumers"
+    config:
+      visibility_timeout_seconds: 43200
+
+  extended_retention:
+    display_name: "Extended Retention"
+    description: "14 day message retention (maximum)"
+    config:
+      message_retention_seconds: 1209600
+
+  quick_retry:
+    display_name: "Quick Retry"
+    description: "Short visibility timeout for fast retry cycles"
+    config:
+      visibility_timeout_seconds: 5
+      message_retention_seconds: 3600

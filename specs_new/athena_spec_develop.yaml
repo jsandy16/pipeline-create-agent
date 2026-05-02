@@ -1,0 +1,1004 @@
+# ============================================================================
+# Amazon Athena Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Athena knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/athena.yaml with exhaustive
+# coverage of Athena capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — resource name constraints
+#   3. defaults            — Terraform attribute defaults
+#   4. quotas              — AWS service limits
+#   5. workgroups          — workgroup configuration and cost controls
+#   6. query_execution     — SQL engine, DML, DDL, query lifecycle
+#   7. data_sources        — S3, Glue Catalog, federated sources
+#   8. result_configuration — output location, encryption, expected bucket owner
+#   9. engine_versions     — Athena engine v2 vs v3
+#  10. named_queries       — saved SQL queries
+#  11. prepared_statements — parameterized queries
+#  12. data_catalogs       — external catalogs (Hive metastore, Lambda)
+#  13. federated_queries   — cross-source queries via Lambda connectors
+#  14. ctas_unload         — CREATE TABLE AS SELECT and UNLOAD
+#  15. encryption          — result encryption options
+#  16. iam                 — complete action catalog, integration graph rules
+#  17. env_vars            — auto-wired environment variables
+#  18. vpc_triggers        — VPC placement rules
+#  19. integrations        — wiring ownership with all connected services
+#  20. terraform_resources — all TF resource types
+#  21. boto3_operations    — complete API reference
+#  22. runtime_diagnostics — error patterns & auto-fix rules
+#  23. tags                — tagging constraints
+#  24. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: athena
+  aws_service_name: "Amazon Athena"
+  is_principal: false             # Athena is passive (no execution role of its own)
+  terraform_resource: aws_athena_workgroup
+  description: >
+    Serverless interactive query service that uses standard SQL to analyze data
+    directly in Amazon S3. Uses the Glue Data Catalog as its metastore. Supports
+    Presto/Trino SQL engine for DML and Hive DDL. Pay-per-query based on data
+    scanned. Supports federated queries to 25+ data sources via Lambda connectors.
+  free_tier:
+    status: never_free
+    details: >
+      No free tier. Billed per TB of data scanned by each query ($5.00/TB in
+      most regions). DDL statements and failed queries are free. Minimum charge:
+      10 MB per query. CTAS and INSERT INTO billed for data scanned plus data
+      stored.
+  pricing_model: per_tb_scanned
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  workgroup_name:
+    max_length: 128
+    valid_characters: "a-zA-Z0-9._-"
+    rules:
+      - "Must be unique within the account and region"
+      - "Letters, digits, periods, underscores, hyphens"
+      - "Cannot be 'primary' (reserved by AWS)"
+  named_query_name:
+    max_length: 128
+    valid_characters: "a-zA-Z0-9 _-"
+  data_catalog_name:
+    max_length: 256
+    valid_characters: "a-zA-Z0-9._-"
+    rules:
+      - "'AwsDataCatalog' is the default Glue catalog name"
+
+# -- 3. Defaults (minimum-cost safe) -----------------------------------------
+defaults:
+  enforce_workgroup_configuration: true       # force workgroup result config
+  publish_cloudwatch_metrics_enabled: false    # free tier: off
+  selected_engine_version: "AUTO"             # MUST be "AUTO" for Terraform
+  bytes_scanned_cutoff_per_query: null        # no limit (set to limit cost)
+  requester_pays: false
+  result_output_encoding: null                # default: none
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_concurrent_queries_per_account: 25      # soft limit, adjustable up to hundreds
+  max_query_string_length: 262144             # bytes (256 KB)
+  max_query_execution_timeout: 30             # minutes (default)
+  max_workgroups_per_account: 1000            # soft limit
+  max_named_queries_per_account: 1000         # soft limit
+  max_prepared_statements_per_workgroup: 1000
+  max_data_catalogs_per_account: 1000
+  max_tags_per_workgroup: 50
+  max_databases_per_catalog: 10000            # Glue Catalog limit
+  max_tables_per_database: 1000000            # Glue Catalog limit
+  max_partitions_per_table: 10000000          # Glue Catalog limit
+  query_result_reuse_max_age: 60              # minutes
+  min_data_scanned_charge: "10 MB"            # minimum per-query billing
+  max_query_result_size: "unlimited"          # limited only by S3
+  max_columns_per_table: 10000               # Glue Catalog limit
+
+  # Rate limits
+  rate_limits:
+    start_query_execution: 20                 # per second per account
+    get_query_execution: 100
+    get_query_results: 100
+    batch_get_query_execution: 20
+    batch_get_named_query: 20
+    list_query_executions: 5
+
+# -- 5. Workgroups ------------------------------------------------------------
+workgroups:
+  description: >
+    Workgroups isolate queries, users, and costs. Each workgroup has its own
+    query history, result location, encryption settings, and cost controls.
+    Users can only see and execute queries within their workgroup.
+  terraform_resource: "aws_athena_workgroup"
+
+  configuration:
+    result_configuration:
+      description: "Where query results are stored"
+      attributes:
+        output_location: "s3://bucket/prefix/ for query results"
+        encryption_configuration:
+          encryption_option: "SSE_S3, SSE_KMS, CSE_KMS"
+          kms_key_arn: "KMS key for SSE_KMS or CSE_KMS"
+        expected_bucket_owner: "Account ID that owns the result bucket"
+        acl_configuration: "S3 ACL for result objects"
+
+    enforce_workgroup_configuration:
+      description: >
+        When true, queries in this workgroup MUST use the workgroup's result
+        configuration. Client-side result config is ignored. Recommended for
+        cost control.
+      default: true
+
+    publish_cloudwatch_metrics_enabled:
+      description: "Publish query metrics to CloudWatch (bytes scanned, execution time)"
+      default: false
+
+    bytes_scanned_cutoff_per_query:
+      description: >
+        Maximum bytes a query can scan. Queries exceeding this are cancelled.
+        Use for cost control.
+      type: integer
+      note: "Set to e.g. 1073741824 (1 GB) to prevent runaway queries"
+
+    requester_pays_enabled:
+      description: "Allow queries against requester-pays S3 buckets"
+      default: false
+
+    engine_version:
+      description: "Athena query engine version"
+      terraform_block: "engine_version"
+      selected_engine_version: "AUTO"
+      note: "MUST be 'AUTO' for Terraform — specific versions cause validation errors"
+
+  states:
+    - "ENABLED"
+    - "DISABLED"
+
+  default_workgroup:
+    name: "primary"
+    note: "Every account has a 'primary' workgroup. Cannot be deleted."
+
+# -- 6. Query Execution -------------------------------------------------------
+query_execution:
+  description: >
+    Athena executes SQL queries against data in S3 using a distributed SQL
+    engine based on Trino (formerly Presto). Queries are submitted
+    asynchronously and results are stored in S3.
+
+  sql_support:
+    dml:
+      - "SELECT"
+      - "INSERT INTO"           # insert query results into another table
+      - "CTAS"                  # CREATE TABLE AS SELECT
+      - "UNLOAD"                # export results in specific format
+      - "DELETE"                # Iceberg tables only
+      - "UPDATE"                # Iceberg tables only
+      - "MERGE INTO"            # Iceberg tables only
+      - "OPTIMIZE"              # Iceberg table compaction
+      - "VACUUM"                # Iceberg table cleanup
+    ddl:
+      - "CREATE TABLE"
+      - "CREATE EXTERNAL TABLE"
+      - "CREATE VIEW"
+      - "CREATE DATABASE"
+      - "ALTER TABLE"
+      - "DROP TABLE"
+      - "DROP VIEW"
+      - "DROP DATABASE"
+      - "SHOW DATABASES"
+      - "SHOW TABLES"
+      - "SHOW COLUMNS"
+      - "SHOW PARTITIONS"
+      - "SHOW CREATE TABLE"
+      - "DESCRIBE TABLE"
+      - "MSCK REPAIR TABLE"     # discover and add partitions
+    utility:
+      - "EXPLAIN"
+      - "EXPLAIN ANALYZE"
+      - "PREPARE"
+      - "EXECUTE"
+      - "DEALLOCATE PREPARE"
+
+  query_lifecycle:
+    1_submitted: "Query submitted via StartQueryExecution"
+    2_queued: "Query waiting in account queue"
+    3_running: "Query executing on Athena engine"
+    4_completed: "Results written to S3"
+    states: ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
+
+  query_result_reuse:
+    description: >
+      Athena can cache and reuse results from identical queries to avoid
+      re-scanning data. Configurable max age (up to 60 minutes).
+    terraform_block: "result_configuration.result_reuse_configuration"
+    max_age_minutes: 60
+
+  performance_tips:
+    - "Use Parquet or ORC formats (columnar) — Athena reads only required columns"
+    - "Partition data by commonly filtered columns (year, month, day)"
+    - "Use partition projection to avoid catalog overhead with many partitions"
+    - "Compress data with Snappy (Parquet default) or ZSTD"
+    - "Use CTAS to convert CSV/JSON to Parquet for faster subsequent queries"
+    - "Use LIMIT to reduce data returned (but not data scanned)"
+    - "Use column pruning — only SELECT columns you need"
+    - "Use predicate pushdown — WHERE clauses on partition columns"
+    - "Avoid SELECT * on wide tables"
+    - "Use approximate functions (approx_distinct, approx_percentile) for aggregates"
+
+# -- 7. Data Sources -----------------------------------------------------------
+data_sources:
+  s3:
+    description: "Primary data source — query data stored in S3 buckets"
+    formats:
+      - "CSV"
+      - "TSV"
+      - "JSON"
+      - "Parquet"
+      - "ORC"
+      - "Avro"
+      - "Ion"
+      - "Apache Hudi"
+      - "Apache Iceberg"
+      - "Delta Lake"
+      - "GZIP/BZIP2/LZ4/Snappy/ZSTD compressed"
+    compression:
+      - "GZIP (.gz)"
+      - "BZIP2 (.bz2)"
+      - "LZ4"
+      - "Snappy (.snappy)"
+      - "ZSTD (.zst)"
+      - "LZO (.lzo)"
+    best_format: "Parquet with Snappy compression"
+    note: "Columnar formats (Parquet, ORC) dramatically reduce data scanned and cost"
+
+  glue_data_catalog:
+    description: "Default metadata source — stores database/table/partition definitions"
+    catalog_name: "AwsDataCatalog"
+    note: "Athena uses Glue Catalog by default; no configuration needed"
+
+  lake_formation:
+    description: "Fine-grained access control layer on top of Glue Catalog"
+    integration: "Transparent — Athena respects Lake Formation permissions automatically"
+
+  apache_iceberg:
+    description: "Table format supporting ACID transactions, time-travel, schema evolution"
+    dml_support: ["SELECT", "INSERT", "DELETE", "UPDATE", "MERGE", "OPTIMIZE", "VACUUM"]
+    table_property: "table_type = 'ICEBERG'"
+
+  apache_hudi:
+    description: "Table format supporting upserts and incremental queries"
+    input_format: "org.apache.hudi.hadoop.HoodieParquetInputFormat"
+
+  delta_lake:
+    description: "Table format from Databricks with ACID transactions"
+    input_format: "org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat"
+    note: "Requires manifest-based tables"
+
+# -- 8. Result Configuration ---------------------------------------------------
+result_configuration:
+  description: >
+    Every query must have a result location (S3 path). Results are stored as
+    CSV files by default. Can be overridden per-query or enforced by workgroup.
+  terraform_block: "configuration.result_configuration"
+  output_location:
+    format: "s3://bucket/prefix/"
+    note: "Must include trailing slash. Athena creates files under this prefix."
+    result_file_format: "CSV (default) or custom via CTAS/UNLOAD"
+  metadata_files:
+    - ".metadata file — Column names and types"
+    - ".csv file — Query results"
+    - ".txt file — Query execution statistics"
+
+# -- 9. Engine Versions --------------------------------------------------------
+engine_versions:
+  description: >
+    Athena has evolved through multiple engine versions with significant
+    SQL feature differences.
+  versions:
+    "Athena engine version 2":
+      based_on: "Presto 0.217"
+      features: ["Federated queries", "Geospatial functions", "Nested schema support"]
+    "Athena engine version 3":
+      based_on: "Trino 427"
+      features:
+        - "30% faster on TPC-DS"
+        - "MERGE INTO for Iceberg"
+        - "Improved timestamp handling"
+        - "GROUPING SETS, CUBE, ROLLUP"
+        - "Delta Lake support"
+        - "Apache Spark support"
+        - "Result reuse"
+  terraform_note: >
+    Engine version in Terraform MUST be set to "AUTO". Setting a specific
+    version (e.g., "Athena engine version 3") causes validation errors.
+
+# -- 10. Named Queries ---------------------------------------------------------
+named_queries:
+  description: >
+    Saved SQL queries that can be executed by name. Useful for reusable queries
+    and templates. Stored per-workgroup.
+  terraform_resource: "aws_athena_named_query"
+  attributes:
+    name: {type: string, required: true}
+    database: {type: string, required: true}
+    query: {type: string, required: true}
+    description: {type: string}
+    workgroup: {type: string}
+  max_per_account: 1000
+
+# -- 11. Prepared Statements ---------------------------------------------------
+prepared_statements:
+  description: >
+    Parameterized queries using ? placeholders. Prepared once, executed many
+    times with different parameters. Stored per-workgroup.
+  terraform_resource: "aws_athena_prepared_statement"
+  max_per_workgroup: 1000
+  usage:
+    prepare: "PREPARE my_query FROM SELECT * FROM table WHERE id = ?"
+    execute: "EXECUTE my_query USING 'value'"
+
+# -- 12. Data Catalogs ---------------------------------------------------------
+data_catalogs:
+  description: >
+    External data catalog registrations for federated queries. The default
+    catalog is the Glue Data Catalog (AwsDataCatalog).
+  terraform_resource: "aws_athena_data_catalog"
+  types:
+    GLUE:
+      description: "Glue Data Catalog (default, auto-registered as AwsDataCatalog)"
+      parameters: {"catalog-id": "AWS_ACCOUNT_ID"}
+    LAMBDA:
+      description: "Lambda-based data source connector for federated queries"
+      parameters: {"metadata-function": "arn:...", "record-function": "arn:..."}
+    HIVE:
+      description: "External Hive Metastore"
+      parameters: {"metadata-function": "arn:..."}
+
+# -- 13. Federated Queries -----------------------------------------------------
+federated_queries:
+  description: >
+    Query data across 25+ data sources (RDS, Redshift, DynamoDB, DocumentDB,
+    OpenSearch, CloudWatch, etc.) using Lambda-based connectors. Cross-source
+    JOINs are supported.
+  architecture: >
+    Athena invokes a Lambda function (connector) that translates SQL into
+    the source's native query language, executes it, and returns results.
+  available_connectors:
+    aws_managed:
+      - "Amazon RDS (MySQL, PostgreSQL)"
+      - "Amazon Redshift"
+      - "Amazon DynamoDB"
+      - "Amazon DocumentDB"
+      - "Amazon OpenSearch Service"
+      - "Amazon CloudWatch Logs"
+      - "Amazon CloudWatch Metrics"
+      - "Amazon Neptune"
+      - "Amazon Timestream"
+      - "Apache HBase"
+      - "Redis"
+      - "JDBC (generic)"
+    custom: "Any data source via custom Lambda connector"
+  iam_requirements:
+    - "athena:* on workgroup"
+    - "lambda:InvokeFunction on connector Lambda"
+    - "s3:* on spill bucket (for large result sets)"
+  spill_bucket:
+    description: "S3 bucket for intermediate results when connector output exceeds Lambda memory"
+    required: true
+
+# -- 14. CTAS and UNLOAD -------------------------------------------------------
+ctas_unload:
+  ctas:
+    description: "CREATE TABLE AS SELECT — create a new table from query results"
+    formats: ["PARQUET", "ORC", "AVRO", "JSON", "TEXTFILE"]
+    compression: ["GZIP", "SNAPPY", "LZ4", "ZSTD", "NONE"]
+    features:
+      - "Convert CSV/JSON to columnar format"
+      - "Partition output by columns"
+      - "Set bucket count for Hive bucketing"
+    billing: "Data scanned by SELECT + data stored in new table"
+    common_use: "Convert data to Parquet for faster/cheaper subsequent queries"
+
+  unload:
+    description: "UNLOAD — export query results in a specific format to S3"
+    formats: ["PARQUET", "ORC", "AVRO", "JSON", "TEXTFILE"]
+    compression: ["GZIP", "SNAPPY", "LZ4", "ZSTD", "NONE"]
+    difference_from_ctas: "UNLOAD does not create a catalog table — just writes files"
+
+# -- 15. Encryption ------------------------------------------------------------
+encryption:
+  result_encryption:
+    description: "Encrypt query results stored in S3"
+    options:
+      SSE_S3:
+        description: "Amazon S3-managed keys"
+        terraform_value: "SSE_S3"
+        cost: "Free"
+      SSE_KMS:
+        description: "AWS KMS-managed keys"
+        terraform_value: "SSE_KMS"
+        requires_kms_key: true
+      CSE_KMS:
+        description: "Client-side encryption with KMS"
+        terraform_value: "CSE_KMS"
+        requires_kms_key: true
+        note: "Athena encrypts results before writing to S3"
+    terraform_block: "configuration.result_configuration.encryption_configuration"
+
+  source_data_encryption:
+    description: "Athena can read encrypted S3 data"
+    supported:
+      - "SSE-S3 (transparent)"
+      - "SSE-KMS (needs kms:Decrypt permission)"
+      - "CSE-KMS (needs kms:Decrypt permission)"
+    not_supported:
+      - "SSE-C (customer-provided keys)"
+
+# -- 16. IAM ------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    workgroup: "arn:aws:athena:REGION:ACCOUNT:workgroup/WORKGROUP_NAME"
+    data_catalog: "arn:aws:athena:REGION:ACCOUNT:datacatalog/CATALOG_NAME"
+    prepared_statement: "arn:aws:athena:REGION:ACCOUNT:workgroup/WG/preparedstatement/PS_NAME"
+
+  # Athena is passive — no execution role of its own
+  always: []
+
+  # Complete action catalog by category
+  actions:
+    workgroup_management:
+      - "athena:CreateWorkGroup"
+      - "athena:GetWorkGroup"
+      - "athena:UpdateWorkGroup"
+      - "athena:DeleteWorkGroup"
+      - "athena:ListWorkGroups"
+      - "athena:TagResource"
+      - "athena:UntagResource"
+      - "athena:ListTagsForResource"
+    query_execution:
+      - "athena:StartQueryExecution"
+      - "athena:StopQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:GetQueryResultsStream"   # for result streaming
+      - "athena:GetQueryRuntimeStatistics"
+      - "athena:ListQueryExecutions"
+      - "athena:BatchGetQueryExecution"
+    named_queries:
+      - "athena:CreateNamedQuery"
+      - "athena:GetNamedQuery"
+      - "athena:DeleteNamedQuery"
+      - "athena:ListNamedQueries"
+      - "athena:BatchGetNamedQuery"
+    prepared_statements:
+      - "athena:CreatePreparedStatement"
+      - "athena:GetPreparedStatement"
+      - "athena:UpdatePreparedStatement"
+      - "athena:DeletePreparedStatement"
+      - "athena:ListPreparedStatements"
+    data_catalogs:
+      - "athena:CreateDataCatalog"
+      - "athena:GetDataCatalog"
+      - "athena:UpdateDataCatalog"
+      - "athena:DeleteDataCatalog"
+      - "athena:ListDataCatalogs"
+    capacity_reservations:
+      - "athena:CreateCapacityReservation"
+      - "athena:GetCapacityReservation"
+      - "athena:GetCapacityAssignmentConfiguration"
+      - "athena:ListCapacityReservations"
+      - "athena:UpdateCapacityReservation"
+      - "athena:DeleteCapacityReservation"
+      - "athena:PutCapacityAssignmentConfiguration"
+    notebook:  # Athena notebooks (Apache Spark)
+      - "athena:CreateNotebook"
+      - "athena:GetNotebookMetadata"
+      - "athena:UpdateNotebook"
+      - "athena:DeleteNotebook"
+      - "athena:ListNotebookMetadata"
+      - "athena:StartSession"
+      - "athena:GetSession"
+      - "athena:GetSessionStatus"
+      - "athena:TerminateSession"
+      - "athena:ListSessions"
+      - "athena:GetCalculationExecution"
+      - "athena:StartCalculationExecution"
+      - "athena:StopCalculationExecution"
+      - "athena:ListCalculationExecutions"
+      - "athena:ListExecutors"
+
+  # Integration graph IAM rules (Athena is passive — callers need their own permissions)
+  as_target_of: {}
+  as_source_to: {}
+
+  # Common permission sets for users/services that query via Athena
+  common_query_permissions:
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:StopQueryExecution"
+      - "athena:ListQueryExecutions"
+      - "athena:GetWorkGroup"
+    s3_results:
+      - "s3:PutObject"                  # write query results
+      - "s3:GetObject"                  # read results
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+    s3_source:
+      - "s3:GetObject"                  # read source data
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+    glue_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:BatchGetPartition"
+
+  # Condition keys
+  condition_keys:
+    - "athena:workgroup"                 # restrict to specific workgroup
+    - "aws:RequestTag/${TagKey}"
+    - "aws:ResourceTag/${TagKey}"
+    - "aws:TagKeys"
+
+# -- 17. Environment Variables -------------------------------------------------
+env_vars:
+  as_target_of: {}    # passive service
+  as_source_to: {}    # passive service
+
+# -- 18. VPC Triggers ---------------------------------------------------------
+vpc_triggers: []       # Athena is a managed service, no VPC placement
+
+# -- 19. Integration Wiring Ownership -----------------------------------------
+integrations:
+  athena_reads_s3:
+    description: "Athena queries data stored in S3"
+    owned_by: "athena"
+    iam_permissions_on_caller:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+
+  athena_writes_results_to_s3:
+    description: "Athena writes query results to S3"
+    owned_by: "athena"
+    terraform_resources:
+      - "aws_athena_workgroup (result_configuration.output_location)"
+    iam_permissions_on_caller:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+      - "s3:AbortMultipartUpload"
+      - "s3:ListMultipartUploadParts"
+
+  athena_reads_glue_catalog:
+    description: "Athena reads table metadata from Glue Data Catalog"
+    owned_by: "athena"
+    iam_permissions_on_caller:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:BatchGetPartition"
+
+  lambda_queries_athena:
+    description: "Lambda submits queries to Athena"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:GetWorkGroup"
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:GetBucketLocation"
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartitions"
+
+  step_functions_queries_athena:
+    description: "Step Functions submits queries to Athena (SDK integration)"
+    owned_by: "step_functions"
+    iam_permissions_on_caller:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:StopQueryExecution"
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:GetBucketLocation"
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+
+  glue_job_uses_athena:
+    description: "Glue ETL job queries Athena via boto3"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+
+  athena_federated_query:
+    description: "Athena invokes Lambda connector for federated queries"
+    owned_by: "athena"
+    iam_permissions_on_caller:
+      - "lambda:InvokeFunction"
+      - "s3:PutObject"             # spill bucket
+      - "s3:GetObject"             # spill bucket
+      - "s3:ListBucket"
+
+  quicksight_queries_athena:
+    description: "QuickSight uses Athena as a data source"
+    owned_by: "quicksight"
+    iam_permissions_on_caller:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:ListQueryExecutions"
+
+  redshift_spectrum_shares_catalog:
+    description: "Redshift Spectrum and Athena share Glue Catalog tables"
+    owned_by: "independent"
+    note: "Both services use the same Glue Catalog tables but do not directly interact"
+
+  emr_shares_catalog:
+    description: "EMR and Athena share Glue Catalog tables"
+    owned_by: "independent"
+    note: "EMR Spark/Hive and Athena query the same catalog tables"
+
+# -- 20. Terraform Resources ---------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_athena_workgroup"
+      description: "Athena workgroup with result configuration and cost controls"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "CloudWatch log group for Athena query execution logs"
+      always_created: true
+
+  conditional:
+    - resource: "aws_athena_named_query"
+      condition: "When saved queries are defined"
+    - resource: "aws_athena_database"
+      condition: "When a dedicated Athena database is needed (usually Glue creates it)"
+    - resource: "aws_athena_data_catalog"
+      condition: "When external/federated data catalogs are registered"
+    - resource: "aws_athena_prepared_statement"
+      condition: "When parameterized queries are defined"
+    - resource: "aws_s3_bucket"
+      condition: "When a dedicated query results bucket is created"
+
+  all_known:
+    - "aws_athena_workgroup"
+    - "aws_athena_named_query"
+    - "aws_athena_database"
+    - "aws_athena_data_catalog"
+    - "aws_athena_prepared_statement"
+
+# -- 21. Boto3 Operations ------------------------------------------------------
+boto3_operations:
+  client: "athena"
+
+  query_operations:
+    start_query_execution:
+      description: "Submit a SQL query for execution"
+      parameters:
+        QueryString: {type: string, required: true, description: "SQL query text (max 256 KB)"}
+        QueryExecutionContext: {type: object, description: "{'Database': '...', 'Catalog': '...'}"}
+        ResultConfiguration: {type: object, description: "{'OutputLocation': 's3://...', 'EncryptionConfiguration': {...}}"}
+        WorkGroup: {type: string, description: "Workgroup name"}
+        ResultReuseConfiguration: {type: object, description: "{'ResultReuseByAgeConfiguration': {'Enabled': True, 'MaxAgeInMinutes': 60}}"}
+        ExecutionParameters: {type: list, description: "Parameters for prepared statements"}
+      returns: ["QueryExecutionId"]
+
+    get_query_execution:
+      description: "Get status and details of a query execution"
+      parameters:
+        QueryExecutionId: {type: string, required: true}
+      returns: ["QueryExecution.Status.State", "QueryExecution.Status.StateChangeReason", "QueryExecution.Statistics.DataScannedInBytes", "QueryExecution.Statistics.EngineExecutionTimeInMillis", "QueryExecution.ResultConfiguration.OutputLocation"]
+
+    get_query_results:
+      description: "Get the results of a completed query"
+      parameters:
+        QueryExecutionId: {type: string, required: true}
+        MaxResults: {type: integer, description: "Max 1000 rows per page"}
+        NextToken: {type: string}
+      returns: ["ResultSet.Rows[].Data[].VarCharValue", "ResultSet.ResultSetMetadata.ColumnInfo", "NextToken"]
+
+    stop_query_execution:
+      description: "Cancel a running query"
+      parameters:
+        QueryExecutionId: {type: string, required: true}
+
+    list_query_executions:
+      description: "List query execution IDs for a workgroup"
+      parameters:
+        WorkGroup: {type: string}
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+      returns: ["QueryExecutionIds", "NextToken"]
+
+    batch_get_query_execution:
+      description: "Get details for multiple query executions"
+      parameters:
+        QueryExecutionIds: {type: list, required: true, description: "Up to 50 IDs"}
+      returns: ["QueryExecutions[].QueryExecutionId", "QueryExecutions[].Status.State", "QueryExecutions[].Statistics"]
+
+    get_query_runtime_statistics:
+      description: "Get detailed runtime statistics for a query"
+      parameters:
+        QueryExecutionId: {type: string, required: true}
+      returns: ["QueryRuntimeStatistics.Timeline", "QueryRuntimeStatistics.Rows", "QueryRuntimeStatistics.OutputStage"]
+
+  workgroup_operations:
+    create_work_group:
+      description: "Create a workgroup"
+      parameters:
+        Name: {type: string, required: true}
+        Configuration: {type: object, description: "ResultConfiguration, BytesScannedCutoff, etc."}
+        Description: {type: string}
+        Tags: {type: list}
+      returns: []
+
+    get_work_group:
+      description: "Get workgroup details"
+      parameters:
+        WorkGroup: {type: string, required: true}
+      returns: ["WorkGroup.Name", "WorkGroup.State", "WorkGroup.Configuration", "WorkGroup.Description"]
+
+    update_work_group:
+      description: "Update workgroup configuration"
+      parameters:
+        WorkGroup: {type: string, required: true}
+        ConfigurationUpdates: {type: object}
+        Description: {type: string}
+        State: {type: string, description: "ENABLED or DISABLED"}
+
+    delete_work_group:
+      description: "Delete a workgroup (must have no running queries)"
+      parameters:
+        WorkGroup: {type: string, required: true}
+        RecursiveDeleteOption: {type: boolean, description: "Delete saved queries too"}
+
+    list_work_groups:
+      description: "List all workgroups"
+      parameters:
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+      returns: ["WorkGroups[].Name", "WorkGroups[].State"]
+
+  named_query_operations:
+    create_named_query:
+      description: "Save a named query"
+      parameters:
+        Name: {type: string, required: true}
+        Database: {type: string, required: true}
+        QueryString: {type: string, required: true}
+        Description: {type: string}
+        WorkGroup: {type: string}
+      returns: ["NamedQueryId"]
+
+    get_named_query:
+      description: "Get a named query"
+      parameters:
+        NamedQueryId: {type: string, required: true}
+      returns: ["NamedQuery.Name", "NamedQuery.Database", "NamedQuery.QueryString"]
+
+    list_named_queries:
+      description: "List named query IDs"
+      parameters:
+        WorkGroup: {type: string}
+        MaxResults: {type: integer}
+      returns: ["NamedQueryIds"]
+
+    delete_named_query:
+      description: "Delete a named query"
+      parameters:
+        NamedQueryId: {type: string, required: true}
+
+  data_catalog_operations:
+    create_data_catalog:
+      description: "Register an external data catalog"
+      parameters:
+        Name: {type: string, required: true}
+        Type: {type: string, required: true, description: "LAMBDA, GLUE, or HIVE"}
+        Parameters: {type: object, description: "Connector-specific parameters"}
+        Description: {type: string}
+        Tags: {type: list}
+
+    get_data_catalog:
+      description: "Get data catalog details"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["DataCatalog.Name", "DataCatalog.Type", "DataCatalog.Parameters"]
+
+    list_data_catalogs:
+      description: "List registered data catalogs"
+      parameters:
+        MaxResults: {type: integer}
+      returns: ["DataCatalogsSummary[].CatalogName", "DataCatalogsSummary[].Type"]
+
+    update_data_catalog:
+      description: "Update a data catalog"
+      parameters:
+        Name: {type: string, required: true}
+        Type: {type: string, required: true}
+        Parameters: {type: object}
+
+    delete_data_catalog:
+      description: "Delete a data catalog"
+      parameters:
+        Name: {type: string, required: true}
+
+  prepared_statement_operations:
+    create_prepared_statement:
+      description: "Create a prepared statement"
+      parameters:
+        StatementName: {type: string, required: true}
+        WorkGroup: {type: string, required: true}
+        QueryStatement: {type: string, required: true, description: "SQL with ? placeholders"}
+
+    get_prepared_statement:
+      description: "Get a prepared statement"
+      parameters:
+        StatementName: {type: string, required: true}
+        WorkGroup: {type: string, required: true}
+      returns: ["PreparedStatement.StatementName", "PreparedStatement.QueryStatement"]
+
+    list_prepared_statements:
+      description: "List prepared statements in a workgroup"
+      parameters:
+        WorkGroup: {type: string, required: true}
+        MaxResults: {type: integer}
+      returns: ["PreparedStatements[].StatementName"]
+
+# -- 22. Runtime Diagnostics ---------------------------------------------------
+runtime_diagnostics:
+  - pattern: "FAILED.*Athena|Athena.*FAILED"
+    category: CONFIG
+    cause: "Athena query failed — check query syntax and table/column existence"
+    fix_type: check_query
+    resolution: "athena.get_query_execution(QueryExecutionId=id)['QueryExecution']['Status']['StateChangeReason'] for error details"
+
+  - pattern: "AccessDenied.*s3.*athena|Athena.*output.*AccessDenied"
+    category: PERMISSION
+    cause: "Athena cannot write query results to S3 output location"
+    fix_type: update_iam
+    resolution: "Add s3:PutObject, s3:GetBucketLocation to result bucket IAM policy"
+
+  - pattern: "AccessDenied.*glue|glue.*AccessDenied"
+    category: PERMISSION
+    cause: "Athena cannot read Glue Catalog metadata"
+    fix_type: update_iam
+    resolution: "Add glue:GetDatabase, glue:GetTable, glue:GetPartitions to caller role"
+
+  - pattern: "TABLE_NOT_FOUND|HIVE_METASTORE_ERROR"
+    category: RESOURCE_NOT_FOUND
+    cause: "Table does not exist in Glue Catalog"
+    fix_type: manual
+    resolution: "Run Glue crawler to populate catalog, or create table manually via DDL"
+
+  - pattern: "COLUMN_NOT_FOUND|SYNTAX_ERROR"
+    category: QUERY_ERROR
+    cause: "SQL syntax error or column does not exist"
+    fix_type: fix_query
+    resolution: "Check column names match table schema. Use DESCRIBE TABLE to verify."
+
+  - pattern: "HIVE_CANNOT_OPEN_SPLIT|S3.*not.*found"
+    category: DATA_ERROR
+    cause: "S3 data files referenced by table do not exist or are inaccessible"
+    fix_type: manual
+    resolution: "Verify S3 paths in table definition. Run MSCK REPAIR TABLE for partitions."
+
+  - pattern: "QUERY_TIMEOUT|Query.*exhausted"
+    category: TIMEOUT
+    cause: "Query exceeded timeout limit"
+    fix_type: optimize_query
+    resolution: "Optimize query: reduce data scanned, add partition filters, use columnar format"
+
+  - pattern: "EXCEEDED_MEMORY_LIMIT|Resource.*exceeded"
+    category: RESOURCE_LIMIT
+    cause: "Query requires more memory than available"
+    fix_type: optimize_query
+    resolution: "Reduce result set size, add LIMIT, use approximate functions, partition data"
+
+  - pattern: "GENERIC_INTERNAL_ERROR"
+    category: AWS_INTERNAL
+    cause: "Athena internal error"
+    fix_type: retry
+    resolution: "Retry the query. If persistent, check AWS Health Dashboard."
+
+  - pattern: "TooManyRequestsException|throttl"
+    category: THROTTLE
+    cause: "Exceeded concurrent query limit or API rate limit"
+    fix_type: wait_retry
+    resolution: "Implement exponential backoff. Request quota increase for concurrent queries."
+
+  - pattern: "InvalidRequestException.*workgroup"
+    category: VALIDATION
+    cause: "Workgroup configuration is invalid"
+    fix_type: manual
+    resolution: "Check workgroup exists and is ENABLED. Verify result configuration."
+
+  - pattern: "INVALID_TABLE|SerDe.*error|HIVE_BAD_DATA"
+    category: DATA_FORMAT
+    cause: "Data format does not match table SerDe configuration"
+    fix_type: manual
+    resolution: "Verify table SerDe matches actual data format. Common issue: CSV table pointing to JSON data."
+
+  - pattern: "KMS.*key|kms.*Decrypt"
+    category: ENCRYPTION
+    cause: "Cannot decrypt source data or encrypt results — KMS key issue"
+    fix_type: update_iam
+    resolution: "Add kms:Decrypt (for source) and kms:GenerateDataKey (for results) to caller role"
+
+# -- 23. Tags -----------------------------------------------------------------
+tags:
+  max_per_workgroup: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  supported_resources:
+    - "aws_athena_workgroup"
+    - "aws_athena_data_catalog"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 24. Code Update (Developer Agent) ----------------------------------------
+code_update:
+  method: sql
+  boto3_client: athena
+  description: >
+    Athena has no persistent code — queries are submitted ad-hoc via start_query_execution().
+    Workgroup config (result location, engine version) via update_work_group().
+  config_update:
+    client: athena
+    operation: update_work_group
+    id_param: WorkGroup
+    id_value: "{resource_name}"
+  code_update_steps:
+    - "athena = boto3.client('athena', region_name=region)"
+    - "resp = athena.start_query_execution(QueryString='SELECT 1', WorkGroup=resource_name, QueryExecutionContext={'Database': database_name}, ResultConfiguration={'OutputLocation': 's3://bucket/prefix/'})"
+    - "Poll athena.get_query_execution(QueryExecutionId=resp['QueryExecutionId'])['QueryExecution']['Status']['State'] until 'SUCCEEDED'/'FAILED'"
+    - "athena.get_query_results(QueryExecutionId=resp['QueryExecutionId'])"
+  discovery_ops:
+    - op: get_work_group
+      id_param: WorkGroup
+      returns: ["WorkGroup.Configuration.ResultConfiguration.OutputLocation", "WorkGroup.State", "WorkGroup.Configuration.EngineVersion"]
+    - op: list_query_executions
+      id_param: WorkGroup
+      returns: ["QueryExecutionIds"]
+
+# Pipeline monitoring (log_aggregator.py)
+pipeline_monitoring:
+  method: "cloudwatch_logs"
+  log_group_pattern: "/aws/athena/{resource_name}"
+  terraform_log_group: "aws_cloudwatch_log_group"
+  log_aggregator_config:
+    service_to_tf: "aws_athena_workgroup"
+    tf_name_attr: "name"
+
+# -- Sub-Components (spec-driven, zero Python code) ----------------------------
+sub_components:
+  named_queries:
+    terraform_resource: aws_athena_named_query
+    trigger_key: named_queries
+    is_list: true
+    label_suffix: nq
+    name_field: name
+    attributes:
+      name: "{item.name}"
+      database: "{item.database}"
+      query: "{item.query}"
+      workgroup: "{parent_resource_ref}.name"
+      description: "{item.description|}"

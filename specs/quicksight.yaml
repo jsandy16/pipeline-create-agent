@@ -1,0 +1,106 @@
+service_type: quicksight
+is_principal: true
+terraform_resource: aws_quicksight_data_source
+description: "Amazon QuickSight — serverless BI and data visualization; connects to Athena, S3, Redshift, Aurora"
+
+defaults:
+  # Data source type — overridden automatically by the renderer based on integrations.
+  # Supported: ATHENA, S3, REDSHIFT, AURORA_POSTGRESQL, AURORA
+  type: "ATHENA"
+  # Athena defaults (used when type is ATHENA)
+  work_group: "primary"
+  # S3 defaults (used when type is S3)
+  manifest_bucket: ""
+  manifest_key: "manifest.json"
+  # Redshift defaults (used when type is REDSHIFT)
+  redshift_database: "dev"
+
+iam:
+  always:
+    - "quicksight:CreateDataSource"
+    - "quicksight:DescribeDataSource"
+    - "quicksight:UpdateDataSource"
+    - "quicksight:DeleteDataSource"
+    - "quicksight:CreateDataSet"
+    - "quicksight:DescribeDataSet"
+    - "quicksight:UpdateDataSet"
+    - "quicksight:DeleteDataSet"
+    - "quicksight:PassDataSet"
+    - "quicksight:PassDataSource"
+  as_target_of:
+    athena:
+      - "athena:BatchGetQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:GetQueryResultsStream"
+      - "athena:ListQueryExecutions"
+      - "athena:StartQueryExecution"
+      - "athena:StopQueryExecution"
+      - "athena:GetWorkGroup"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+      - "s3:PutObject"
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:GetBucketLocation"
+    redshift:
+      - "redshift:GetClusterCredentials"
+      - "redshift:DescribeClusters"
+      - "redshift:DescribeClusterSubnetGroups"
+    aurora:
+      - "rds:DescribeDBInstances"
+      - "rds:DescribeDBClusters"
+      - "secretsmanager:GetSecretValue"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryResults"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+  as_source_to: {}
+
+env_vars:
+  as_source_to: {}
+  as_target_of: {}
+
+vpc_triggers:
+  - redshift
+  - aurora
+
+code_update:
+  method: api_config
+  boto3_client: quicksight
+  description: >
+    QuickSight data sources via update_data_source(). Datasets via update_data_set().
+    All calls require AwsAccountId (from sts.get_caller_identity()['Account']).
+  config_update:
+    client: quicksight
+    operation: update_data_source
+    id_param: DataSourceId
+    note: "AwsAccountId required — get via sts.get_caller_identity()['Account']"
+  discovery_ops:
+    - op: list_data_sources
+      id_param: AwsAccountId
+      returns: ["DataSources[].DataSourceId", "DataSources[].Name", "DataSources[].Type", "DataSources[].Status"]
+    - op: describe_data_source
+      id_params: [AwsAccountId, DataSourceId]
+      returns: ["DataSource.Status", "DataSource.DataSourceParameters", "DataSource.ErrorInfo"]
+runtime_diagnostics:
+  - pattern: "AccessDeniedException.*QuickSight"
+    category: PERMISSION
+    cause: "QuickSight user or service role lacks permissions"
+    fix_type: manual
+    resolution: "Check QuickSight console → Manage QuickSight → Security & permissions"

@@ -1,0 +1,53 @@
+service_type: sqs
+is_principal: false
+terraform_resource: aws_sqs_queue
+description: "Standard message queue with configurable retention and visibility"
+
+defaults:
+  visibility_timeout_seconds: 30
+  message_retention_seconds: 86400
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+# SQS OWNS: aws_sqs_queue_policy when receiving from S3 or CloudWatch/EventBridge
+# Lambda fragment owns the event_source_mapping when SQS triggers Lambda
+
+code_update:
+  method: api_config
+  boto3_client: sqs
+  description: >
+    SQS has no code. Update queue attributes (visibility timeout, retention period,
+    redrive policy) via set_queue_attributes(). Queue URL from get_queue_url().
+  config_update:
+    client: sqs
+    operation: set_queue_attributes
+    id_param: QueueUrl
+    note: "Get QueueUrl: sqs.get_queue_url(QueueName=resource_name)['QueueUrl']"
+    updatable_attributes: [VisibilityTimeout, MessageRetentionPeriod, MaximumMessageSize, ReceiveMessageWaitTimeSeconds, RedrivePolicy]
+  discovery_ops:
+    - op: get_queue_url
+      id_param: QueueName
+      returns: ["QueueUrl"]
+    - op: get_queue_attributes
+      id_param: QueueUrl
+      returns: ["VisibilityTimeout", "MessageRetentionPeriod", "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "QueueArn"]
+runtime_diagnostics:
+  - pattern: "QueueDoesNotExist|NonExistentQueue"
+    category: RESOURCE_NOT_FOUND
+    cause: "SQS queue not found"
+    fix_type: manual
+    resolution: "Verify terraform apply completed. Queue name must match resource_name exactly."
+  - pattern: "InvalidMessageContents|MessageTooLong"
+    category: CONFIG
+    cause: "Message payload exceeds SQS maximum (256KB)"
+    fix_type: update_config
+    resolution: "Store payload in S3, put S3 reference in SQS message instead"

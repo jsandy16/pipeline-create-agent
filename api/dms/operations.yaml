@@ -1,0 +1,43 @@
+service: dms
+boto3_client: dms
+description: "AWS DMS — Database Migration Service"
+
+operations:
+  create_endpoint:
+    description: "Create a source or target endpoint"
+    parameters:
+      EndpointIdentifier: {type: string, required: true}
+      EndpointType: {type: string, required: true, description: "source or target"}
+      EngineName: {type: string, required: true}
+      ServerName: {type: string}
+      Port: {type: integer}
+      DatabaseName: {type: string}
+      Username: {type: string}
+      Password: {type: string}
+
+  create_replication_task:
+    description: "Create a migration task between endpoints"
+    parameters:
+      ReplicationTaskIdentifier: {type: string, required: true}
+      SourceEndpointArn: {type: string, required: true}
+      TargetEndpointArn: {type: string, required: true}
+      ReplicationInstanceArn: {type: string, required: true}
+      MigrationType: {type: string, required: true, description: "full-load, cdc, or full-load-and-cdc"}
+      TableMappings: {type: string, required: true, description: "JSON table mapping rules"}
+
+  start_replication_task:
+    description: "Start or resume a migration task"
+    parameters:
+      ReplicationTaskArn: {type: string, required: true}
+      StartReplicationTaskType: {type: string, required: true}
+
+  describe_replication_tasks:
+    description: "List migration tasks"
+    parameters:
+      Filters: {type: list}
+
+  test_connection:
+    description: "Test connectivity to an endpoint"
+    parameters:
+      ReplicationInstanceArn: {type: string, required: true}
+      EndpointArn: {type: string, required: true}

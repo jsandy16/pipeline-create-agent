@@ -1,0 +1,194 @@
+business_unit: rd
+cost_center: c001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: collision_raw/
+  source: collision_bucket
+  suffix: null
+  target: collision_processor
+- event: s3:ObjectCreated:*
+  prefix: party_raw/
+  source: party_bucket
+  suffix: null
+  target: party_processor
+- event: s3:ObjectCreated:*
+  prefix: victim_raw/
+  source: victim_bucket
+  suffix: null
+  target: victim_processor
+- event: s3:ObjectCreated:*
+  prefix: case_raw/
+  source: case_bucket
+  suffix: null
+  target: case_processor
+- event: put_object
+  prefix: collision/
+  source: collision_processor
+  suffix: null
+  target: collision_staging_bucket
+- event: put_object
+  prefix: party/
+  source: party_processor
+  suffix: null
+  target: party_staging_bucket
+- event: put_object
+  prefix: victim/
+  source: victim_processor
+  suffix: null
+  target: victim_staging_bucket
+- event: put_object
+  prefix: case/
+  source: case_processor
+  suffix: null
+  target: case_staging_bucket
+- event: s3:ObjectCreated:*
+  prefix: collision/
+  source: collision_staging_bucket
+  suffix: null
+  target: refine_data
+- event: s3:ObjectCreated:*
+  prefix: party/
+  source: party_staging_bucket
+  suffix: null
+  target: refine_data
+- event: s3:ObjectCreated:*
+  prefix: victim/
+  source: victim_staging_bucket
+  suffix: null
+  target: refine_data
+- event: s3:ObjectCreated:*
+  prefix: case/
+  source: case_staging_bucket
+  suffix: null
+  target: refine_data
+- event: put_object
+  prefix: null
+  source: refine_data
+  suffix: null
+  target: minilake_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: collision_staging_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: party_staging_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: victim_staging_bucket
+- event: crawl
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: case_staging_bucket
+- event: write
+  prefix: null
+  source: minilake_crawler
+  suffix: null
+  target: minilake_database
+- event: read
+  prefix: null
+  source: athena_query_engine
+  suffix: null
+  target: minilake_database
+pipeline_name: collision_data_minilake
+region: us-east-1
+services:
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: collision_bucket
+  type: s3
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: party_bucket
+  type: s3
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: victim_bucket
+  type: s3
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: case_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: collision_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: party_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: victim_processor
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 300
+  name: case_processor
+  type: lambda
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: collision_staging_bucket
+  type: s3
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: party_staging_bucket
+  type: s3
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: victim_staging_bucket
+  type: s3
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: case_staging_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 1024
+    runtime: python3.12
+    timeout: 600
+  name: refine_data
+  type: lambda
+- config:
+    lifecycle_rules: []
+    versioning: false
+  name: minilake_bucket
+  type: s3
+- config:
+    database_name: minilake
+    job_type: crawler
+  name: minilake_crawler
+  type: glue
+- config:
+    database_name: minilake
+  name: minilake_database
+  type: glue_data_catalog
+- config:
+    workgroup: primary
+  name: athena_query_engine
+  type: athena

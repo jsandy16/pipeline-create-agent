@@ -1,0 +1,1255 @@
+# ============================================================================
+# EC2 Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL EC2 knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/ec2.yaml with exhaustive
+# coverage of EC2 capabilities, constraints, IAM, integrations, and Terraform
+# resource patterns.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - resource name constraints
+#   3. defaults          - Terraform attribute defaults (free-tier safe)
+#   4. quotas            - AWS service limits
+#   5. instance_types    - instance families, sizes, free-tier eligible
+#   6. amis              - Amazon Machine Images, lookup patterns
+#   7. ebs_volumes       - block storage types, IOPS, throughput
+#   8. security_groups   - ingress/egress rules, limits
+#   9. key_pairs         - SSH key management
+#  10. user_data         - instance bootstrap scripts
+#  11. networking        - VPC, subnets, ENIs, Elastic IPs, placement groups
+#  12. auto_scaling      - launch templates, ASGs, scaling policies
+#  13. spot_instances    - spot pricing, interruption handling
+#  14. instance_store    - ephemeral storage
+#  15. metadata_service  - IMDSv2, instance identity
+#  16. monitoring        - CloudWatch, detailed monitoring, status checks
+#  17. encryption        - EBS encryption, KMS
+#  18. iam               - complete action catalog, instance profiles, ARN formats
+#  19. env_vars          - from existing spec
+#  20. vpc_triggers      - from existing spec
+#  21. integrations      - wiring ownership with all connected services
+#  22. terraform_resources - all TF resource types
+#  23. boto3_operations  - complete API reference
+#  24. runtime_diagnostics - error patterns
+#  25. tags              - constraints
+#  26. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: ec2
+  aws_service_name: "Amazon Elastic Compute Cloud"
+  is_principal: true            # EC2 has an IAM instance profile / execution role
+  terraform_resource: aws_instance
+  description: >
+    Virtual servers in the cloud. EC2 instances provide resizable compute capacity
+    with full control over the operating system, networking, and storage. Instances
+    run within a VPC and can be configured with IAM roles via instance profiles,
+    security groups for network access control, and EBS volumes for persistent storage.
+  free_tier:
+    status: free_12_months
+    details: "750 hours/month of t2.micro or t3.micro (Linux/Windows) for 12 months"
+    eligible_instance_types:
+      - "t2.micro"
+      - "t3.micro"
+    eligible_os:
+      - "Amazon Linux 2"
+      - "Amazon Linux 2023"
+      - "Ubuntu"
+      - "Windows Server"
+    ebs_free_tier: "30 GB of EBS General Purpose (gp2/gp3) storage per month for 12 months"
+  pricing_model: per_hour        # on-demand hourly, reserved (1/3yr), spot, savings plans
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 255       # max characters for EC2 Name tag value
+  resource_label_limit: 64       # practical Terraform label limit
+  valid_characters: "a-zA-Z0-9-_. "  # Name tag is flexible
+  rules:
+    - "Instance Name tag can be up to 255 characters"
+    - "Security group name max 255 characters, allows a-zA-Z0-9 and -._+:/()#,@[]!= spaces"
+    - "Key pair name max 255 characters"
+    - "Instance profile name max 128 characters, allows [a-zA-Z0-9+=,.@_-]"
+    - "IAM role name max 64 characters"
+  terraform_label_rules:
+    - "resource_label uses engine/naming.py resource_label() for safe Terraform identifiers"
+    - "resource_name uses engine/naming.py resource_name() with 255 char limit"
+
+# -- 3. Defaults (free-tier safe) --------------------------------------------
+defaults:
+  instance_type: "t3.micro"      # free tier eligible (12 months)
+  ami_filter: "amzn2-ami-hvm-*-x86_64-gp2"  # Amazon Linux 2
+  associate_public_ip_address: false
+  monitoring: false              # detailed monitoring costs extra
+  ebs_optimized: false           # t3 instances are EBS-optimized by default
+  root_block_device:
+    volume_type: "gp3"
+    volume_size: 8               # GB, minimum for Amazon Linux 2
+    encrypted: true              # EBS encryption by default
+    delete_on_termination: true
+  metadata_options:
+    http_endpoint: "enabled"
+    http_tokens: "required"      # IMDSv2 (recommended security)
+    http_put_response_hop_limit: 1
+  disable_api_termination: false
+  instance_initiated_shutdown_behavior: "stop"
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_instances_per_region: 20         # on-demand, adjustable per instance type
+  max_security_groups_per_instance: 5
+  max_rules_per_security_group: 60     # inbound + outbound combined (adjustable to 200)
+  max_elastic_ips_per_region: 5        # adjustable
+  max_key_pairs_per_region: 5000
+  max_ebs_volumes_per_instance: 40     # Nitro instances; varies by type
+  max_ebs_volume_size: "16 TiB"
+  max_enis_per_instance: "varies by instance type (2-15)"
+  max_placement_groups_per_account: 500
+  max_instances_per_placement_group: "no limit (cluster), 7 per AZ (partition), unlimited (spread except 7 per AZ)"
+  max_user_data_size: "16 KB"          # uncompressed; 64 KB base64 encoded
+  max_tags_per_resource: 50
+  max_tag_key_length: 128
+  max_tag_value_length: 256
+  max_ami_name_length: 128
+  max_security_group_name_length: 255
+  max_launch_templates_per_region: 5000
+  max_versions_per_launch_template: 10000
+
+# -- 5. Instance Types -------------------------------------------------------
+instance_types:
+  families:
+    general_purpose:
+      prefixes: ["t2", "t3", "t3a", "t4g", "m5", "m5a", "m5n", "m6i", "m6g", "m6a", "m7i", "m7g", "m7a"]
+      description: "Balanced compute, memory, networking. Web servers, small databases."
+      burstable: ["t2", "t3", "t3a", "t4g"]  # credit-based CPU bursting
+    compute_optimized:
+      prefixes: ["c5", "c5a", "c5n", "c6i", "c6g", "c6a", "c7i", "c7g", "c7a"]
+      description: "High CPU-to-memory ratio. Batch processing, HPC, ML inference."
+    memory_optimized:
+      prefixes: ["r5", "r5a", "r5n", "r6i", "r6g", "r6a", "r7i", "r7g", "x1", "x2idn", "x2iedn", "z1d"]
+      description: "High memory-to-CPU. In-memory databases, real-time analytics."
+    storage_optimized:
+      prefixes: ["i3", "i3en", "i4i", "d2", "d3", "d3en", "h1"]
+      description: "High sequential read/write. Data warehouses, distributed file systems."
+    accelerated_computing:
+      prefixes: ["p3", "p4d", "p5", "g4dn", "g5", "g6", "inf1", "inf2", "trn1", "dl1"]
+      description: "GPU/custom hardware. ML training, graphics, HPC."
+    hpc_optimized:
+      prefixes: ["hpc6a", "hpc6id", "hpc7g", "hpc7a"]
+      description: "High performance computing with high-bandwidth networking."
+
+  free_tier_types:
+    - type: "t2.micro"
+      vcpu: 1
+      memory_gb: 1
+      network: "Low to Moderate"
+      ebs_optimized: false
+      note: "Burstable, baseline 10% CPU"
+    - type: "t3.micro"
+      vcpu: 2
+      memory_gb: 1
+      network: "Up to 5 Gbps"
+      ebs_optimized: true
+      note: "Burstable, baseline 10% CPU, Nitro"
+
+  burstable_credits:
+    description: "T-series instances earn CPU credits when idle, spend when bursting"
+    modes:
+      standard: "Credits expire after 24 hours. Instance throttled when credits exhausted."
+      unlimited: "Burst beyond credit balance at small per-vCPU-hour charge. Default for t3/t3a/t4g."
+    terraform_attribute: "credit_specification { cpu_credits = 'standard' | 'unlimited' }"
+
+  processor_architectures:
+    x86_64: "Intel and AMD processors (default)"
+    arm64: "AWS Graviton processors (t4g, m7g, c7g, r7g, etc.) — up to 40% better price-performance"
+
+# -- 6. AMIs ------------------------------------------------------------------
+amis:
+  lookup_method: "data.aws_ami with filters"
+  common_filters:
+    amazon_linux_2:
+      name: "amzn2-ami-hvm-*-x86_64-gp2"
+      owner: "amazon"
+      description: "Amazon Linux 2 HVM, 64-bit x86, GP2 root volume"
+    amazon_linux_2023:
+      name: "al2023-ami-*-x86_64"
+      owner: "amazon"
+      description: "Amazon Linux 2023, 64-bit x86"
+    ubuntu_22_04:
+      name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
+      owner: "099720109477"  # Canonical
+      description: "Ubuntu 22.04 LTS"
+    ubuntu_24_04:
+      name: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+      owner: "099720109477"
+      description: "Ubuntu 24.04 LTS"
+    windows_2022:
+      name: "Windows_Server-2022-English-Full-Base-*"
+      owner: "amazon"
+      description: "Windows Server 2022 Full Base"
+    ecs_optimized:
+      name: "amzn2-ami-ecs-hvm-*-x86_64-ebs"
+      owner: "amazon"
+      description: "Amazon ECS-Optimized Amazon Linux 2"
+  terraform_data_source: |
+    data "aws_ami" "example" {
+      most_recent = true
+      owners      = ["amazon"]
+      filter {
+        name   = "name"
+        values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+      }
+      filter {
+        name   = "virtualization-type"
+        values = ["hvm"]
+      }
+    }
+  constraints:
+    - "AMIs are region-specific — same image has different IDs per region"
+    - "Always use data source with most_recent=true rather than hardcoding AMI IDs"
+    - "Custom AMIs can be created from running instances (create_image)"
+    - "AMIs can be shared across accounts or made public"
+
+# -- 7. EBS Volumes -----------------------------------------------------------
+ebs_volumes:
+  types:
+    gp3:
+      description: "General Purpose SSD — baseline 3000 IOPS and 125 MiB/s, independently scalable"
+      min_size_gb: 1
+      max_size_gb: 16384
+      baseline_iops: 3000
+      max_iops: 16000
+      baseline_throughput_mbps: 125
+      max_throughput_mbps: 1000
+      cost_note: "Cheapest SSD. Pay for provisioned IOPS/throughput above baseline."
+      terraform_value: "gp3"
+      recommended: true
+
+    gp2:
+      description: "General Purpose SSD — IOPS scales with volume size (3 IOPS/GB)"
+      min_size_gb: 1
+      max_size_gb: 16384
+      baseline_iops: "3 per GB (min 100, max 16000)"
+      burst_iops: 3000
+      terraform_value: "gp2"
+      note: "Legacy — prefer gp3 for better price-performance"
+
+    io1:
+      description: "Provisioned IOPS SSD — high performance, consistent IOPS"
+      min_size_gb: 4
+      max_size_gb: 16384
+      max_iops: 64000
+      max_throughput_mbps: 1000
+      max_iops_ratio: "50:1 (IOPS:GB)"
+      multi_attach: true
+      terraform_value: "io1"
+
+    io2:
+      description: "Provisioned IOPS SSD — io1 with 99.999% durability"
+      min_size_gb: 4
+      max_size_gb: 65536
+      max_iops: 256000
+      max_throughput_mbps: 4000
+      max_iops_ratio: "1000:1 (IOPS:GB, io2 Block Express)"
+      multi_attach: true
+      terraform_value: "io2"
+
+    st1:
+      description: "Throughput Optimized HDD — big data, data warehouses, log processing"
+      min_size_gb: 125
+      max_size_gb: 16384
+      max_throughput_mbps: 500
+      baseline_throughput_mbps: "40 per TB"
+      terraform_value: "st1"
+      note: "Cannot be boot volume"
+
+    sc1:
+      description: "Cold HDD — lowest cost, infrequently accessed data"
+      min_size_gb: 125
+      max_size_gb: 16384
+      max_throughput_mbps: 250
+      baseline_throughput_mbps: "12 per TB"
+      terraform_value: "sc1"
+      note: "Cannot be boot volume"
+
+  encryption:
+    default: true               # EBS encryption by default (account-level setting)
+    key_types:
+      aws_managed: "aws/ebs (default, per-region)"
+      customer_managed: "Custom KMS key ARN"
+    terraform_attribute: "encrypted = true"
+    kms_attribute: "kms_key_id"
+    note: "Snapshots of encrypted volumes are encrypted. Copies can change key."
+
+  snapshots:
+    description: "Point-in-time backup of EBS volume, stored in S3 (managed by AWS)"
+    incremental: true
+    cross_region_copy: true
+    terraform_resource: "aws_ebs_snapshot"
+    lifecycle_manager: "aws_dlm_lifecycle_policy"
+
+  free_tier: "30 GB of EBS storage (gp2/gp3) per month for 12 months"
+
+# -- 8. Security Groups -------------------------------------------------------
+security_groups:
+  description: "Virtual firewall for EC2 instances controlling inbound and outbound traffic"
+  terraform_resource: "aws_security_group"
+  defaults:
+    ingress: []                  # no inbound rules (deny all inbound by default)
+    egress:
+      - protocol: "-1"          # all protocols
+        from_port: 0
+        to_port: 0
+        cidr_blocks: ["0.0.0.0/0"]  # allow all outbound
+  rules:
+    - "Stateful — return traffic for allowed inbound connections is automatically allowed"
+    - "Default deny inbound, allow all outbound"
+    - "Rules are evaluated as a whole (not in order) — any matching Allow rule wins"
+    - "Cannot create Deny rules — only Allow"
+    - "Changes take effect immediately"
+  source_types:
+    - "CIDR block (e.g. 10.0.0.0/8, 0.0.0.0/0)"
+    - "Security group ID (allows traffic from instances in that SG)"
+    - "Prefix list ID (managed IP ranges like VPC endpoints)"
+    - "Self-referencing (instances in the same SG can talk to each other)"
+  common_rules:
+    ssh:
+      protocol: "tcp"
+      port: 22
+      source: "specific CIDR (never 0.0.0.0/0 in production)"
+    http:
+      protocol: "tcp"
+      port: 80
+      source: "0.0.0.0/0 or ALB security group"
+    https:
+      protocol: "tcp"
+      port: 443
+      source: "0.0.0.0/0 or ALB security group"
+    rdp:
+      protocol: "tcp"
+      port: 3389
+      source: "specific CIDR"
+    postgresql:
+      protocol: "tcp"
+      port: 5432
+      source: "application security group"
+    mysql:
+      protocol: "tcp"
+      port: 3306
+      source: "application security group"
+  pipeline_engine_default: >
+    The EC2 renderer creates a security group with egress-only (all outbound allowed,
+    no inbound rules). Ingress rules can be added by the developer agent post-deployment.
+  quotas:
+    max_per_instance: 5
+    max_rules_per_group: 60      # adjustable to 200
+    max_per_vpc: 500
+
+# -- 9. Key Pairs -------------------------------------------------------------
+key_pairs:
+  description: "SSH key pairs for Linux instance login. Not created by pipeline engine."
+  terraform_resource: "aws_key_pair"
+  types:
+    rsa: "2048-bit RSA"
+    ed25519: "Ed25519 (more secure, smaller keys)"
+  notes:
+    - "Pipeline engine does NOT create key pairs (security: keys should not be in Terraform state)"
+    - "Use SSM Session Manager instead of SSH for secure access without key pairs"
+    - "Key pair is optional — omit for SSM-only access"
+    - "Private key cannot be retrieved after creation"
+
+# -- 10. User Data ------------------------------------------------------------
+user_data:
+  description: "Shell scripts or cloud-init config executed on first boot"
+  max_size: "16 KB (uncompressed)"
+  max_size_base64: "64 KB (base64 encoded)"
+  terraform_attribute: "user_data"
+  encoding: "base64"
+  execution:
+    - "Runs as root on first boot only (unless configured otherwise)"
+    - "Logs written to /var/log/cloud-init-output.log"
+    - "Exit code != 0 does NOT prevent instance from starting"
+  formats:
+    shell_script: "#!/bin/bash"
+    cloud_init: "#cloud-config"
+  common_patterns:
+    install_packages: |
+      #!/bin/bash
+      yum update -y
+      yum install -y httpd
+      systemctl start httpd
+      systemctl enable httpd
+    install_ssm_agent: |
+      #!/bin/bash
+      yum install -y amazon-ssm-agent
+      systemctl enable amazon-ssm-agent
+      systemctl start amazon-ssm-agent
+    install_cloudwatch_agent: |
+      #!/bin/bash
+      yum install -y amazon-cloudwatch-agent
+      /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+        -a fetch-config -m ec2 -s
+
+# -- 11. Networking -----------------------------------------------------------
+networking:
+  vpc:
+    description: "Every EC2 instance runs in a VPC subnet"
+    default_vpc: "AWS creates a default VPC per region with public subnets"
+    terraform_data_sources:
+      default_vpc: "data.aws_vpc.default"
+      default_subnets: "data.aws_subnets.default"
+  elastic_ip:
+    terraform_resource: "aws_eip"
+    description: "Static IPv4 address. Free while associated with a running instance."
+    cost_when_idle: "$0.005/hour when not attached to a running instance"
+    max_per_region: 5
+  elastic_network_interface:
+    terraform_resource: "aws_network_interface"
+    description: "Virtual network card. Can be detached and reattached between instances."
+    max_per_instance: "Varies by instance type (2-15)"
+  placement_groups:
+    strategies:
+      cluster:
+        description: "Packs instances close together in a single AZ. Lowest latency."
+        use_case: "HPC, tightly-coupled workloads"
+      spread:
+        description: "Places instances on distinct hardware. Max 7 per AZ."
+        use_case: "Critical instances that must not share hardware"
+      partition:
+        description: "Divides instances into logical partitions on separate racks."
+        use_case: "Large distributed workloads (HDFS, HBase, Cassandra)"
+    terraform_resource: "aws_placement_group"
+  public_ip:
+    note: "Public IPv4 costs $0.005/hour as of Feb 2024. Use private subnets + NAT or VPC endpoints."
+
+# -- 12. Auto Scaling ---------------------------------------------------------
+auto_scaling:
+  launch_template:
+    terraform_resource: "aws_launch_template"
+    description: "Versioned template for EC2 instance configuration"
+    advantages_over_launch_config:
+      - "Supports versioning"
+      - "Supports multiple instance types"
+      - "Can be updated without replacing"
+  auto_scaling_group:
+    terraform_resource: "aws_autoscaling_group"
+    key_attributes:
+      min_size: "Minimum number of instances"
+      max_size: "Maximum number of instances"
+      desired_capacity: "Target number of instances"
+      health_check_type: "EC2 (instance status) or ELB (load balancer health)"
+      health_check_grace_period: "Seconds before health checks begin (default 300)"
+  scaling_policies:
+    target_tracking:
+      terraform_resource: "aws_autoscaling_policy"
+      description: "Maintain a specific metric value (e.g. 50% CPU)"
+      common_metrics:
+        - "ASGAverageCPUUtilization"
+        - "ASGAverageNetworkIn"
+        - "ASGAverageNetworkOut"
+        - "ALBRequestCountPerTarget"
+    step_scaling:
+      description: "Scale by different amounts based on alarm severity"
+    scheduled:
+      terraform_resource: "aws_autoscaling_schedule"
+      description: "Scale at specific times (e.g. business hours)"
+  note: "Pipeline engine does NOT create ASGs by default — single instance only"
+
+# -- 13. Spot Instances -------------------------------------------------------
+spot_instances:
+  description: "Unused EC2 capacity at up to 90% discount"
+  terraform_attribute: "instance_market_options { market_type = 'spot' }"
+  interruption_behavior:
+    - "terminate (default)"
+    - "stop"
+    - "hibernate"
+  interruption_notice: "2-minute warning via instance metadata or CloudWatch Events"
+  spot_fleet:
+    terraform_resource: "aws_spot_fleet_request"
+    description: "Request and manage a fleet of spot instances"
+  constraints:
+    - "Can be terminated with 2-minute notice"
+    - "Not suitable for stateful workloads without checkpointing"
+    - "Spot price fluctuates based on supply/demand"
+  best_practices:
+    - "Diversify across instance types and AZs"
+    - "Use Spot Fleet with allocation strategy"
+    - "Implement graceful shutdown handling"
+
+# -- 14. Instance Store -------------------------------------------------------
+instance_store:
+  description: "Ephemeral block storage physically attached to the host"
+  characteristics:
+    - "Data lost when instance stops, terminates, or host fails"
+    - "Cannot be detached or attached to other instances"
+    - "Very high IOPS (NVMe drives up to 3.3M IOPS)"
+  use_cases:
+    - "Temporary storage, buffers, caches, scratch data"
+    - "Data replicated across a fleet (e.g. Hadoop HDFS)"
+  available_on: "Specific instance types only (i3, d2, c5d, m5d, r5d, etc.)"
+  terraform_config: "ephemeral_block_device block in aws_instance"
+
+# -- 15. Instance Metadata Service --------------------------------------------
+metadata_service:
+  description: "HTTP endpoint at 169.254.169.254 providing instance information"
+  versions:
+    IMDSv1: "Simple HTTP GET (deprecated, less secure)"
+    IMDSv2: "Requires session token (PUT then GET). Recommended."
+  terraform_attributes:
+    http_endpoint: "enabled"
+    http_tokens: "required"       # forces IMDSv2
+    http_put_response_hop_limit: 1
+  available_metadata:
+    - "ami-id"
+    - "instance-id"
+    - "instance-type"
+    - "local-hostname"
+    - "local-ipv4"
+    - "public-hostname"
+    - "public-ipv4"
+    - "security-groups"
+    - "iam/security-credentials/ROLE-NAME"  # temporary credentials
+    - "placement/availability-zone"
+    - "placement/region"
+  security_note: >
+    Always use IMDSv2 (http_tokens = required). IMDSv1 is vulnerable to SSRF attacks.
+    The pipeline engine sets IMDSv2 by default.
+
+# -- 16. Monitoring -----------------------------------------------------------
+monitoring:
+  cloudwatch_metrics:
+    namespace: "AWS/EC2"
+    basic_monitoring:
+      interval: "5 minutes"
+      cost: "free"
+      metrics:
+        - "CPUUtilization"
+        - "DiskReadOps"
+        - "DiskWriteOps"
+        - "DiskReadBytes"
+        - "DiskWriteBytes"
+        - "NetworkIn"
+        - "NetworkOut"
+        - "NetworkPacketsIn"
+        - "NetworkPacketsOut"
+        - "StatusCheckFailed"
+        - "StatusCheckFailed_Instance"
+        - "StatusCheckFailed_System"
+    detailed_monitoring:
+      interval: "1 minute"
+      cost: "$3.50/instance/month (first 10 metrics free for 12 months)"
+      terraform_attribute: "monitoring = true"
+  status_checks:
+    system_status: "Checks the underlying host hardware and software"
+    instance_status: "Checks the instance itself (kernel, network, OS)"
+    attached_ebs_status: "Checks EBS volumes are reachable and functioning"
+  cloudwatch_agent:
+    description: "Collects OS-level metrics and logs (memory, disk, custom)"
+    install: "yum install -y amazon-cloudwatch-agent (or via SSM)"
+    configuration: "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
+    metrics_collected:
+      - "mem_used_percent"
+      - "disk_used_percent"
+      - "cpu_usage_user"
+      - "processes_total"
+      - "swap_used_percent"
+  pipeline_monitoring: "cloudtrail"  # no native CW log group; use CloudTrail
+
+# -- 17. Encryption -----------------------------------------------------------
+encryption:
+  ebs_encryption:
+    description: "Encrypt EBS volumes and snapshots at rest using AES-256"
+    default_since: "Can be enabled as account-level default per region"
+    terraform_attribute: "encrypted = true"
+    key_types:
+      aws_managed: "aws/ebs (default, per-region, free)"
+      customer_managed: "Custom KMS key ARN for cross-account or compliance"
+    terraform_kms_attribute: "kms_key_id"
+    behaviors:
+      - "Encrypted volumes produce encrypted snapshots"
+      - "Snapshots copied across regions can use a different KMS key"
+      - "Unencrypted volumes can be encrypted during copy"
+      - "Data in transit between instance and EBS is encrypted on Nitro instances"
+  in_transit:
+    description: "Data encrypted in transit between EC2 and EBS on Nitro instances"
+    nitro_only: true
+    note: "No configuration needed — automatic on Nitro-based instances"
+
+# -- 18. IAM ------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    instance: "arn:aws:ec2:REGION:ACCOUNT:instance/INSTANCE-ID"
+    security_group: "arn:aws:ec2:REGION:ACCOUNT:security-group/SG-ID"
+    volume: "arn:aws:ec2:REGION:ACCOUNT:volume/VOL-ID"
+    ami: "arn:aws:ec2:REGION::image/AMI-ID"
+    key_pair: "arn:aws:ec2:REGION:ACCOUNT:key-pair/KEY-NAME"
+    instance_profile: "arn:aws:iam::ACCOUNT:instance-profile/PROFILE-NAME"
+    launch_template: "arn:aws:ec2:REGION:ACCOUNT:launch-template/LT-ID"
+
+  # Service principal for trust policy
+  service_principal: "ec2.amazonaws.com"
+
+  # Actions always needed by any EC2 instance (via instance profile)
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+
+  # Complete action catalog
+  actions:
+    instance_management:
+      - "ec2:RunInstances"
+      - "ec2:TerminateInstances"
+      - "ec2:StartInstances"
+      - "ec2:StopInstances"
+      - "ec2:RebootInstances"
+      - "ec2:DescribeInstances"
+      - "ec2:DescribeInstanceStatus"
+      - "ec2:DescribeInstanceTypes"
+      - "ec2:ModifyInstanceAttribute"
+      - "ec2:GetConsoleOutput"
+      - "ec2:GetConsoleScreenshot"
+    ami_management:
+      - "ec2:DescribeImages"
+      - "ec2:CreateImage"
+      - "ec2:DeregisterImage"
+      - "ec2:CopyImage"
+      - "ec2:RegisterImage"
+      - "ec2:DescribeImageAttribute"
+      - "ec2:ModifyImageAttribute"
+    ebs_management:
+      - "ec2:CreateVolume"
+      - "ec2:DeleteVolume"
+      - "ec2:AttachVolume"
+      - "ec2:DetachVolume"
+      - "ec2:DescribeVolumes"
+      - "ec2:DescribeVolumeStatus"
+      - "ec2:ModifyVolume"
+      - "ec2:CreateSnapshot"
+      - "ec2:DeleteSnapshot"
+      - "ec2:DescribeSnapshots"
+      - "ec2:CopySnapshot"
+    security_groups:
+      - "ec2:CreateSecurityGroup"
+      - "ec2:DeleteSecurityGroup"
+      - "ec2:DescribeSecurityGroups"
+      - "ec2:AuthorizeSecurityGroupIngress"
+      - "ec2:AuthorizeSecurityGroupEgress"
+      - "ec2:RevokeSecurityGroupIngress"
+      - "ec2:RevokeSecurityGroupEgress"
+    key_pairs:
+      - "ec2:CreateKeyPair"
+      - "ec2:DeleteKeyPair"
+      - "ec2:DescribeKeyPairs"
+      - "ec2:ImportKeyPair"
+    networking:
+      - "ec2:AllocateAddress"
+      - "ec2:AssociateAddress"
+      - "ec2:DisassociateAddress"
+      - "ec2:ReleaseAddress"
+      - "ec2:DescribeAddresses"
+      - "ec2:CreateNetworkInterface"
+      - "ec2:DeleteNetworkInterface"
+      - "ec2:AttachNetworkInterface"
+      - "ec2:DetachNetworkInterface"
+      - "ec2:DescribeNetworkInterfaces"
+      - "ec2:DescribeSubnets"
+      - "ec2:DescribeVpcs"
+    tags:
+      - "ec2:CreateTags"
+      - "ec2:DeleteTags"
+      - "ec2:DescribeTags"
+    launch_templates:
+      - "ec2:CreateLaunchTemplate"
+      - "ec2:CreateLaunchTemplateVersion"
+      - "ec2:DeleteLaunchTemplate"
+      - "ec2:DescribeLaunchTemplates"
+      - "ec2:DescribeLaunchTemplateVersions"
+      - "ec2:ModifyLaunchTemplate"
+    auto_scaling:
+      - "autoscaling:CreateAutoScalingGroup"
+      - "autoscaling:DeleteAutoScalingGroup"
+      - "autoscaling:DescribeAutoScalingGroups"
+      - "autoscaling:UpdateAutoScalingGroup"
+      - "autoscaling:SetDesiredCapacity"
+      - "autoscaling:PutScalingPolicy"
+      - "autoscaling:DeletePolicy"
+    spot:
+      - "ec2:RequestSpotInstances"
+      - "ec2:CancelSpotInstanceRequests"
+      - "ec2:DescribeSpotInstanceRequests"
+      - "ec2:DescribeSpotPriceHistory"
+      - "ec2:RequestSpotFleet"
+      - "ec2:CancelSpotFleetRequests"
+    ssm_access:
+      - "ssm:StartSession"
+      - "ssm:TerminateSession"
+      - "ssm:SendCommand"
+      - "ssm:GetCommandInvocation"
+      - "ssm:DescribeInstanceInformation"
+      - "ssmmessages:CreateControlChannel"
+      - "ssmmessages:CreateDataChannel"
+      - "ssmmessages:OpenControlChannel"
+      - "ssmmessages:OpenDataChannel"
+      - "ec2messages:AcknowledgeMessage"
+      - "ec2messages:DeleteMessage"
+      - "ec2messages:FailMessage"
+      - "ec2messages:GetEndpoint"
+      - "ec2messages:GetMessages"
+      - "ec2messages:SendReply"
+
+  # Managed policies commonly attached to EC2 instance profiles
+  managed_policies:
+    - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+    - "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    eventbridge:
+      - "logs:CreateLogGroup"
+    cloudwatch:
+      - "logs:CreateLogGroup"
+
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    sqs:
+      - "sqs:SendMessage"
+      - "sqs:ReceiveMessage"
+      - "sqs:DeleteMessage"
+      - "sqs:GetQueueAttributes"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:DeleteItem"
+    sns:
+      - "sns:Publish"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    kinesis_firehose:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    redshift:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+      - "redshift:GetClusterCredentials"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    lambda:
+      - "lambda:InvokeFunction"
+    stepfunctions:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    sagemaker:
+      - "sagemaker:InvokeEndpoint"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+
+# -- 19. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    sqs:
+      pattern: "{PEER_UPPER}_QUEUE_URL"
+      ref: "aws_sqs_queue.{peer_label}.url"
+    sns:
+      pattern: "{PEER_UPPER}_TOPIC_ARN"
+      ref: "aws_sns_topic.{peer_label}.arn"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+    kinesis_streams:
+      pattern: "{PEER_UPPER}_STREAM_NAME"
+      ref: "aws_kinesis_stream.{peer_label}.name"
+    lambda:
+      pattern: "{PEER_UPPER}_FUNCTION_ARN"
+      ref: "aws_lambda_function.{peer_label}.arn"
+
+# -- 20. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - redshift
+  - msk
+
+# -- 21. Integration Wiring Ownership ----------------------------------------
+integrations:
+  ec2_to_s3:
+    description: "EC2 instance reads/writes S3 via SDK"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    env_vars:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+  ec2_to_sqs:
+    description: "EC2 sends/receives messages to/from SQS"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "sqs:SendMessage"
+      - "sqs:ReceiveMessage"
+      - "sqs:DeleteMessage"
+      - "sqs:GetQueueAttributes"
+
+  ec2_to_dynamodb:
+    description: "EC2 reads/writes DynamoDB tables"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:DeleteItem"
+
+  ec2_to_sns:
+    description: "EC2 publishes to SNS topics"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "sns:Publish"
+
+  ec2_to_kinesis_streams:
+    description: "EC2 puts records to Kinesis Data Streams"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+
+  ec2_to_kinesis_firehose:
+    description: "EC2 puts records to Kinesis Firehose"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+
+  ec2_to_redshift:
+    description: "EC2 queries Redshift via Data API"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+      - "redshift:GetClusterCredentials"
+
+  ec2_to_aurora:
+    description: "EC2 queries Aurora via RDS Data API"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+
+  ec2_to_lambda:
+    description: "EC2 invokes Lambda functions"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "lambda:InvokeFunction"
+
+  ec2_to_stepfunctions:
+    description: "EC2 starts Step Functions executions"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+
+  ec2_to_sagemaker:
+    description: "EC2 invokes SageMaker endpoints"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "sagemaker:InvokeEndpoint"
+
+  ec2_to_athena:
+    description: "EC2 runs Athena queries"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+
+  ec2_to_msk:
+    description: "EC2 connects to MSK cluster as Kafka client"
+    owned_by: "ec2"
+    iam_permissions_on_ec2:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+
+  eventbridge_to_ec2:
+    description: "EventBridge rule triggers action on EC2"
+    owned_by: "eventbridge"
+    note: "EC2 receives events via EventBridge target (e.g. SSM Run Command)"
+
+# -- 22. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_instance"
+      description: "The EC2 instance"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "IAM role for instance profile (principal: ec2.amazonaws.com)"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy with computed permissions"
+      always_created: true
+    - resource: "aws_iam_instance_profile"
+      description: "Instance profile linking role to instance"
+      always_created: true
+    - resource: "aws_security_group"
+      description: "Security group with egress-only rules"
+      always_created: true
+    - resource: "data.aws_ami"
+      description: "Data source for latest AMI lookup"
+      always_created: true
+
+  conditional:
+    - resource: "aws_ebs_volume"
+      condition: "When additional EBS volumes are needed beyond root"
+    - resource: "aws_volume_attachment"
+      condition: "When attaching additional EBS volumes"
+    - resource: "aws_eip"
+      condition: "When static public IP is needed"
+    - resource: "aws_eip_association"
+      condition: "When associating EIP to instance"
+    - resource: "aws_key_pair"
+      condition: "When SSH access is required (not recommended — use SSM)"
+    - resource: "aws_launch_template"
+      condition: "When using Auto Scaling instead of single instance"
+    - resource: "aws_autoscaling_group"
+      condition: "When auto scaling is configured"
+    - resource: "aws_security_group_rule"
+      condition: "When separate ingress rules are needed"
+
+# -- 23. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "ec2"
+  # Also uses SSM client for management
+  secondary_client: "ssm"
+
+  instance_operations:
+    run_instances:
+      description: "Launch one or more EC2 instances"
+      parameters:
+        ImageId: {type: string, required: true, description: "AMI ID"}
+        InstanceType: {type: string, required: true, description: "e.g. t3.micro"}
+        MinCount: {type: integer, required: true, description: "Minimum instances to launch"}
+        MaxCount: {type: integer, required: true, description: "Maximum instances to launch"}
+        KeyName: {type: string, description: "SSH key pair name"}
+        SecurityGroupIds: {type: list, description: "List of security group IDs"}
+        SubnetId: {type: string, description: "VPC subnet ID"}
+        UserData: {type: string, description: "Base64-encoded startup script"}
+        IamInstanceProfile: {type: object, description: "{'Name': 'profile-name'} or {'Arn': 'arn:...'}"}
+        TagSpecifications: {type: list, description: "[{'ResourceType': 'instance', 'Tags': [...]}]"}
+        BlockDeviceMappings: {type: list, description: "EBS volume configurations"}
+        MetadataOptions: {type: object, description: "{'HttpTokens': 'required', 'HttpEndpoint': 'enabled'}"}
+      returns: ["Instances[].InstanceId", "Instances[].PrivateIpAddress"]
+
+    describe_instances:
+      description: "List or filter running instances"
+      parameters:
+        InstanceIds: {type: list, description: "Specific instance IDs"}
+        Filters: {type: list, description: "[{'Name': 'tag:Pipeline', 'Values': ['name']}]"}
+      returns: ["Reservations[].Instances[].InstanceId", "Reservations[].Instances[].State.Name",
+                "Reservations[].Instances[].PublicIpAddress", "Reservations[].Instances[].PrivateIpAddress",
+                "Reservations[].Instances[].InstanceType", "Reservations[].Instances[].IamInstanceProfile.Arn"]
+
+    stop_instances:
+      description: "Stop running instances (EBS-backed only)"
+      parameters:
+        InstanceIds: {type: list, required: true}
+      returns: ["StoppingInstances[].CurrentState", "StoppingInstances[].PreviousState"]
+
+    start_instances:
+      description: "Start stopped instances"
+      parameters:
+        InstanceIds: {type: list, required: true}
+      returns: ["StartingInstances[].CurrentState"]
+
+    terminate_instances:
+      description: "Permanently terminate instances"
+      parameters:
+        InstanceIds: {type: list, required: true}
+
+    reboot_instances:
+      description: "Reboot running instances"
+      parameters:
+        InstanceIds: {type: list, required: true}
+
+    modify_instance_attribute:
+      description: "Modify instance attributes (type, security groups, user data, etc.)"
+      parameters:
+        InstanceId: {type: string, required: true}
+        InstanceType: {type: object, description: "{'Value': 't3.small'} (instance must be stopped)"}
+        Groups: {type: list, description: "Security group IDs"}
+        UserData: {type: object, description: "{'Value': base64_data} (instance must be stopped)"}
+
+    get_console_output:
+      description: "Get instance console output (boot logs)"
+      parameters:
+        InstanceId: {type: string, required: true}
+        Latest: {type: boolean, description: "Get most recent output only"}
+
+  security_group_operations:
+    create_security_group:
+      description: "Create a new security group"
+      parameters:
+        GroupName: {type: string, required: true}
+        Description: {type: string, required: true}
+        VpcId: {type: string}
+      returns: ["GroupId"]
+
+    authorize_security_group_ingress:
+      description: "Add inbound rules to a security group"
+      parameters:
+        GroupId: {type: string, required: true}
+        IpPermissions: {type: list, required: true, description: "[{'IpProtocol': 'tcp', 'FromPort': 22, 'ToPort': 22, 'IpRanges': [{'CidrIp': '10.0.0.0/8'}]}]"}
+
+    authorize_security_group_egress:
+      description: "Add outbound rules to a security group"
+      parameters:
+        GroupId: {type: string, required: true}
+        IpPermissions: {type: list, required: true}
+
+    revoke_security_group_ingress:
+      description: "Remove inbound rules from a security group"
+      parameters:
+        GroupId: {type: string, required: true}
+        IpPermissions: {type: list, required: true}
+
+    describe_security_groups:
+      description: "List security groups with optional filters"
+      parameters:
+        GroupIds: {type: list}
+        Filters: {type: list}
+      returns: ["SecurityGroups[].GroupId", "SecurityGroups[].GroupName", "SecurityGroups[].IpPermissions", "SecurityGroups[].IpPermissionsEgress"]
+
+  key_pair_operations:
+    create_key_pair:
+      description: "Create an SSH key pair"
+      parameters:
+        KeyName: {type: string, required: true}
+        KeyType: {type: string, description: "rsa or ed25519"}
+      returns: ["KeyMaterial (private key — only returned once)", "KeyPairId"]
+
+    describe_key_pairs:
+      description: "List key pairs"
+      parameters:
+        KeyNames: {type: list}
+      returns: ["KeyPairs[].KeyName", "KeyPairs[].KeyPairId", "KeyPairs[].KeyType"]
+
+  ebs_operations:
+    create_volume:
+      description: "Create an EBS volume"
+      parameters:
+        AvailabilityZone: {type: string, required: true}
+        VolumeType: {type: string, description: "gp3, gp2, io1, io2, st1, sc1"}
+        Size: {type: integer, description: "Size in GB"}
+        Iops: {type: integer, description: "For io1/io2/gp3"}
+        Throughput: {type: integer, description: "MiB/s for gp3"}
+        Encrypted: {type: boolean}
+        KmsKeyId: {type: string}
+      returns: ["VolumeId"]
+
+    attach_volume:
+      description: "Attach EBS volume to an instance"
+      parameters:
+        VolumeId: {type: string, required: true}
+        InstanceId: {type: string, required: true}
+        Device: {type: string, required: true, description: "/dev/sdf, /dev/xvdf, etc."}
+
+    describe_volumes:
+      description: "List EBS volumes"
+      parameters:
+        VolumeIds: {type: list}
+        Filters: {type: list}
+      returns: ["Volumes[].VolumeId", "Volumes[].State", "Volumes[].Size", "Volumes[].VolumeType"]
+
+    create_snapshot:
+      description: "Create a snapshot of an EBS volume"
+      parameters:
+        VolumeId: {type: string, required: true}
+        Description: {type: string}
+      returns: ["SnapshotId"]
+
+  ami_operations:
+    describe_images:
+      description: "Find AMIs with filters"
+      parameters:
+        Owners: {type: list, description: "['amazon', 'self', 'ACCOUNT-ID']"}
+        Filters: {type: list, description: "[{'Name': 'name', 'Values': ['amzn2-*']}]"}
+      returns: ["Images[].ImageId", "Images[].Name", "Images[].CreationDate", "Images[].Description"]
+
+    create_image:
+      description: "Create an AMI from a running or stopped instance"
+      parameters:
+        InstanceId: {type: string, required: true}
+        Name: {type: string, required: true}
+        NoReboot: {type: boolean, description: "true to create without rebooting"}
+      returns: ["ImageId"]
+
+  ssm_operations:
+    send_command:
+      description: "Run a command on instances via SSM agent"
+      parameters:
+        InstanceIds: {type: list, required: true}
+        DocumentName: {type: string, required: true, description: "AWS-RunShellScript, AWS-RunPowerShellScript"}
+        Parameters: {type: object, description: "{'commands': ['echo hello', 'ls -la']}"}
+        TimeoutSeconds: {type: integer}
+      returns: ["Command.CommandId", "Command.Status"]
+
+    get_command_invocation:
+      description: "Get the output of a command invocation"
+      parameters:
+        CommandId: {type: string, required: true}
+        InstanceId: {type: string, required: true}
+      returns: ["Status", "StandardOutputContent", "StandardErrorContent", "StatusDetails"]
+
+    start_session:
+      description: "Start an interactive SSM session (Session Manager)"
+      parameters:
+        Target: {type: string, required: true, description: "Instance ID"}
+      returns: ["SessionId", "StreamUrl"]
+
+    describe_instance_information:
+      description: "List instances managed by SSM"
+      parameters:
+        Filters: {type: list}
+      returns: ["InstanceInformationList[].InstanceId", "InstanceInformationList[].PingStatus", "InstanceInformationList[].PlatformType"]
+
+  tagging_operations:
+    create_tags:
+      description: "Tag EC2 resources"
+      parameters:
+        Resources: {type: list, required: true, description: "List of resource IDs"}
+        Tags: {type: list, required: true, description: "[{'Key': 'Name', 'Value': 'my-instance'}]"}
+
+    describe_tags:
+      description: "List tags on EC2 resources"
+      parameters:
+        Filters: {type: list, description: "[{'Name': 'resource-id', 'Values': ['i-1234']}]"}
+      returns: ["Tags[].Key", "Tags[].Value", "Tags[].ResourceId", "Tags[].ResourceType"]
+
+# -- 24. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AccessDenied|not authorized"
+    category: PERMISSION
+    cause: "EC2 instance profile is missing required IAM permissions"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={...})"
+
+  - pattern: "InstanceLimitExceeded"
+    category: QUOTA
+    cause: "Account has reached the maximum number of instances for this type in the region"
+    fix_type: manual
+    resolution: "Request a quota increase via Service Quotas console or use a different instance type"
+
+  - pattern: "InsufficientInstanceCapacity"
+    category: CAPACITY
+    cause: "AWS does not have enough On-Demand capacity for the requested instance type in the AZ"
+    fix_type: retry
+    resolution: "Try a different AZ, instance type, or wait and retry. Consider Spot instances."
+
+  - pattern: "InvalidAMIID|AMI.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "AMI ID does not exist or is not available in this region"
+    fix_type: manual
+    resolution: "Use data.aws_ami data source with most_recent=true instead of hardcoded AMI IDs"
+
+  - pattern: "InvalidParameterValue.*instance type"
+    category: VALIDATION
+    cause: "Instance type is not valid or not available in the selected AZ"
+    fix_type: config_change
+    resolution: "Check available instance types in the AZ with ec2.describe_instance_type_offerings"
+
+  - pattern: "UnauthorizedOperation"
+    category: PERMISSION
+    cause: "IAM user/role lacks ec2:RunInstances or related permissions"
+    fix_type: update_iam
+    resolution: "Add required ec2:* permissions to the deploying role"
+
+  - pattern: "VPCIdNotSpecified|InvalidSubnetID"
+    category: CONFIG
+    cause: "No default VPC or invalid subnet specified"
+    fix_type: config_change
+    resolution: "Specify a valid subnet_id in the instance configuration"
+
+  - pattern: "InvalidKeyPair.NotFound"
+    category: RESOURCE_NOT_FOUND
+    cause: "Specified SSH key pair does not exist in this region"
+    fix_type: manual
+    resolution: "Create the key pair first or remove key_name from config"
+
+  - pattern: "Client.InternalError.*EBS"
+    category: AWS_ERROR
+    cause: "EBS volume creation or attachment failed due to AWS internal error"
+    fix_type: retry
+    resolution: "Wait and retry. If persistent, try a different AZ."
+
+  - pattern: "InvalidInstanceID.NotFound"
+    category: RESOURCE_NOT_FOUND
+    cause: "Instance ID does not exist (may have been terminated)"
+    fix_type: manual
+    resolution: "Use describe_instances with Pipeline tag filter to find current instance ID"
+
+  - pattern: "IncorrectInstanceState"
+    category: STATE
+    cause: "Operation requires instance in a different state (e.g. must be stopped to change type)"
+    fix_type: code_change
+    resolution: "Stop the instance first, then perform the operation, then start it"
+
+# -- 25. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"       # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  special_tags:
+    Name: "Displayed in EC2 console as instance name"
+    Pipeline: "Pipeline name for discovery by developer agent"
+    ManagedBy: "terraform (set by _tags_block)"
+
+# -- 26. Code Update (Developer Agent) ---------------------------------------
+code_update:
+  method: api_config
+  boto3_client: ssm
+  description: >
+    Run commands on EC2 via SSM send_command() (instance must have SSM agent + AmazonSSMManagedInstanceCore policy).
+    For AMI/config changes: stop -> modify_instance_attribute -> start.
+    Find instance ID via describe_instances() filtering by Pipeline tag.
+  config_update:
+    client: ssm
+    operation: send_command
+    note: "DocumentName='AWS-RunShellScript', Parameters={'commands': ['your-command']}"
+  code_update_steps:
+    - "ec2 = boto3.client('ec2', region_name=region)"
+    - "ssm = boto3.client('ssm', region_name=region)"
+    - "resp = ec2.describe_instances(Filters=[{'Name':'tag:Pipeline','Values':[pipeline_name]},{'Name':'instance-state-name','Values':['running']}])"
+    - "instance_id = resp['Reservations'][0]['Instances'][0]['InstanceId']"
+    - "cmd = ssm.send_command(InstanceIds=[instance_id], DocumentName='AWS-RunShellScript', Parameters={'commands': ['echo hello']})"
+    - "Poll ssm.get_command_invocation(CommandId=cmd['Command']['CommandId'], InstanceId=instance_id)['Status'] until 'Success'"
+  discovery_ops:
+    - op: describe_instances
+      filter_by: "tag:Pipeline=pipeline_name AND instance-state-name=running"
+      returns: ["InstanceId", "PublicIpAddress", "PrivateIpAddress", "State.Name", "IamInstanceProfile.Arn"]

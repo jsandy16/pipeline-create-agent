@@ -1,0 +1,65 @@
+service: iam
+boto3_client: iam
+description: "AWS IAM — identity and access management"
+
+operations:
+  create_role:
+    description: "Create a new IAM role"
+    parameters:
+      RoleName: {type: string, required: true}
+      AssumeRolePolicyDocument: {type: string, required: true, description: "JSON trust policy"}
+      Description: {type: string}
+      Tags: {type: list}
+
+  attach_role_policy:
+    description: "Attach a managed policy to a role"
+    parameters:
+      RoleName: {type: string, required: true}
+      PolicyArn: {type: string, required: true}
+
+  put_role_policy:
+    description: "Create or update an inline policy on a role"
+    parameters:
+      RoleName: {type: string, required: true}
+      PolicyName: {type: string, required: true}
+      PolicyDocument: {type: string, required: true}
+
+  create_policy:
+    description: "Create a managed IAM policy"
+    parameters:
+      PolicyName: {type: string, required: true}
+      PolicyDocument: {type: string, required: true}
+      Description: {type: string}
+
+  create_user:
+    description: "Create a new IAM user"
+    parameters:
+      UserName: {type: string, required: true}
+      Tags: {type: list}
+
+  create_group:
+    description: "Create an IAM group"
+    parameters:
+      GroupName: {type: string, required: true}
+
+  add_user_to_group:
+    description: "Add a user to a group"
+    parameters:
+      GroupName: {type: string, required: true}
+      UserName: {type: string, required: true}
+
+  list_roles:
+    description: "List IAM roles"
+    parameters:
+      PathPrefix: {type: string}
+
+  get_role:
+    description: "Get role details"
+    parameters:
+      RoleName: {type: string, required: true}
+
+  tag_role:
+    description: "Add tags to a role"
+    parameters:
+      RoleName: {type: string, required: true}
+      Tags: {type: list, required: true}

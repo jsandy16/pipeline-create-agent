@@ -1,0 +1,838 @@
+# ============================================================================
+# SageMaker Notebook Instance — Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL SageMaker Notebook knowledge
+# needed by the pipeline engine, HCL renderer, spec builder, developer agent,
+# and autofix agent. It extends the original specs/sagemaker_notebook.yaml
+# with exhaustive coverage.
+#
+# Structure:
+#   1. identity              — service metadata & Terraform mapping
+#   2. naming                — resource name constraints
+#   3. defaults              — Terraform attribute defaults (minimum-cost)
+#   4. quotas                — AWS service limits
+#   5. instances             — notebook instance configuration, lifecycle
+#   6. lifecycle_configs     — startup/creation scripts
+#   7. instance_types        — complete instance type catalog
+#   8. storage               — EBS volumes, root volume
+#   9. git_repositories      — Git repo integration
+#  10. vpc_configuration     — VPC, security groups, internet access
+#  11. encryption            — KMS, volume encryption
+#  12. iam                   — complete IAM action catalog & integration rules
+#  13. env_vars              — auto-wired environment variables
+#  14. vpc_triggers          — VPC placement rules
+#  15. integrations          — wiring ownership with all connected services
+#  16. terraform_resources   — all TF resource types
+#  17. boto3_operations      — complete API operation reference
+#  18. runtime_diagnostics   — error patterns & auto-fix rules
+#  19. tags                  — tagging constraints
+#  20. code_update           — developer agent instructions
+#  21. logging               — CloudWatch log groups, metrics
+# ============================================================================
+
+# -- 1. Identity ------------------------------------------------------------
+identity:
+  service_type: sagemaker_notebook
+  aws_service_name: "Amazon SageMaker Notebook Instance"
+  is_principal: true            # Notebook has an IAM execution role
+  terraform_resource: aws_sagemaker_notebook_instance
+  description: >
+    Amazon SageMaker Notebook Instance — a managed Jupyter notebook for
+    interactive data exploration, visualization, and ML experimentation.
+    This is the simplest SageMaker resource: just an IAM role + notebook instance.
+    No model, no endpoint, no container image required.
+  free_tier:
+    status: never_free
+    details: >
+      SageMaker Notebook Instances are NEVER permanently free tier. There was a
+      limited 2-month trial (250 hours/month of ml.t2.medium or ml.t3.medium)
+      for new AWS accounts, but this is NOT a permanent free tier. After the
+      trial, ml.t2.medium costs ~$0.0464/hour (~$33/month continuously).
+    warning: >
+      NEVER FREE TIER. The HCL renderer should emit a cost warning. Always
+      default to ml.t2.medium as the minimum instance type. Users should stop
+      notebook instances when not in use to avoid charges.
+  pricing_model: per_instance_hour  # billed per second while instance is running
+
+# -- 2. Naming --------------------------------------------------------------
+naming:
+  resource_name_limit: 63
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9-"
+  rules:
+    - "Max 63 characters, ^[a-zA-Z0-9](-*[a-zA-Z0-9])*"
+    - "Must start and end with alphanumeric"
+    - "No consecutive hyphens"
+    - "Must be unique within the AWS account + region"
+  suffixes_used_by_renderer:
+    - "-role"    # IAM role name
+    - "-policy"  # IAM policy name
+    - "-sg"      # Security group (when VPC)
+
+# -- 3. Defaults (minimum-cost) ---------------------------------------------
+defaults:
+  # ml.t2.medium: smallest SageMaker notebook instance
+  instance_type: "ml.t2.medium"
+  # EBS volume size in GB (minimum 5)
+  volume_size: 5
+  # Direct internet access (set to Disabled if in VPC with NAT)
+  direct_internet_access: "Enabled"
+
+# -- 4. Quotas --------------------------------------------------------------
+quotas:
+  max_notebook_instances_per_region: 100   # adjustable
+  max_ebs_volume_size_gb: 16384           # 16 TB
+  min_ebs_volume_size_gb: 5
+  max_lifecycle_config_size: "16384 bytes"  # 16 KB for on-start/on-create scripts
+  max_lifecycle_configs_per_region: 100    # adjustable
+  max_git_repos_per_instance: 3           # 1 default + 2 additional
+  max_tags_per_resource: 50
+  max_tag_key_length: 128
+  max_tag_value_length: 256
+
+  # Notebook instance limits
+  session_timeout: "No automatic timeout — runs until stopped"
+  idle_timeout: "Not built-in — use lifecycle config for auto-stop"
+
+# -- 5. Notebook Instances ---------------------------------------------------
+instances:
+  description: >
+    A managed Jupyter notebook server running on a dedicated ML compute
+    instance. Provides JupyterLab and classic Jupyter interfaces. Pre-installed
+    with common ML frameworks (TensorFlow, PyTorch, MXNet, scikit-learn),
+    the AWS SDK, and conda/pip for package management.
+
+  lifecycle:
+    states:
+      Pending: "Instance is being created"
+      InService: "Notebook is running and accessible"
+      Stopping: "Instance is shutting down"
+      Stopped: "Instance is stopped (EBS data preserved, no compute charges)"
+      Failed: "Instance creation or start failed"
+      Deleting: "Instance is being deleted"
+      Updating: "Instance configuration is being updated"
+    typical_creation_time: "3-5 minutes"
+    typical_start_time: "2-5 minutes (from Stopped to InService)"
+
+  access_methods:
+    jupyter_lab:
+      description: "Modern Jupyter interface (recommended)"
+      url_path: "/lab"
+    jupyter_classic:
+      description: "Classic Jupyter Notebook interface"
+      url_path: "/tree"
+    terminal:
+      description: "Linux terminal access via browser"
+      url_path: "New > Terminal in JupyterLab"
+    presigned_url:
+      description: "One-time browser URL for programmatic access"
+      boto3_op: "create_presigned_notebook_instance_url"
+      session_duration: "5 minutes (URL validity), then session lasts until tab closed"
+
+  pre_installed:
+    ml_frameworks:
+      - "TensorFlow"
+      - "PyTorch"
+      - "Apache MXNet"
+      - "scikit-learn"
+      - "XGBoost"
+      - "Keras"
+    data_tools:
+      - "pandas"
+      - "NumPy"
+      - "SciPy"
+      - "matplotlib"
+      - "seaborn"
+      - "Bokeh"
+    aws_tools:
+      - "boto3"
+      - "AWS CLI"
+      - "SageMaker Python SDK"
+      - "s3fs"
+    package_managers:
+      - "conda"
+      - "pip"
+    kernels:
+      - "Python 3 (conda_python3)"
+      - "TensorFlow (conda_tensorflow2_p310)"
+      - "PyTorch (conda_pytorch_p310)"
+      - "MXNet (conda_mxnet_p38)"
+      - "R"
+
+  storage:
+    ebs_volume:
+      mount_point: "/home/ec2-user/SageMaker"
+      persists_across_stops: true
+      persists_across_deletes: false
+      min_size_gb: 5
+      max_size_gb: 16384
+      note: >
+        Data on EBS persists when the instance is stopped but is LOST when
+        the instance is deleted. Save important work to S3 or Git.
+    root_volume:
+      size_gb: 20  # fixed, not configurable
+      note: "Operating system and pre-installed packages. Not preserved across stops."
+
+  platform_identifier:
+    options:
+      - "notebook-al1-v1"   # Amazon Linux 1
+      - "notebook-al2-v1"   # Amazon Linux 2
+      - "notebook-al2-v2"   # Amazon Linux 2 with JupyterLab 3
+    note: >
+      Not set by our renderer (not supported in all regions). AWS defaults
+      to the latest available platform automatically.
+
+# -- 6. Lifecycle Configurations ---------------------------------------------
+lifecycle_configs:
+  description: >
+    Shell scripts that run when the notebook instance is created (once) or
+    started (every start). Used for installing packages, configuring environments,
+    setting up auto-stop, mounting EFS, etc.
+
+  terraform_resource: "aws_sagemaker_notebook_instance_lifecycle_configuration"
+
+  on_create:
+    description: "Runs once when the instance is first created"
+    max_size: "16 KB"
+    runs_as: "root"
+    timeout: "5 minutes"
+    common_uses:
+      - "Install conda environments"
+      - "Clone Git repositories"
+      - "Install system packages"
+      - "Configure Jupyter extensions"
+      - "Mount EFS file systems"
+
+  on_start:
+    description: "Runs every time the instance starts (including after stop/start)"
+    max_size: "16 KB"
+    runs_as: "root"
+    timeout: "5 minutes"
+    common_uses:
+      - "Activate conda environments"
+      - "Pull latest from Git repos"
+      - "Set environment variables"
+      - "Restart Jupyter extensions"
+      - "Auto-stop idle instances"
+
+  auto_stop_script: |
+    #!/bin/bash
+    # Auto-stop idle notebook after 1 hour
+    IDLE_TIME=3600
+    echo "Setting up auto-stop after ${IDLE_TIME} seconds of inactivity"
+    cat > /home/ec2-user/autostop.py << 'EOF'
+    import boto3, json, time, urllib.request
+    def get_notebook_name():
+        with urllib.request.urlopen('http://169.254.169.254/latest/meta-data/tags/instance/aws:sagemaker:notebook-instance-name') as f:
+            return f.read().decode()
+    def is_idle(timeout):
+        # Check Jupyter kernel activity
+        with urllib.request.urlopen('http://localhost:8888/api/sessions') as f:
+            sessions = json.loads(f.read())
+        for s in sessions:
+            if s['kernel']['execution_state'] == 'busy':
+                return False
+        return True
+    client = boto3.client('sagemaker')
+    while True:
+        time.sleep(timeout)
+        if is_idle(timeout):
+            client.stop_notebook_instance(NotebookInstanceName=get_notebook_name())
+            break
+    EOF
+    nohup python /home/ec2-user/autostop.py &
+
+# -- 7. Instance Types -------------------------------------------------------
+instance_types:
+  general_purpose:
+    - type: "ml.t2.medium"
+      vcpu: 2
+      memory_gb: 4
+      gpu: 0
+      cost_per_hour_approx: "$0.0464"
+      note: "Cheapest. Burstable. Good for light exploration."
+    - type: "ml.t3.medium"
+      vcpu: 2
+      memory_gb: 4
+      gpu: 0
+      cost_per_hour_approx: "$0.0464"
+      note: "Burstable. Better networking than t2."
+    - type: "ml.t3.large"
+      vcpu: 2
+      memory_gb: 8
+      gpu: 0
+      cost_per_hour_approx: "$0.0929"
+    - type: "ml.m5.xlarge"
+      vcpu: 4
+      memory_gb: 16
+      gpu: 0
+      cost_per_hour_approx: "$0.269"
+      note: "Good for medium datasets."
+    - type: "ml.m5.2xlarge"
+      vcpu: 8
+      memory_gb: 32
+      gpu: 0
+      cost_per_hour_approx: "$0.538"
+  compute_optimized:
+    - type: "ml.c5.xlarge"
+      vcpu: 4
+      memory_gb: 8
+      gpu: 0
+      cost_per_hour_approx: "$0.238"
+    - type: "ml.c5.2xlarge"
+      vcpu: 8
+      memory_gb: 16
+      gpu: 0
+      cost_per_hour_approx: "$0.476"
+  gpu:
+    - type: "ml.p3.2xlarge"
+      vcpu: 8
+      memory_gb: 61
+      gpu: 1
+      gpu_type: "NVIDIA V100"
+      cost_per_hour_approx: "$4.284"
+    - type: "ml.g4dn.xlarge"
+      vcpu: 4
+      memory_gb: 16
+      gpu: 1
+      gpu_type: "NVIDIA T4"
+      cost_per_hour_approx: "$0.736"
+      note: "Best value GPU for notebook experimentation"
+    - type: "ml.g5.xlarge"
+      vcpu: 4
+      memory_gb: 16
+      gpu: 1
+      gpu_type: "NVIDIA A10G"
+      cost_per_hour_approx: "$1.408"
+
+# -- 8. Storage ---------------------------------------------------------------
+storage:
+  ebs_volume:
+    terraform_attribute: "volume_size"
+    default_gb: 5
+    min_gb: 5
+    max_gb: 16384
+    type: "gp2"  # General Purpose SSD
+    mount_point: "/home/ec2-user/SageMaker"
+    persistence: >
+      Data on the EBS volume persists across stop/start cycles but is permanently
+      deleted when the notebook instance is deleted. Always back up important data
+      to S3 or a Git repository.
+    resize:
+      description: "Can increase volume size (never decrease) via update_notebook_instance"
+      requires_stop: true
+      note: "Volume resize requires stopping the instance first"
+
+  additional_volumes:
+    efs:
+      description: "Mount EFS file system for shared persistent storage"
+      setup: "Via lifecycle config script (mount command)"
+      use_cases: ["Shared datasets across notebooks", "Persistent storage"]
+    fsx:
+      description: "Mount FSx for Lustre for high-performance ML data"
+      setup: "Via lifecycle config script"
+      use_cases: ["Large dataset training", "High-throughput I/O"]
+
+# -- 9. Git Repositories ------------------------------------------------------
+git_repositories:
+  terraform_resource: "aws_sagemaker_code_repository"
+  max_per_instance: 3  # 1 default + 2 additional
+
+  default_code_repository:
+    terraform_attribute: "default_code_repository"
+    description: "Cloned to /home/ec2-user/SageMaker on creation"
+    supports: ["CodeCommit", "GitHub", "GitLab", "Bitbucket"]
+
+  additional_code_repositories:
+    terraform_attribute: "additional_code_repositories"
+    description: "Up to 2 additional repos"
+
+  secret_for_private_repos:
+    description: >
+      For private GitHub/GitLab repos, store credentials in Secrets Manager
+      and reference via aws_sagemaker_code_repository.
+    secret_format: '{"username": "git-user", "password": "personal-access-token"}'
+
+# -- 10. VPC Configuration ----------------------------------------------------
+vpc_configuration:
+  description: >
+    Notebook instances can be placed in a VPC for network isolation. Required
+    when accessing resources in private subnets (databases, etc.).
+
+  terraform_attributes:
+    subnet_id: "Subnet in the VPC"
+    security_groups: "List of security group IDs"
+    direct_internet_access: "Enabled or Disabled"
+
+  direct_internet_access:
+    Enabled: >
+      Default. Internet accessible via public route. Cannot be in VPC with this
+      setting unless the subnet has an internet gateway.
+    Disabled: >
+      No direct internet. Requires NAT gateway or VPC endpoints for S3, SageMaker
+      API, and package repositories. Set automatically by renderer when VPC.
+
+  vpc_endpoints_needed:
+    - service: "com.amazonaws.REGION.sagemaker.api"
+      type: "Interface"
+      purpose: "SageMaker API calls"
+    - service: "com.amazonaws.REGION.sagemaker.runtime"
+      type: "Interface"
+      purpose: "Endpoint invocations from notebook"
+    - service: "com.amazonaws.REGION.s3"
+      type: "Gateway"
+      purpose: "S3 access for data"
+
+  renderer_behavior: >
+    When vpc_required is true, the renderer:
+    1. Creates aws_security_group with egress to 0.0.0.0/0
+    2. Sets subnet_id from data.aws_subnets.default
+    3. Sets direct_internet_access to "Disabled"
+    4. Attaches security group to notebook instance
+
+# -- 11. Encryption -----------------------------------------------------------
+encryption:
+  ebs_volume:
+    description: "Encrypt the notebook's EBS volume with KMS"
+    terraform_attribute: "kms_key_id"
+    default: "AWS managed key (aws/sagemaker)"
+    note: "Volume encryption can only be set at creation time"
+
+  in_transit:
+    description: "HTTPS for all Jupyter connections and API calls"
+    enforced: true
+
+  root_access:
+    terraform_attribute: "root_access"
+    values: ["Enabled", "Disabled"]
+    default: "Enabled"
+    note: >
+      Disabling root access prevents users from installing system-level
+      packages. They can still install packages in conda environments.
+
+# -- 12. IAM -----------------------------------------------------------------
+iam:
+  # Service principal for trust policy
+  service_principal: "sagemaker.amazonaws.com"
+
+  # ARN format
+  arn_formats:
+    notebook_instance: "arn:aws:sagemaker:REGION:ACCOUNT:notebook-instance/INSTANCE_NAME"
+    lifecycle_config: "arn:aws:sagemaker:REGION:ACCOUNT:notebook-instance-lifecycle-config/CONFIG_NAME"
+    code_repository: "arn:aws:sagemaker:REGION:ACCOUNT:code-repository/REPO_NAME"
+
+  # Permissions always required
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "sagemaker:DescribeNotebookInstance"
+    - "sagemaker:ListTags"
+
+  # Complete IAM action catalog
+  actions:
+    notebook_management:
+      - "sagemaker:CreateNotebookInstance"
+      - "sagemaker:DeleteNotebookInstance"
+      - "sagemaker:DescribeNotebookInstance"
+      - "sagemaker:UpdateNotebookInstance"
+      - "sagemaker:StartNotebookInstance"
+      - "sagemaker:StopNotebookInstance"
+      - "sagemaker:ListNotebookInstances"
+      - "sagemaker:CreatePresignedNotebookInstanceUrl"
+    lifecycle_config_management:
+      - "sagemaker:CreateNotebookInstanceLifecycleConfig"
+      - "sagemaker:DeleteNotebookInstanceLifecycleConfig"
+      - "sagemaker:DescribeNotebookInstanceLifecycleConfig"
+      - "sagemaker:UpdateNotebookInstanceLifecycleConfig"
+      - "sagemaker:ListNotebookInstanceLifecycleConfigs"
+    code_repository:
+      - "sagemaker:CreateCodeRepository"
+      - "sagemaker:DeleteCodeRepository"
+      - "sagemaker:DescribeCodeRepository"
+      - "sagemaker:ListCodeRepositories"
+      - "sagemaker:UpdateCodeRepository"
+    tagging:
+      - "sagemaker:AddTags"
+      - "sagemaker:DeleteTags"
+      - "sagemaker:ListTags"
+    iam_passrole:
+      - "iam:PassRole"
+
+  # Integration graph rules
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+      - "s3:GetBucketLocation"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "athena:StopQueryExecution"
+      - "glue:GetTable"
+      - "glue:GetPartitions"
+      - "glue:GetDatabase"
+    dynamodb:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:BatchGetItem"
+      - "dynamodb:BatchWriteItem"
+    redshift:
+      - "redshift:GetClusterCredentials"
+      - "redshift:DescribeClusters"
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    glue:
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetPartitions"
+    glue_data_catalog:
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:GetPartitions"
+    sagemaker:
+      - "sagemaker:InvokeEndpoint"
+      - "sagemaker:DescribeEndpoint"
+      - "sagemaker:DescribeModel"
+    lambda:
+      - "lambda:InvokeFunction"
+    stepfunctions:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+# -- 13. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+# -- 14. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - redshift
+  - aurora
+  - rds
+
+# -- 15. Integration Wiring Ownership ----------------------------------------
+integrations:
+  s3_to_notebook:
+    description: "S3 provides data for interactive exploration in the notebook"
+    owned_by: "sagemaker_notebook"
+    iam_permissions_on_self:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+
+  notebook_to_s3:
+    description: "Notebook writes results, models, and artifacts to S3"
+    owned_by: "sagemaker_notebook"
+    iam_permissions_on_self:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+
+  notebook_to_sagemaker:
+    description: "Notebook invokes SageMaker endpoints or starts training jobs"
+    owned_by: "sagemaker_notebook"
+    iam_permissions_on_self:
+      - "sagemaker:InvokeEndpoint"
+      - "sagemaker:DescribeEndpoint"
+      - "sagemaker:CreateTrainingJob"
+      - "sagemaker:DescribeTrainingJob"
+
+  notebook_to_athena:
+    description: "Notebook queries data via Athena"
+    owned_by: "sagemaker_notebook"
+    iam_permissions_on_self:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+
+  notebook_to_redshift:
+    description: "Notebook queries Redshift cluster"
+    owned_by: "sagemaker_notebook"
+    requires_vpc: true
+    iam_permissions_on_self:
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+
+  notebook_to_aurora:
+    description: "Notebook queries Aurora cluster via Data API"
+    owned_by: "sagemaker_notebook"
+    requires_vpc: true
+    iam_permissions_on_self:
+      - "rds-data:ExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+
+  notebook_to_dynamodb:
+    description: "Notebook reads/writes DynamoDB tables"
+    owned_by: "sagemaker_notebook"
+    iam_permissions_on_self:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+
+# -- 16. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_sagemaker_notebook_instance"
+      description: "The notebook instance itself"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Execution role assumed by sagemaker.amazonaws.com"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline IAM policy with computed permissions"
+      always_created: true
+
+  conditional:
+    - resource: "aws_security_group"
+      condition: "When vpc_required is true"
+    - resource: "aws_sagemaker_notebook_instance_lifecycle_configuration"
+      condition: "When lifecycle config scripts are provided"
+    - resource: "aws_sagemaker_code_repository"
+      condition: "When Git repository is configured"
+
+  not_created_but_available:
+    - resource: "aws_sagemaker_notebook_instance_lifecycle_configuration"
+      description: "On-create and on-start shell scripts"
+
+# -- 17. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "sagemaker"
+
+  instance_operations:
+    create_notebook_instance:
+      description: "Create a new notebook instance"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+        InstanceType: {type: string, required: true}
+        RoleArn: {type: string, required: true}
+        SubnetId: {type: string}
+        SecurityGroupIds: {type: list}
+        KmsKeyId: {type: string}
+        Tags: {type: list}
+        LifecycleConfigName: {type: string}
+        DirectInternetAccess: {type: string, description: "Enabled or Disabled"}
+        VolumeSizeInGB: {type: integer}
+        DefaultCodeRepository: {type: string}
+        AdditionalCodeRepositories: {type: list}
+        RootAccess: {type: string, description: "Enabled or Disabled"}
+        PlatformIdentifier: {type: string}
+
+    describe_notebook_instance:
+      description: "Get status and details of a notebook instance"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+      returns: ["NotebookInstanceName", "NotebookInstanceArn",
+                "NotebookInstanceStatus", "InstanceType", "Url",
+                "RoleArn", "VolumeSizeInGB", "DirectInternetAccess",
+                "SubnetId", "SecurityGroups", "KmsKeyId",
+                "CreationTime", "LastModifiedTime", "FailureReason",
+                "LifecycleConfigName", "DefaultCodeRepository",
+                "AdditionalCodeRepositories", "RootAccess",
+                "PlatformIdentifier"]
+
+    update_notebook_instance:
+      description: "Update a notebook instance (must be stopped first)"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+        InstanceType: {type: string}
+        RoleArn: {type: string}
+        LifecycleConfigName: {type: string}
+        VolumeSizeInGB: {type: integer}
+        DefaultCodeRepository: {type: string}
+        AdditionalCodeRepositories: {type: list}
+        RootAccess: {type: string}
+        DisassociateLifecycleConfig: {type: boolean}
+        DisassociateDefaultCodeRepository: {type: boolean}
+        DisassociateAdditionalCodeRepositories: {type: boolean}
+      note: "Instance MUST be Stopped before calling update"
+
+    start_notebook_instance:
+      description: "Start a stopped notebook instance"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+
+    stop_notebook_instance:
+      description: "Stop a running notebook instance"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+
+    delete_notebook_instance:
+      description: "Delete a notebook instance (must be stopped first)"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+      note: "EBS data is permanently lost. Instance must be Stopped."
+
+    list_notebook_instances:
+      description: "List all notebook instances"
+      parameters:
+        StatusEquals: {type: string, description: "InService, Stopped, Failed, etc."}
+        MaxResults: {type: integer}
+        NextToken: {type: string}
+
+    create_presigned_notebook_instance_url:
+      description: "Generate a one-time browser URL to access a running notebook"
+      parameters:
+        NotebookInstanceName: {type: string, required: true}
+        SessionExpirationDurationInSeconds: {type: integer, description: "300-43200 (5 min - 12 hrs)"}
+      returns: ["AuthorizedUrl"]
+      note: "URL is valid for 5 minutes. Session lasts until browser tab is closed."
+
+  lifecycle_config_operations:
+    create_notebook_instance_lifecycle_config:
+      description: "Create a lifecycle configuration (on-create and on-start scripts)"
+      parameters:
+        NotebookInstanceLifecycleConfigName: {type: string, required: true}
+        OnCreate: {type: list, description: "[{'Content': base64_encoded_script}]"}
+        OnStart: {type: list, description: "[{'Content': base64_encoded_script}]"}
+
+    describe_notebook_instance_lifecycle_config:
+      description: "Get lifecycle configuration details"
+      parameters:
+        NotebookInstanceLifecycleConfigName: {type: string, required: true}
+
+    update_notebook_instance_lifecycle_config:
+      description: "Update lifecycle configuration scripts"
+      parameters:
+        NotebookInstanceLifecycleConfigName: {type: string, required: true}
+        OnCreate: {type: list}
+        OnStart: {type: list}
+
+    delete_notebook_instance_lifecycle_config:
+      description: "Delete a lifecycle configuration"
+      parameters:
+        NotebookInstanceLifecycleConfigName: {type: string, required: true}
+
+# -- 18. Runtime Diagnostics ---------------------------------------------------
+runtime_diagnostics:
+  - pattern: "NotebookInstance.*Failed|LifecycleConfig.*failed"
+    category: CONFIG
+    cause: "Notebook instance failed to start — lifecycle config script may have errored"
+    fix_type: check_logs
+    resolution: "Check /aws/sagemaker/NotebookInstances/<name>/LifecycleConfig CloudWatch log group"
+
+  - pattern: "ResourceLimitExceeded"
+    category: QUOTA
+    cause: "Exceeded notebook instance quota"
+    fix_type: quota_request
+    resolution: "Request quota increase via Service Quotas. Delete unused notebook instances."
+
+  - pattern: "ValidationException.*instance type"
+    category: CONFIG
+    cause: "Instance type not available in this region"
+    fix_type: config_change
+    resolution: "Use ml.t2.medium (cheapest, available in all regions)"
+
+  - pattern: "AccessDeniedException"
+    category: PERMISSION
+    cause: "IAM role lacks required permissions"
+    fix_type: update_iam
+    resolution: "Check IAM role permissions. Ensure sagemaker:* and iam:PassRole are present."
+
+  - pattern: "InternalServerError.*notebook"
+    category: RUNTIME
+    cause: "Notebook instance internal error"
+    fix_type: restart
+    resolution: "Stop and restart the notebook instance. If persistent, delete and recreate."
+
+  - pattern: "NotebookInstanceNotFound"
+    category: RESOURCE_NOT_FOUND
+    cause: "Notebook instance does not exist"
+    fix_type: wait_or_create
+    resolution: "Check if terraform apply completed. Re-run if instance is missing."
+
+  - pattern: "LifecycleConfig.*timed out"
+    category: CONFIG
+    cause: "Lifecycle config script took longer than 5 minutes"
+    fix_type: config_change
+    resolution: >
+      Optimize lifecycle config script. Move long-running tasks to background
+      (nohup) or use a separate setup script.
+
+  - pattern: "VolumeSize.*cannot be decreased"
+    category: CONFIG
+    cause: "Cannot reduce EBS volume size"
+    fix_type: manual
+    resolution: "EBS volume size can only be increased. Create a new instance for smaller volume."
+
+# -- 19. Tags ------------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 20. Code Update (Developer Agent) -----------------------------------------
+code_update:
+  method: api_config
+  boto3_client: sagemaker
+  description: >
+    Notebook instance: stop -> update (instance type, lifecycle config, volume) -> start.
+    To run code on the notebook, use SSM or generate a presigned URL.
+    Instance must be Stopped before update_notebook_instance().
+  config_update:
+    client: sagemaker
+    operation: update_notebook_instance
+    id_param: NotebookInstanceName
+    note: "Must stop first: stop_notebook_instance() -> poll until Stopped -> update -> start_notebook_instance()"
+    updatable: [InstanceType, RoleArn, LifecycleConfigName, VolumeSizeInGB, DefaultCodeRepository]
+  code_update_steps:
+    - "sm.stop_notebook_instance(NotebookInstanceName=resource_name)"
+    - "Poll sm.describe_notebook_instance(NotebookInstanceName=resource_name)['NotebookInstanceStatus'] until 'Stopped'"
+    - "sm.update_notebook_instance(NotebookInstanceName=resource_name, InstanceType='ml.t2.medium')"
+    - "sm.start_notebook_instance(NotebookInstanceName=resource_name)"
+  discovery_ops:
+    - op: describe_notebook_instance
+      id_param: NotebookInstanceName
+      returns: ["NotebookInstanceStatus", "InstanceType", "Url", "RoleArn", "VolumeSizeInGB", "DirectInternetAccess"]
+    - op: create_presigned_notebook_instance_url
+      id_param: NotebookInstanceName
+      returns: ["AuthorizedUrl"]
+      note: "Returns a one-time browser URL to access the running notebook"
+
+# -- 21. Logging ---------------------------------------------------------------
+logging:
+  cloudwatch_log_groups:
+    notebook_instance: "/aws/sagemaker/NotebookInstances/{instance_name}"
+    lifecycle_config: "/aws/sagemaker/NotebookInstances/{instance_name}/LifecycleConfig"
+
+  pipeline_monitoring:
+    method: "not_monitored"
+    note: >
+      SageMaker Notebook Instances are interactive resources (not pipeline
+      execution resources). They are not monitored by the pipeline run
+      log aggregator. They fall under the "metadata-only" category.
+
+  cloudwatch_metrics:
+    namespace: "AWS/SageMaker"
+    note: >
+      SageMaker notebook instances emit limited metrics. Instance-level
+      CPU/Memory metrics are available via CloudWatch agent if installed.

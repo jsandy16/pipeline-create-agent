@@ -1,0 +1,48 @@
+service: kinesis_streams
+boto3_client: kinesis
+description: "Amazon Kinesis Data Streams — real-time data streaming"
+
+operations:
+  put_record:
+    description: "Write a single record to a stream"
+    parameters:
+      StreamName: {type: string, required: true}
+      Data: {type: bytes, required: true}
+      PartitionKey: {type: string, required: true}
+
+  put_records:
+    description: "Write multiple records in a single request"
+    parameters:
+      StreamName: {type: string, required: true}
+      Records: {type: list, required: true}
+
+  get_shard_iterator:
+    description: "Get an iterator for reading from a shard"
+    parameters:
+      StreamName: {type: string, required: true}
+      ShardId: {type: string, required: true}
+      ShardIteratorType: {type: string, required: true, description: "TRIM_HORIZON, LATEST, AT_TIMESTAMP"}
+
+  get_records:
+    description: "Read records from a shard using an iterator"
+    parameters:
+      ShardIterator: {type: string, required: true}
+      Limit: {type: integer}
+
+  update_shard_count:
+    description: "Resize the stream (change shard count)"
+    parameters:
+      StreamName: {type: string, required: true}
+      TargetShardCount: {type: integer, required: true}
+      ScalingType: {type: string, required: true}
+
+  describe_stream:
+    description: "Get stream details and shard information"
+    parameters:
+      StreamName: {type: string, required: true}
+
+  add_tags_to_stream:
+    description: "Tag a Kinesis stream"
+    parameters:
+      StreamName: {type: string, required: true}
+      Tags: {type: object, required: true}

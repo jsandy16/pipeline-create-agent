@@ -1,0 +1,85 @@
+service: dynamodb
+boto3_client: dynamodb
+description: "Amazon DynamoDB — NoSQL key-value and document database"
+
+operations:
+  put_item:
+    description: "Insert or replace an item in a table"
+    parameters:
+      TableName: {type: string, required: true}
+      Item: {type: object, required: true, description: "DynamoDB-typed attribute map"}
+
+  get_item:
+    description: "Get a single item by primary key"
+    parameters:
+      TableName: {type: string, required: true}
+      Key: {type: object, required: true}
+
+  update_item:
+    description: "Update specific attributes of an item"
+    parameters:
+      TableName: {type: string, required: true}
+      Key: {type: object, required: true}
+      UpdateExpression: {type: string, required: true}
+      ExpressionAttributeValues: {type: object}
+      ExpressionAttributeNames: {type: object}
+
+  delete_item:
+    description: "Delete a single item by primary key"
+    parameters:
+      TableName: {type: string, required: true}
+      Key: {type: object, required: true}
+
+  query:
+    description: "Query items by partition key with optional sort key condition"
+    parameters:
+      TableName: {type: string, required: true}
+      KeyConditionExpression: {type: string, required: true}
+      ExpressionAttributeValues: {type: object}
+      FilterExpression: {type: string}
+      Limit: {type: integer}
+
+  scan:
+    description: "Scan all items in a table (expensive — use query when possible)"
+    parameters:
+      TableName: {type: string, required: true}
+      FilterExpression: {type: string}
+      Limit: {type: integer}
+
+  batch_write_item:
+    description: "Write up to 25 items across one or more tables"
+    parameters:
+      RequestItems: {type: object, required: true}
+
+  batch_get_item:
+    description: "Get up to 100 items across one or more tables"
+    parameters:
+      RequestItems: {type: object, required: true}
+
+  create_table:
+    description: "Create a new DynamoDB table"
+    parameters:
+      TableName: {type: string, required: true}
+      KeySchema: {type: list, required: true}
+      AttributeDefinitions: {type: list, required: true}
+      BillingMode: {type: string, description: "PAY_PER_REQUEST or PROVISIONED"}
+
+  update_table:
+    description: "Update table settings (capacity, GSI, streams)"
+    parameters:
+      TableName: {type: string, required: true}
+      ProvisionedThroughput: {type: object}
+      GlobalSecondaryIndexUpdates: {type: list}
+      StreamSpecification: {type: object}
+
+  create_backup:
+    description: "Create an on-demand backup of a table"
+    parameters:
+      TableName: {type: string, required: true}
+      BackupName: {type: string, required: true}
+
+  tag_resource:
+    description: "Add tags to a DynamoDB resource"
+    parameters:
+      ResourceArn: {type: string, required: true}
+      Tags: {type: list, required: true}

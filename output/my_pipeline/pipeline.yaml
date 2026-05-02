@@ -1,0 +1,9 @@
+business_unit: engineering
+cost_center: cc001
+integrations: []
+pipeline_name: my_pipeline
+region: us-east-1
+services:
+- config: {}
+  name: lambda_1
+  type: lambda

@@ -1,0 +1,43 @@
+service: aurora
+boto3_client: rds-data
+description: "Amazon Aurora — managed relational database (MySQL/PostgreSQL compatible)"
+
+operations:
+  execute_statement:
+    description: "Execute a SQL statement via the Data API"
+    parameters:
+      resourceArn: {type: string, required: true, description: "Aurora cluster ARN"}
+      secretArn: {type: string, required: true, description: "Secrets Manager ARN for credentials"}
+      database: {type: string, required: true}
+      sql: {type: string, required: true}
+      parameters: {type: list, description: "SQL parameter bindings"}
+
+  batch_execute_statement:
+    description: "Execute a SQL statement in batch mode"
+    parameters:
+      resourceArn: {type: string, required: true}
+      secretArn: {type: string, required: true}
+      database: {type: string, required: true}
+      sql: {type: string, required: true}
+      parameterSets: {type: list, required: true}
+
+  begin_transaction:
+    description: "Start a database transaction"
+    parameters:
+      resourceArn: {type: string, required: true}
+      secretArn: {type: string, required: true}
+      database: {type: string, required: true}
+
+  commit_transaction:
+    description: "Commit a transaction"
+    parameters:
+      resourceArn: {type: string, required: true}
+      secretArn: {type: string, required: true}
+      transactionId: {type: string, required: true}
+
+  rollback_transaction:
+    description: "Roll back a transaction"
+    parameters:
+      resourceArn: {type: string, required: true}
+      secretArn: {type: string, required: true}
+      transactionId: {type: string, required: true}

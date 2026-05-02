@@ -1,0 +1,77 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: source_bucket
+  suffix: null
+  target: message_queue
+- event: sqs_trigger
+  prefix: null
+  source: message_queue
+  suffix: null
+  target: message_processor
+- event: put_object
+  prefix: null
+  source: message_processor
+  suffix: null
+  target: tgt
+- event: crawl
+  prefix: null
+  source: source_bucket
+  suffix: null
+  target: glue_job
+- event: put_object
+  prefix: null
+  source: ec2_instance
+  suffix: null
+  target: source_bucket
+- event: start_job
+  prefix: null
+  source: ec2_instance
+  suffix: null
+  target: glue_job
+- event: crawl
+  prefix: null
+  source: glue_job
+  suffix: null
+  target: athena_workgroup
+pipeline_name: s3_sqs_lambda_processor
+region: us-east-1
+services:
+- config: {}
+  name: source_bucket
+  type: s3
+- config: {}
+  name: message_queue
+  type: sqs
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport os\nimport boto3\n\ndef handler(event, context):\n\
+      \    s3_client = boto3.client('s3')\n    target_bucket = os.environ.get('TGT_BUCKET_NAME')\n\
+      \    \n    for record in event['Records']:\n        body = json.loads(record['body'])\n\
+      \        message = json.loads(body['Message'])\n        bucket = message['Records'][0]['s3']['bucket']['name']\n\
+      \        key = message['Records'][0]['s3']['object']['key']\n        print(f'Processing\
+      \ object: s3://{bucket}/{key}')\n        \n        # Write to target bucket\n\
+      \        processed_data = json.dumps({'source_bucket': bucket, 'source_key':\
+      \ key, 'processed': True})\n        s3_client.put_object(\n            Bucket=target_bucket,\n\
+      \            Key=f'processed/{key}',\n            Body=processed_data\n    \
+      \    )\n    \n    return {'statusCode': 200, 'body': 'Messages processed successfully'}"
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: message_processor
+  type: lambda
+- config: {}
+  name: tgt
+  type: s3
+- config: {}
+  name: glue_job
+  type: glue
+- config:
+    instance_type: t2.micro
+  name: ec2_instance
+  type: ec2
+- config: {}
+  name: athena_workgroup
+  type: athena

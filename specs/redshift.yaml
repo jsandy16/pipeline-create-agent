@@ -1,0 +1,93 @@
+service_type: redshift
+is_principal: true
+terraform_resource: aws_redshift_cluster
+description: "Amazon Redshift cluster — petabyte-scale data warehouse with Redshift Spectrum for S3 queries"
+
+defaults:
+  node_type: "dc2.large"
+  number_of_nodes: 1
+  database_name: "dev"
+  master_username: "admin"
+  skip_final_snapshot: true
+  publicly_accessible: false
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "glue:GetDatabase"
+    - "glue:GetTable"
+    - "glue:GetPartition"
+  as_target_of:
+    kinesis_firehose:
+      - "redshift:CopyFromS3"
+    dms:
+      - "redshift:CopyFromS3"
+    lambda:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+    glue:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+    emr:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+    stepfunctions:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:PutObject"
+      - "s3:AbortMultipartUpload"
+    lambda:
+      - "lambda:InvokeFunction"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+
+vpc_triggers:
+  - lambda
+  - ec2
+  - emr
+
+code_update:
+  method: sql
+  boto3_client: redshift-data
+  description: >
+    Schema/table/procedure changes via redshift-data.execute_statement().
+    Cluster config (node count, type) via redshift.modify_cluster().
+    Data loads via COPY command through execute_statement().
+  config_update:
+    client: redshift
+    operation: modify_cluster
+    id_param: ClusterIdentifier
+    updatable: [NumberOfNodes, NodeType, MasterUserPassword, AutomatedSnapshotRetentionPeriod, ClusterParameterGroupName]
+  code_update_steps:
+    - "rd = boto3.client('redshift-data', region_name=region)"
+    - "resp = rd.execute_statement(ClusterIdentifier=resource_name, Database='dev', DbUser='admin', Sql='SELECT 1')"
+    - "Poll rd.describe_statement(Id=resp['Id'])['Status'] until 'FINISHED' or 'FAILED'"
+    - "results = rd.get_statement_result(Id=resp['Id'])"
+  discovery_ops:
+    - op: describe_clusters
+      filter_by: "ClusterIdentifier=resource_name"
+      returns: ["Clusters[].ClusterIdentifier", "Clusters[].ClusterStatus", "Clusters[].DBName", "Clusters[].Endpoint.Address"]
+runtime_diagnostics:
+  - pattern: "ClusterNotFound|cluster.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Redshift cluster not found or not yet available"
+    fix_type: wait
+    resolution: "redshift.describe_clusters(ClusterIdentifier=resource_name) to check status"
+  - pattern: "InsufficientClusterCapacity"
+    category: QUOTA
+    cause: "Requested node type/count not available in this AZ"
+    fix_type: manual
+    resolution: "Try a different node type or AZ in modify_cluster()"

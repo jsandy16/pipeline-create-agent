@@ -1,0 +1,113 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: case/
+  source: source_bucket
+  suffix: null
+  target: case_processor
+- event: s3:ObjectCreated:*
+  prefix: party/
+  source: source_bucket
+  suffix: null
+  target: party_processor
+- event: s3:ObjectCreated:*
+  prefix: collision/
+  source: source_bucket
+  suffix: null
+  target: collision_processor
+- event: s3:ObjectCreated:*
+  prefix: victim/
+  source: source_bucket
+  suffix: null
+  target: victim_processor
+- event: put_object
+  prefix: null
+  source: case_processor
+  suffix: null
+  target: target_bucket
+- event: put_object
+  prefix: null
+  source: party_processor
+  suffix: null
+  target: target_bucket
+- event: put_object
+  prefix: null
+  source: collision_processor
+  suffix: null
+  target: target_bucket
+- event: put_object
+  prefix: null
+  source: victim_processor
+  suffix: null
+  target: target_bucket
+pipeline_name: s3_prefix_triggered_processing
+region: us-east-1
+services:
+- config:
+    prefixes:
+    - case/
+    - party/
+    - collision/
+    - victim/
+  name: source_bucket
+  type: s3
+- config: {}
+  name: target_bucket
+  type: s3
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\n\ns3 = boto3.client('s3')\n\
+      \ndef handler(event, context):\n    target_bucket = os.environ.get('TARGET_BUCKET')\n\
+      \    \n    for record in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        key = record['s3']['object']['key']\n        \n        copy_source\
+      \ = {'Bucket': source_bucket, 'Key': key}\n        s3.copy_object(CopySource=copy_source,\
+      \ Bucket=target_bucket, Key=key)\n        \n    return {'statusCode': 200, 'body':\
+      \ json.dumps('Processing complete')}\n"
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: case_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\n\ns3 = boto3.client('s3')\n\
+      \ndef handler(event, context):\n    target_bucket = os.environ.get('TARGET_BUCKET')\n\
+      \    \n    for record in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        key = record['s3']['object']['key']\n        \n        copy_source\
+      \ = {'Bucket': source_bucket, 'Key': key}\n        s3.copy_object(CopySource=copy_source,\
+      \ Bucket=target_bucket, Key=key)\n        \n    return {'statusCode': 200, 'body':\
+      \ json.dumps('Processing complete')}\n"
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: party_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\n\ns3 = boto3.client('s3')\n\
+      \ndef handler(event, context):\n    target_bucket = os.environ.get('TARGET_BUCKET')\n\
+      \    \n    for record in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        key = record['s3']['object']['key']\n        \n        copy_source\
+      \ = {'Bucket': source_bucket, 'Key': key}\n        s3.copy_object(CopySource=copy_source,\
+      \ Bucket=target_bucket, Key=key)\n        \n    return {'statusCode': 200, 'body':\
+      \ json.dumps('Processing complete')}\n"
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: collision_processor
+  type: lambda
+- config:
+    handler: index.handler
+    handler_code: "import json\nimport boto3\nimport os\n\ns3 = boto3.client('s3')\n\
+      \ndef handler(event, context):\n    target_bucket = os.environ.get('TARGET_BUCKET')\n\
+      \    \n    for record in event['Records']:\n        source_bucket = record['s3']['bucket']['name']\n\
+      \        key = record['s3']['object']['key']\n        \n        copy_source\
+      \ = {'Bucket': source_bucket, 'Key': key}\n        s3.copy_object(CopySource=copy_source,\
+      \ Bucket=target_bucket, Key=key)\n        \n    return {'statusCode': 200, 'body':\
+      \ json.dumps('Processing complete')}\n"
+    memory_size: 128
+    runtime: python3.12
+    timeout: 30
+  name: victim_processor
+  type: lambda

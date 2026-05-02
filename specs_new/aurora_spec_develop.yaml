@@ -1,0 +1,853 @@
+# ============================================================================
+# Aurora Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Aurora knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/aurora.yaml with exhaustive
+# coverage of Aurora capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1.  identity              - service metadata & Terraform mapping
+#   2.  naming                - cluster/instance naming rules & constraints
+#   3.  defaults              - Terraform attribute defaults (minimum-cost)
+#   4.  quotas                - AWS service limits
+#   5.  engine_versions       - MySQL and PostgreSQL compatibility
+#   6.  cluster_architecture  - writer/reader instances, storage
+#   7.  endpoints             - cluster, reader, custom, instance endpoints
+#   8.  serverless_v2         - ACU scaling, pricing, features
+#   9.  global_databases      - multi-region replication
+#  10.  backups               - automated, manual snapshots, PITR, backtrack
+#  11.  encryption            - at rest, in transit, IAM auth
+#  12.  performance           - Performance Insights, Enhanced Monitoring
+#  13.  data_api              - HTTP endpoint for serverless queries
+#  14.  parameter_groups      - cluster and instance parameter groups
+#  15.  iam                   - complete action catalog & integration graph rules
+#  16.  env_vars              - auto-wired environment variables
+#  17.  vpc_triggers          - VPC placement rules
+#  18.  integrations          - wiring ownership with all connected services
+#  19.  terraform_resources   - all TF resource types
+#  20.  boto3_operations      - complete API operation reference
+#  21.  runtime_diagnostics   - error patterns & auto-fix rules
+#  22.  tags                  - tagging constraints
+#  23.  code_update           - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: aurora
+  aws_service_name: "Amazon Aurora"
+  is_principal: false          # Aurora has no execution role (callers need permissions)
+  terraform_resource: aws_rds_cluster
+  description: >
+    Fully managed relational database engine compatible with MySQL and PostgreSQL.
+    Up to 5x throughput of MySQL and 3x of PostgreSQL. Auto-scaling storage up to
+    128 TiB. Data replicated 6 ways across 3 AZs.
+  free_tier:
+    status: never_free
+    details: "Aurora is never free tier. Minimum cost is ~$0.12/ACU-hour for Serverless v2 (0.5 ACU minimum)."
+    warning: true
+  pricing_model: pay_per_use   # ACU-hours (Serverless v2) or instance-hours (provisioned) + storage + I/O
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  cluster_identifier:
+    limit: 63
+    valid_characters: "a-z0-9-"  # lowercase letters, digits, hyphens
+    rules:
+      - "Must begin with a letter"
+      - "Cannot end with a hyphen"
+      - "Cannot contain consecutive hyphens"
+      - "Must be unique within an AWS account per region"
+  instance_identifier:
+    limit: 63
+    valid_characters: "a-z0-9-"
+    rules:
+      - "Same rules as cluster identifier"
+      - "Must be unique within an AWS account per region"
+
+# -- 3. Defaults (minimum-cost) ----------------------------------------------
+defaults:
+  engine: "aurora-postgresql"
+  engine_version: "15.4"
+  database_name: "appdb"
+  master_username: "admin"
+  skip_final_snapshot: true
+  deletion_protection: false
+  min_capacity: 0.5            # minimum Aurora Serverless v2 ACU; ~$0.12/ACU-hr
+  max_capacity: 1.0            # hard cap at 1 ACU to minimise cost in MVP
+  engine_mode: "provisioned"   # Serverless v2 uses provisioned mode + db.serverless instance class
+  instance_class: "db.serverless"  # Serverless v2 instance class
+  storage_encrypted: true      # encrypted by default
+  backup_retention_period: 1   # minimum: 1 day
+  preferred_backup_window: "03:00-04:00"
+  enabled_cloudwatch_logs_exports: ["postgresql"]  # or ["error", "slowquery"] for MySQL
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  cluster:
+    max_clusters_per_region: 40   # adjustable
+    max_db_instances_per_cluster: 15  # 1 writer + up to 15 readers (total 16 minus writer)
+    max_readers: 15
+    max_custom_endpoints: 5
+  storage:
+    max_cluster_volume: "128 TiB"
+    min_storage: "10 GB"        # auto-allocated
+    storage_increment: "10 GB"  # auto-grows in 10 GB increments
+    replication: "6 copies across 3 AZs"
+    self_healing: "Automatic data block repair from other copies"
+  connections:
+    max_connections_formula: "Depends on instance class memory"
+    t3_medium: 45
+    r5_large: 1000
+    r5_xlarge: 2000
+    serverless_v2: "Scales with ACU"
+  parameter_groups:
+    max_cluster_parameter_groups: 50
+    max_db_parameter_groups: 50
+  snapshots:
+    max_manual_snapshots: 100   # per region
+    automated_backup_retention: "1-35 days"
+  tags:
+    max_per_resource: 50
+
+# -- 5. Engine Versions ------------------------------------------------------
+engine_versions:
+  aurora_postgresql:
+    engine_value: "aurora-postgresql"
+    compatible_with: "PostgreSQL"
+    supported_versions:
+      - "16.6"
+      - "16.4"
+      - "16.3"
+      - "16.2"
+      - "16.1"
+      - "15.10"
+      - "15.8"
+      - "15.7"
+      - "15.6"
+      - "15.5"
+      - "15.4"
+      - "14.15"
+      - "14.13"
+      - "14.12"
+      - "14.11"
+      - "14.10"
+      - "14.9"
+      - "13.18"
+      - "13.16"
+      - "13.15"
+      - "13.14"
+      - "13.13"
+    default_port: 5432
+    log_exports: ["postgresql"]
+    data_api_support: true
+  aurora_mysql:
+    engine_value: "aurora-mysql"
+    compatible_with: "MySQL"
+    supported_versions:
+      - "3.08.0"   # MySQL 8.0 compatible
+      - "3.07.1"
+      - "3.07.0"
+      - "3.06.1"
+      - "3.06.0"
+      - "3.05.2"
+      - "3.04.3"
+    default_port: 3306
+    log_exports: ["audit", "error", "general", "slowquery"]
+    data_api_support: true
+
+# -- 6. Cluster Architecture -------------------------------------------------
+cluster_architecture:
+  overview: >
+    An Aurora DB cluster consists of one or more DB instances and a cluster
+    volume that manages data. The cluster volume spans multiple AZs with
+    6 copies of data across 3 AZs.
+  writer_instance:
+    description: "Primary DB instance — supports read and write operations"
+    count: 1
+    failover: "Automatically promoted from reader if writer fails"
+  reader_instances:
+    description: "Aurora Replicas — read-only, up to 15 per cluster"
+    max_count: 15
+    failover_priority: "Configurable (tier 0 = highest priority)"
+    load_balancing: "Reader endpoint distributes connections across replicas"
+  storage:
+    type: "Distributed, fault-tolerant, self-healing"
+    replication: "6 copies across 3 AZs"
+    max_size: "128 TiB"
+    auto_growth: "Grows automatically in 10 GB increments"
+    self_repair: "Automatically repairs data blocks from other copies"
+    io_counting: "Identical for writer and reader instances"
+  instance_classes:
+    serverless: "db.serverless (Serverless v2 — auto-scaling ACU)"
+    memory_optimized:
+      - "db.r7g.large"
+      - "db.r7g.xlarge"
+      - "db.r7g.2xlarge"
+      - "db.r7g.4xlarge"
+      - "db.r7g.8xlarge"
+      - "db.r7g.12xlarge"
+      - "db.r7g.16xlarge"
+      - "db.r6g.large"
+      - "db.r6g.xlarge"
+      - "db.r6g.2xlarge"
+      - "db.r6g.4xlarge"
+      - "db.r6g.8xlarge"
+      - "db.r6g.12xlarge"
+      - "db.r6g.16xlarge"
+      - "db.r5.large"
+      - "db.r5.xlarge"
+      - "db.r5.2xlarge"
+      - "db.r5.4xlarge"
+      - "db.r5.8xlarge"
+      - "db.r5.12xlarge"
+      - "db.r5.16xlarge"
+      - "db.r5.24xlarge"
+    burstable:
+      - "db.t4g.medium"
+      - "db.t4g.large"
+      - "db.t3.medium"
+      - "db.t3.large"
+
+# -- 7. Endpoints ------------------------------------------------------------
+endpoints:
+  cluster_endpoint:
+    description: "Writer endpoint — connects to primary instance for read/write"
+    dns_format: "CLUSTER-ID.cluster-RANDOM.REGION.rds.amazonaws.com"
+    failover: "Automatically points to new primary after failover"
+    use_for: ["DDL", "DML", "ETL", "INSERT/UPDATE/DELETE"]
+  reader_endpoint:
+    description: "Read-only endpoint — load-balanced across all Aurora Replicas"
+    dns_format: "CLUSTER-ID.cluster-ro-RANDOM.REGION.rds.amazonaws.com"
+    load_balancing: "Connection-level balancing across replicas"
+    failover: "May temporarily route to new primary immediately after failover"
+    use_for: ["SELECT queries", "reporting", "analytics"]
+  custom_endpoint:
+    description: "User-defined endpoint mapping to a subset of instances"
+    max_per_cluster: 5
+    use_for: ["Routing to specific instance sizes", "workload isolation"]
+  instance_endpoint:
+    description: "Direct connection to a specific DB instance"
+    dns_format: "INSTANCE-ID.RANDOM.REGION.rds.amazonaws.com"
+    failover: "No automatic failover — not recommended for HA"
+    use_for: ["Diagnosis", "troubleshooting", "performance tuning"]
+  global_writer_endpoint:
+    description: "Writer endpoint for Aurora Global Database"
+    failover: "Automatically switches to new primary cluster in failover region"
+    use_for: ["Multi-region applications"]
+
+# -- 8. Serverless v2 --------------------------------------------------------
+serverless_v2:
+  description: >
+    Aurora Serverless v2 scales compute in 0.5 ACU increments with no pause
+    in processing. Pay per second for actual capacity consumed.
+  terraform:
+    engine_mode: "provisioned"  # NOT "serverless" (that's v1, deprecated)
+    instance_class: "db.serverless"
+    scaling_block: "serverlessv2_scaling_configuration"
+  acu:
+    description: "Aurora Capacity Unit — approximately 2 GB memory each"
+    min_range: 0.5
+    max_range: 256
+    increment: 0.5
+    scaling_speed: "Seconds to scale, no disruption to transactions"
+    note: "Scales while SQL statements are running and transactions are open"
+  pricing:
+    model: "Pay per ACU-second"
+    min_cost: "~$0.12/ACU-hour (varies by region)"
+  supported_features:
+    - "Reader DB instances (horizontal scaling)"
+    - "Multi-AZ clusters"
+    - "Aurora Global Databases"
+    - "RDS Proxy (connection pooling)"
+    - "IAM database authentication"
+    - "Performance Insights"
+    - "Cloning and snapshot restore"
+    - "Aurora failover mechanism"
+  use_cases:
+    - "Variable/spiky workloads"
+    - "Multi-tenant applications"
+    - "New applications with uncertain sizing"
+    - "Development and testing"
+    - "Mixed OLTP + periodic analytics"
+
+# -- 9. Global Databases -----------------------------------------------------
+global_databases:
+  description: "Multi-region Aurora deployment for disaster recovery and low-latency reads"
+  terraform_resource: "aws_rds_global_cluster"
+  characteristics:
+    - "Primary cluster in one region (read/write)"
+    - "Up to 5 secondary regions (read-only, promote in disaster)"
+    - "Storage-based replication (sub-second lag)"
+    - "Managed failover (planned switchover or unplanned failover)"
+    - "Write forwarding from secondary to primary region"
+  failover:
+    planned: "SwitchoverGlobalCluster — zero data loss"
+    unplanned: "FailoverGlobalCluster — RPO ~1 second"
+
+# -- 10. Backups --------------------------------------------------------------
+backups:
+  automated:
+    description: "Continuous backups to S3, retained 1-35 days"
+    terraform_attribute: "backup_retention_period"
+    default_retention: 1
+    max_retention: 35
+    note: "Incremental — only changed data is backed up"
+  manual_snapshots:
+    description: "User-initiated full cluster snapshots"
+    terraform: "via AWS console/CLI, not typically in HCL"
+    max_per_region: 100
+    retention: "Unlimited (until deleted)"
+  pitr:
+    description: "Restore cluster to any point within backup retention window"
+    granularity: "5-minute granularity (automated backups)"
+    terraform: "aws_rds_cluster (restore_to_point_in_time block)"
+  backtrack:
+    description: "Rewind cluster to a previous point without restore (MySQL only)"
+    terraform_attribute: "backtrack_window"
+    max_window: "72 hours"
+    engine: "aurora-mysql only"
+    note: "Faster than PITR — no new cluster needed"
+  cross_region:
+    description: "Copy snapshots to another region for disaster recovery"
+    terraform: "aws_rds_cluster_snapshot + copy"
+
+# -- 11. Encryption -----------------------------------------------------------
+encryption:
+  at_rest:
+    description: "AES-256 encryption of cluster volume, snapshots, and replicas"
+    terraform_attribute: "storage_encrypted"
+    default: true
+    key_options:
+      aws_managed: "AWS-managed KMS key (aws/rds)"
+      customer_managed: "Customer-managed CMK via kms_key_id attribute"
+    constraints:
+      - "Must be enabled at cluster creation (cannot enable later)"
+      - "All instances in cluster inherit encryption setting"
+      - "Snapshots of encrypted cluster are also encrypted"
+      - "Cross-region snapshot copy re-encrypts with target region key"
+  in_transit:
+    description: "SSL/TLS encryption for client connections"
+    default: "Enabled by default for Aurora PostgreSQL and MySQL"
+    enforcement: "Use rds.force_ssl parameter (PostgreSQL) or require_secure_transport (MySQL)"
+  iam_authentication:
+    description: "Authenticate database connections using IAM credentials instead of passwords"
+    terraform_attribute: "iam_database_authentication_enabled"
+    supported_engines: ["aurora-postgresql", "aurora-mysql"]
+    iam_action: "rds-db:connect"
+    arn_format: "arn:aws:rds-db:REGION:ACCOUNT:dbuser:DBI-RESOURCE-ID/DB-USER-NAME"
+    benefits:
+      - "No password management"
+      - "IAM policy-based access control"
+      - "Authentication tokens expire in 15 minutes"
+
+# -- 12. Performance ----------------------------------------------------------
+performance:
+  performance_insights:
+    description: "Monitor DB load and identify performance bottlenecks"
+    terraform_attribute: "performance_insights_enabled"
+    retention: "7 days free, up to 2 years paid"
+    metrics: ["db.load", "db.load.avg", "wait events", "SQL statistics"]
+  enhanced_monitoring:
+    description: "OS-level metrics at 1-60 second intervals"
+    terraform_attribute: "monitoring_interval"
+    values: [0, 1, 5, 10, 15, 30, 60]  # 0 = disabled
+    requires: "IAM role for RDS Enhanced Monitoring"
+  cloudwatch_metrics:
+    namespace: "AWS/RDS"
+    key_metrics:
+      - "CPUUtilization"
+      - "DatabaseConnections"
+      - "FreeableMemory"
+      - "ReadIOPS"
+      - "WriteIOPS"
+      - "ReadLatency"
+      - "WriteLatency"
+      - "NetworkReceiveThroughput"
+      - "NetworkTransmitThroughput"
+      - "ServerlessDatabaseCapacity"  # Serverless v2 only — current ACU
+      - "ACUUtilization"             # Serverless v2 only
+
+# -- 13. Data API -------------------------------------------------------------
+data_api:
+  description: >
+    HTTP endpoint for executing SQL without persistent DB connections.
+    Uses Secrets Manager for credentials. Ideal for Lambda and serverless.
+  terraform_attribute: "enable_http_endpoint"  # on aws_rds_cluster
+  boto3_client: "rds-data"
+  supported_engines: ["aurora-postgresql", "aurora-mysql"]
+  operations:
+    - "execute_statement"
+    - "batch_execute_statement"
+    - "begin_transaction"
+    - "commit_transaction"
+    - "rollback_transaction"
+  constraints:
+    - "Max request size: 64 KB"
+    - "Max response size: 1 MB"
+    - "Transaction timeout: 3 minutes"
+    - "Requires Secrets Manager secret for auth"
+  use_cases:
+    - "Lambda functions (avoid connection pooling complexity)"
+    - "Step Functions direct SDK integration"
+    - "Serverless applications"
+
+# -- 14. Parameter Groups ----------------------------------------------------
+parameter_groups:
+  cluster:
+    description: "Engine-level parameters applied to entire cluster"
+    terraform_resource: "aws_rds_cluster_parameter_group"
+    examples:
+      - "shared_preload_libraries (PostgreSQL extensions)"
+      - "timezone"
+      - "character_set_server (MySQL)"
+  instance:
+    description: "Instance-level parameters (can override cluster)"
+    terraform_resource: "aws_db_parameter_group"
+    examples:
+      - "max_connections"
+      - "work_mem (PostgreSQL)"
+      - "innodb_buffer_pool_size (MySQL)"
+
+# -- 15. IAM -----------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    cluster: "arn:aws:rds:REGION:ACCOUNT:cluster:CLUSTER-ID"
+    instance: "arn:aws:rds:REGION:ACCOUNT:db:INSTANCE-ID"
+    cluster_snapshot: "arn:aws:rds:REGION:ACCOUNT:cluster-snapshot:SNAPSHOT-NAME"
+    cluster_endpoint: "arn:aws:rds:REGION:ACCOUNT:cluster-endpoint:ENDPOINT-ID"
+    cluster_pg: "arn:aws:rds:REGION:ACCOUNT:cluster-pg:PG-NAME"
+    db_pg: "arn:aws:rds:REGION:ACCOUNT:pg:PG-NAME"
+    subnet_group: "arn:aws:rds:REGION:ACCOUNT:subgrp:SUBGRP-NAME"
+    global_cluster: "arn:aws:rds::ACCOUNT:global-cluster:GLOBAL-CLUSTER-ID"
+    iam_db_user: "arn:aws:rds-db:REGION:ACCOUNT:dbuser:DBI-RESOURCE-ID/DB-USER"
+
+  # Aurora is not a principal (no execution role)
+  always: []
+
+  # Complete action catalog
+  actions:
+    cluster_management:
+      - "rds:CreateDBCluster"
+      - "rds:DeleteDBCluster"
+      - "rds:ModifyDBCluster"
+      - "rds:StartDBCluster"
+      - "rds:StopDBCluster"
+      - "rds:RebootDBCluster"
+      - "rds:FailoverDBCluster"
+      - "rds:DescribeDBClusters"
+      - "rds:BacktrackDBCluster"
+      - "rds:ModifyCurrentDBClusterCapacity"
+    instance_management:
+      - "rds:CreateDBInstance"
+      - "rds:DeleteDBInstance"
+      - "rds:ModifyDBInstance"
+      - "rds:RebootDBInstance"
+      - "rds:DescribeDBInstances"
+      - "rds:StartDBInstance"
+      - "rds:StopDBInstance"
+    endpoint_management:
+      - "rds:CreateDBClusterEndpoint"
+      - "rds:DeleteDBClusterEndpoint"
+      - "rds:ModifyDBClusterEndpoint"
+      - "rds:DescribeDBClusterEndpoints"
+    snapshot_management:
+      - "rds:CreateDBClusterSnapshot"
+      - "rds:DeleteDBClusterSnapshot"
+      - "rds:CopyDBClusterSnapshot"
+      - "rds:RestoreDBClusterFromSnapshot"
+      - "rds:RestoreDBClusterToPointInTime"
+      - "rds:DescribeDBClusterSnapshots"
+      - "rds:ModifyDBClusterSnapshotAttribute"
+    parameter_groups:
+      - "rds:CreateDBClusterParameterGroup"
+      - "rds:DeleteDBClusterParameterGroup"
+      - "rds:ModifyDBClusterParameterGroup"
+      - "rds:DescribeDBClusterParameterGroups"
+      - "rds:DescribeDBClusterParameters"
+      - "rds:CreateDBParameterGroup"
+      - "rds:DeleteDBParameterGroup"
+      - "rds:ModifyDBParameterGroup"
+      - "rds:DescribeDBParameterGroups"
+    subnet_groups:
+      - "rds:CreateDBSubnetGroup"
+      - "rds:DeleteDBSubnetGroup"
+      - "rds:ModifyDBSubnetGroup"
+      - "rds:DescribeDBSubnetGroups"
+    global_database:
+      - "rds:CreateGlobalCluster"
+      - "rds:DeleteGlobalCluster"
+      - "rds:ModifyGlobalCluster"
+      - "rds:FailoverGlobalCluster"
+      - "rds:SwitchoverGlobalCluster"
+      - "rds:RemoveFromGlobalCluster"
+      - "rds:DescribeGlobalClusters"
+    iam_roles:
+      - "rds:AddRoleToDBCluster"
+      - "rds:RemoveRoleFromDBCluster"
+    data_api:
+      - "rds:EnableHttpEndpoint"
+      - "rds:DisableHttpEndpoint"
+    data_api_operations:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "rds-data:BeginTransaction"
+      - "rds-data:CommitTransaction"
+      - "rds-data:RollbackTransaction"
+    iam_auth:
+      - "rds-db:connect"
+    tagging:
+      - "rds:AddTagsToResource"
+      - "rds:RemoveTagsFromResource"
+      - "rds:ListTagsForResource"
+    monitoring:
+      - "rds:DescribeEvents"
+      - "rds:DescribeEventCategories"
+      - "rds:DescribeDBLogFiles"
+      - "rds:DownloadDBLogFilePortion"
+    zero_etl:
+      - "rds:CreateIntegration"
+      - "rds:DeleteIntegration"
+      - "rds:ModifyIntegration"
+      - "rds:DescribeIntegrations"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    dms:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+    lambda:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+    glue:
+      - "rds:DescribeDBClusters"
+    emr:
+      - "rds:DescribeDBClusters"
+    stepfunctions:
+      - "rds-data:ExecuteStatement"
+    ec2:
+      - "rds-data:ExecuteStatement"
+    sagemaker_notebook:
+      - "rds:DescribeDBClusters"
+  as_source_to:
+    lambda:
+      - "lambda:InvokeFunction"
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+
+  # Condition keys
+  condition_keys:
+    - "rds:DatabaseEngine"
+    - "rds:DatabaseClass"
+    - "rds:DatabaseName"
+    - "rds:StorageEncrypted"
+    - "rds:StorageSize"
+    - "rds:MultiAz"
+    - "rds:Vpc"
+    - "rds:Piops"
+    - "rds:ManageMasterUserPassword"
+    - "rds:PubliclyAccessible"
+    - "rds:EndpointType"
+    - "rds:cluster-tag/${TagKey}"
+
+# -- 16. Environment Variables -----------------------------------------------
+env_vars:
+  as_target_of: {}  # Aurora is a database — no env vars auto-wired
+  as_source_to: {}
+
+# -- 17. VPC Triggers -------------------------------------------------------
+vpc_triggers:
+  - lambda
+  - ec2
+  - emr
+  - dms
+
+# -- 18. Integration Wiring Ownership ---------------------------------------
+integrations:
+  lambda_queries_aurora:
+    description: "Lambda queries Aurora via Data API (rds-data)"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "rds-data:BeginTransaction"
+      - "rds-data:CommitTransaction"
+      - "rds-data:RollbackTransaction"
+      - "secretsmanager:GetSecretValue"
+    note: "Data API recommended for Lambda (no VPC/connection pooling needed)"
+
+  stepfunctions_queries_aurora:
+    description: "Step Functions executes SQL via Data API SDK integration"
+    owned_by: "stepfunctions"
+    iam_permissions_on_caller:
+      - "rds-data:ExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+
+  glue_reads_aurora:
+    description: "Glue ETL job reads from Aurora via JDBC connection"
+    owned_by: "glue"
+    iam_permissions_on_caller:
+      - "rds:DescribeDBClusters"
+    note: "Glue uses JDBC — needs VPC connectivity and security group access"
+
+  emr_reads_aurora:
+    description: "EMR reads from Aurora via JDBC"
+    owned_by: "emr"
+    iam_permissions_on_caller:
+      - "rds:DescribeDBClusters"
+
+  dms_replicates_aurora:
+    description: "DMS uses Aurora as source or target for database migration"
+    owned_by: "dms"
+    iam_permissions_on_caller:
+      - "rds:DescribeDBClusters"
+      - "rds:DescribeDBInstances"
+    note: "Requires VPC security group to allow DMS replication instance access"
+
+  aurora_exports_to_s3:
+    description: "Aurora exports query results or snapshots to S3"
+    owned_by: "aurora"
+    iam_permissions_on_role:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+
+  aurora_invokes_lambda:
+    description: "Aurora invokes Lambda function (e.g., from stored procedure or trigger)"
+    owned_by: "aurora"
+    iam_permissions_on_role:
+      - "lambda:InvokeFunction"
+
+  sagemaker_notebook_reads_aurora:
+    description: "SageMaker Notebook connects to Aurora for data exploration"
+    owned_by: "sagemaker_notebook"
+    iam_permissions_on_caller:
+      - "rds:DescribeDBClusters"
+    note: "Requires VPC connectivity"
+
+  ec2_queries_aurora:
+    description: "EC2 instance queries Aurora via standard database driver"
+    owned_by: "ec2"
+    iam_permissions_on_caller:
+      - "rds-data:ExecuteStatement"
+    note: "Or use IAM auth (rds-db:connect) instead of Data API"
+
+  aurora_zero_etl_redshift:
+    description: "Aurora zero-ETL integration with Redshift for analytics"
+    owned_by: "aurora"
+    terraform_resource: "aws_rds_integration"
+    note: "Continuous replication from Aurora to Redshift without ETL pipelines"
+
+# -- 19. Terraform Resources -------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_rds_cluster"
+      description: "Aurora DB cluster"
+      always_created: true
+    - resource: "aws_rds_cluster_instance"
+      description: "Aurora DB instance (writer or reader)"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group for Aurora logs"
+      always_created: true
+    - resource: "aws_security_group"
+      description: "Security group for Aurora cluster"
+      always_created: true
+    - resource: "aws_db_subnet_group"
+      description: "Subnet group for Aurora cluster"
+      always_created: true
+    - resource: "random_password"
+      description: "Random master password"
+      always_created: true
+  conditional:
+    - resource: "aws_rds_cluster_instance"
+      condition: "Additional reader instances"
+    - resource: "aws_rds_cluster_endpoint"
+      condition: "Custom endpoints"
+    - resource: "aws_rds_cluster_parameter_group"
+      condition: "Custom cluster parameters"
+    - resource: "aws_db_parameter_group"
+      condition: "Custom instance parameters"
+    - resource: "aws_rds_global_cluster"
+      condition: "Global database"
+    - resource: "aws_rds_integration"
+      condition: "Zero-ETL integration with Redshift"
+    - resource: "aws_secretsmanager_secret"
+      condition: "When using Secrets Manager for credentials"
+    - resource: "aws_secretsmanager_secret_version"
+      condition: "Secret value for credentials"
+  created_by_others:
+    - resource: "data.aws_subnets"
+      created_by: "renderer (data source for default VPC subnets)"
+
+# -- 20. Boto3 Operations ----------------------------------------------------
+boto3_operations:
+  data_api_client: "rds-data"
+  management_client: "rds"
+  data_api_operations:
+    execute_statement:
+      description: "Execute a SQL statement via the Data API"
+      parameters:
+        resourceArn: {type: string, required: true, description: "Aurora cluster ARN"}
+        secretArn: {type: string, required: true, description: "Secrets Manager ARN for credentials"}
+        database: {type: string, required: true}
+        sql: {type: string, required: true}
+        parameters: {type: list, description: "SQL parameter bindings"}
+        includeResultMetadata: {type: boolean}
+        transactionId: {type: string}
+      returns: ["records", "columnMetadata", "numberOfRecordsUpdated", "generatedFields"]
+    batch_execute_statement:
+      description: "Execute a SQL statement in batch mode"
+      parameters:
+        resourceArn: {type: string, required: true}
+        secretArn: {type: string, required: true}
+        database: {type: string, required: true}
+        sql: {type: string, required: true}
+        parameterSets: {type: list, required: true}
+      returns: ["updateResults"]
+    begin_transaction:
+      description: "Start a database transaction"
+      parameters:
+        resourceArn: {type: string, required: true}
+        secretArn: {type: string, required: true}
+        database: {type: string, required: true}
+      returns: ["transactionId"]
+    commit_transaction:
+      description: "Commit a transaction"
+      parameters:
+        resourceArn: {type: string, required: true}
+        secretArn: {type: string, required: true}
+        transactionId: {type: string, required: true}
+      returns: ["transactionStatus"]
+    rollback_transaction:
+      description: "Roll back a transaction"
+      parameters:
+        resourceArn: {type: string, required: true}
+        secretArn: {type: string, required: true}
+        transactionId: {type: string, required: true}
+      returns: ["transactionStatus"]
+  management_operations:
+    describe_db_clusters:
+      description: "Get cluster details"
+      parameters:
+        DBClusterIdentifier: {type: string}
+        Filters: {type: list}
+      returns: ["DBClusters[].DBClusterArn", "DBClusters[].Status", "DBClusters[].Endpoint", "DBClusters[].ReaderEndpoint", "DBClusters[].DatabaseName", "DBClusters[].MasterUsername", "DBClusters[].EngineMode", "DBClusters[].ServerlessV2ScalingConfiguration", "DBClusters[].MasterUserSecret"]
+    modify_db_cluster:
+      description: "Modify cluster settings (capacity, parameters, backup)"
+      parameters:
+        DBClusterIdentifier: {type: string, required: true}
+        ServerlessV2ScalingConfiguration: {type: object}
+        BackupRetentionPeriod: {type: integer}
+        DeletionProtection: {type: boolean}
+        EnableHttpEndpoint: {type: boolean}
+        ApplyImmediately: {type: boolean}
+      note: "Some changes apply immediately; others at next maintenance window"
+    create_db_cluster_snapshot:
+      description: "Create manual cluster snapshot"
+      parameters:
+        DBClusterIdentifier: {type: string, required: true}
+        DBClusterSnapshotIdentifier: {type: string, required: true}
+        Tags: {type: list}
+    restore_db_cluster_from_snapshot:
+      description: "Restore cluster from snapshot"
+      parameters:
+        DBClusterIdentifier: {type: string, required: true}
+        SnapshotIdentifier: {type: string, required: true}
+        Engine: {type: string, required: true}
+    add_tags_to_resource:
+      description: "Add tags to Aurora resource"
+      parameters:
+        ResourceName: {type: string, required: true, description: "Resource ARN"}
+        Tags: {type: list, required: true}
+
+# -- 21. Runtime Diagnostics -------------------------------------------------
+runtime_diagnostics:
+  - pattern: "Communications link failure|timeout.*aurora|aurora.*timeout"
+    category: NETWORK
+    cause: "Cannot connect to Aurora -- check VPC security group allows DB port (5432 PostgreSQL / 3306 MySQL)"
+    fix_type: update_sg
+    resolution: "Add inbound rule to Aurora security group: TCP 5432/3306 from caller security group"
+
+  - pattern: "BadRequestException.*Data API|Data API is not enabled"
+    category: CONFIG
+    cause: "Aurora Data API is not enabled on the cluster"
+    fix_type: update_config
+    resolution: "rds.modify_db_cluster(DBClusterIdentifier=resource_name, EnableHttpEndpoint=True)"
+
+  - pattern: "DBClusterNotFoundFault|Cluster.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Aurora cluster does not exist or wrong region"
+    fix_type: manual
+    resolution: "Verify cluster identifier and region. Check terraform apply output."
+
+  - pattern: "AccessDenied.*rds|rds.*AccessDenied"
+    category: PERMISSION
+    cause: "Caller IAM role lacks required RDS permissions"
+    fix_type: update_iam
+    resolution: "Add missing rds:* or rds-data:* actions to the caller's IAM role."
+
+  - pattern: "too many connections"
+    category: QUOTA
+    cause: "Max database connections exceeded"
+    fix_type: update_config
+    resolution: "Use RDS Proxy for connection pooling, or increase max_capacity ACUs for Serverless v2."
+
+  - pattern: "FATAL:.*password authentication failed"
+    category: AUTH
+    cause: "Invalid database credentials"
+    fix_type: manual
+    resolution: "Check Secrets Manager secret value. For Data API, verify secretArn is correct."
+
+  - pattern: "StorageFullException|No space left"
+    category: STORAGE
+    cause: "Cluster volume approaching 128 TiB limit"
+    fix_type: manual
+    resolution: "Delete unused data, enable Aurora auto-vacuum, or archive old data to S3."
+
+  - pattern: "InvalidDBClusterStateFault"
+    category: STATE
+    cause: "Cluster is in a state that does not allow the requested operation"
+    fix_type: wait
+    resolution: "Wait for cluster to reach 'available' status before retrying."
+
+# -- 22. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 23. Code Update (Developer Agent) --------------------------------------
+code_update:
+  method: sql
+  boto3_client: rds-data
+  description: >
+    Schema/procedure changes via rds-data.execute_statement() using Aurora Data API.
+    Cluster config (capacity, parameter group) via rds.modify_db_cluster().
+    Cluster ARN from describe_db_clusters(). Must enable Data API in cluster config.
+  config_update:
+    client: rds
+    operation: modify_db_cluster
+    id_param: DBClusterIdentifier
+    id_value: "{resource_name}"
+    note: "Some changes require apply_immediately=True; others take effect at next maintenance window"
+  code_update_steps:
+    - "rds = boto3.client('rds', region_name=region)"
+    - "rds_data = boto3.client('rds-data', region_name=region)"
+    - "cluster = rds.describe_db_clusters(DBClusterIdentifier=resource_name)['DBClusters'][0]"
+    - "cluster_arn = cluster['DBClusterArn']"
+    - "secret_arn = cluster.get('MasterUserSecret', {}).get('SecretArn', '')  # if Secrets Manager managed"
+    - "resp = rds_data.execute_statement(resourceArn=cluster_arn, secretArn=secret_arn, database=cluster['DatabaseName'], sql='SELECT 1')"
+  discovery_ops:
+    - op: describe_db_clusters
+      id_param: DBClusterIdentifier
+      returns: ["DBClusterArn", "Status", "Endpoint", "ReaderEndpoint", "DatabaseName", "MasterUsername", "EngineMode", "MasterUserSecret", "ServerlessV2ScalingConfiguration"]
+    - op: describe_db_cluster_endpoints
+      id_param: DBClusterIdentifier
+      returns: ["DBClusterEndpoints[].Endpoint", "DBClusterEndpoints[].EndpointType", "DBClusterEndpoints[].Status"]

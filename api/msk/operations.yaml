@@ -1,0 +1,40 @@
+service: msk
+boto3_client: kafka
+description: "Amazon MSK — managed Apache Kafka"
+
+operations:
+  create_topic:
+    description: "Create a Kafka topic (via kafka-topics.sh or AdminClient)"
+    note: "MSK topics are managed via Kafka AdminClient, not boto3. Use kafka-python or confluent-kafka."
+    parameters:
+      topic_name: {type: string, required: true}
+      num_partitions: {type: integer, required: true}
+      replication_factor: {type: integer, required: true}
+
+  update_cluster_configuration:
+    description: "Update the MSK cluster configuration"
+    parameters:
+      ClusterArn: {type: string, required: true}
+      ConfigurationInfo: {type: object, required: true}
+      CurrentVersion: {type: string, required: true}
+
+  describe_cluster:
+    description: "Get cluster details"
+    parameters:
+      ClusterArn: {type: string, required: true}
+
+  get_bootstrap_brokers:
+    description: "Get broker connection strings"
+    parameters:
+      ClusterArn: {type: string, required: true}
+
+  list_clusters:
+    description: "List MSK clusters"
+    parameters:
+      MaxResults: {type: integer}
+
+  tag_resource:
+    description: "Add tags to an MSK cluster"
+    parameters:
+      ResourceArn: {type: string, required: true}
+      Tags: {type: object, required: true}

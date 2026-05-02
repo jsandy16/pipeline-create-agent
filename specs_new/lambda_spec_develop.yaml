@@ -1,0 +1,1121 @@
+# ============================================================================
+# Lambda Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Lambda knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/lambda.yaml with exhaustive
+# coverage of Lambda capabilities, constraints, IAM, integrations, and
+# Terraform resource patterns.
+#
+# Structure:
+#   1. identity          - service metadata & Terraform mapping
+#   2. naming            - function naming rules & constraints
+#   3. defaults          - Terraform attribute defaults (free-tier safe)
+#   4. quotas            - AWS service limits
+#   5. runtimes          - all supported runtimes with identifiers
+#   6. layers            - layer system, limits, ARN format
+#   7. concurrency       - unreserved, reserved, provisioned models
+#   8. vpc               - VPC configuration for Lambda
+#   9. event_sources     - event source mappings (poll-based triggers)
+#  10. invocation        - sync, async, event models
+#  11. destinations      - async invocation destinations
+#  12. function_urls     - Lambda function URL config
+#  13. encryption        - environment variable encryption, code signing
+#  14. iam               - complete action catalog, integration graph rules
+#  15. env_vars          - auto-wired environment variables
+#  16. vpc_triggers      - VPC placement rules
+#  17. integrations      - wiring ownership with all service types
+#  18. terraform_resources - all TF resource types
+#  19. boto3_operations  - complete API reference
+#  20. runtime_diagnostics - error patterns & auto-fix rules
+#  21. tags              - tagging constraints
+#  22. code_update       - developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -----------------------------------------------------------------
+identity:
+  service_type: lambda
+  aws_service_name: "AWS Lambda"
+  is_principal: true             # Lambda has an IAM execution role
+  terraform_resource: aws_lambda_function
+  description: >
+    Serverless compute service that runs code in response to events and
+    automatically manages the underlying compute resources. Supports event-driven
+    architectures with integrations to 200+ AWS services. Functions execute in
+    isolated containers with configurable memory, timeout, and concurrency.
+  free_tier:
+    status: always_free
+    details: "1 million requests/month, 400,000 GB-seconds compute/month"
+  pricing_model: pay_per_use     # per-request + per-GB-second duration
+
+# -- 2. Naming -------------------------------------------------------------------
+naming:
+  resource_name_limit: 64        # max characters for function name
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9-_"  # letters, digits, hyphens, underscores
+  rules:
+    - "Must begin with a letter"
+    - "Can contain letters (a-z, A-Z), digits (0-9), hyphens (-), underscores (_)"
+    - "Maximum 64 characters"
+    - "Function names are unique within a region and account"
+    - "Qualified ARN includes version/alias suffix (max 170 chars total)"
+
+# -- 3. Defaults (free-tier safe) ------------------------------------------------
+defaults:
+  runtime: "python3.12"
+  handler: "index.handler"
+  memory_size: 128               # MB - minimum, free tier friendly
+  timeout: 30                    # seconds
+  architectures: "arm64"         # 20% cheaper than x86_64
+  ephemeral_storage: 512         # MB /tmp - minimum, free tier
+  # Optional features (not set by default):
+  # reserved_concurrent_executions: null
+  # provisioned_concurrency: null
+  # layers: []
+  # vpc_config: null
+  # dead_letter_config: null
+  # tracing_config: "PassThrough"
+
+# -- 4. Quotas -------------------------------------------------------------------
+quotas:
+  # Compute & storage
+  concurrent_executions_default: 1000       # per region per account, adjustable
+  concurrent_executions_min_unreserved: 100  # always kept unreserved
+  storage_zip_and_layers: "75 GB"           # per region, adjustable
+  elastic_network_interfaces_per_vpc: 500   # adjustable
+
+  # Function configuration
+  memory_min: 128                # MB
+  memory_max: 10240              # MB (10 GB), 1 MB increments
+  memory_vcpu_equivalent: 1769   # MB = 1 vCPU
+  timeout_max: 900               # seconds (15 minutes)
+  environment_variables_total: "4 KB"  # aggregate size
+  resource_based_policy_max: "20 KB"
+  layers_per_function: 5
+  tmp_storage_min: 512           # MB
+  tmp_storage_max: 10240         # MB (10 GB), 1 MB increments
+  file_descriptors: 1024
+  execution_processes_threads: 1024
+
+  # Deployment
+  deployment_package_zip: "50 MB"           # zipped, via API/SDK
+  deployment_package_unzipped: "250 MB"     # including layers
+  container_image_max: "10 GB"              # uncompressed
+  container_image_settings: "16 KB"
+
+  # Invocation payloads
+  sync_payload_max: "6 MB"                  # request and response
+  sync_streamed_response_max: "200 MB"      # response streaming
+  async_payload_max: "1 MB"                 # Event invocation type (256 KB before 2025 update; check current docs)
+  request_headers_max: "1 MB"               # total combined
+
+  # API rate limits
+  sync_invocations_per_function: "10x concurrency"
+  get_function_api: 100          # requests/second, hard limit
+  get_policy_api: 15             # requests/second, hard limit
+  control_plane_apis: 15         # requests/second aggregate, hard limit
+
+  # Scaling
+  scaling_rate: 1000             # new instances per 10 seconds per function
+  rps_limit: "10x concurrency quota"  # 10,000 RPS at default 1,000 concurrency
+
+# -- 5. Runtimes -----------------------------------------------------------------
+runtimes:
+  # All supported runtimes support both x86_64 and arm64
+  python:
+    - {id: "python3.14", os: "Amazon Linux 2023", status: supported}
+    - {id: "python3.13", os: "Amazon Linux 2023", status: supported}
+    - {id: "python3.12", os: "Amazon Linux 2023", status: supported, default: true}
+    - {id: "python3.11", os: "Amazon Linux 2", status: supported}
+    - {id: "python3.10", os: "Amazon Linux 2", status: supported}
+  nodejs:
+    - {id: "nodejs24.x", os: "Amazon Linux 2023", status: supported}
+    - {id: "nodejs22.x", os: "Amazon Linux 2023", status: supported}
+    - {id: "nodejs20.x", os: "Amazon Linux 2023", status: supported}
+  java:
+    - {id: "java25", os: "Amazon Linux 2023", status: supported}
+    - {id: "java21", os: "Amazon Linux 2023", status: supported}
+    - {id: "java17", os: "Amazon Linux 2", status: supported}
+    - {id: "java11", os: "Amazon Linux 2", status: supported}
+    - {id: "java8.al2", os: "Amazon Linux 2", status: supported}
+  dotnet:
+    - {id: "dotnet10", os: "Amazon Linux 2023", status: supported}
+    - {id: "dotnet9", os: "Amazon Linux 2023", status: "supported (container only)"}
+    - {id: "dotnet8", os: "Amazon Linux 2023", status: supported}
+  ruby:
+    - {id: "ruby3.4", os: "Amazon Linux 2023", status: supported}
+    - {id: "ruby3.3", os: "Amazon Linux 2023", status: supported}
+    - {id: "ruby3.2", os: "Amazon Linux 2", status: supported}
+  custom:
+    - {id: "provided.al2023", os: "Amazon Linux 2023", status: supported, note: "Go, Rust, C++ use this"}
+    - {id: "provided.al2", os: "Amazon Linux 2", status: supported}
+  architectures:
+    - "x86_64"
+    - "arm64"    # Graviton2, 20% cheaper, recommended default
+  note: "Amazon Linux 2 EOL: June 30, 2026 - migrate to AL2023 runtimes"
+
+# -- 6. Layers -------------------------------------------------------------------
+layers:
+  description: >
+    ZIP archives of supplementary code (libraries, custom runtimes, config files).
+    Extracted to /opt in the execution environment. Shared across functions.
+  max_per_function: 5
+  max_unzipped_with_layers: "250 MB"   # total function + all layers
+  arn_format: "arn:aws:lambda:REGION:ACCOUNT:layer:LAYER-NAME:VERSION"
+  versioning: "Immutable snapshots; version number increments with each publish"
+  extraction_path: "/opt"
+  not_recommended_for: ["Go", "Rust"]  # include deps in deployment package instead
+  terraform_resources:
+    - "aws_lambda_layer_version"
+    - "aws_lambda_layer_version_permission"
+
+# -- 7. Concurrency --------------------------------------------------------------
+concurrency:
+  unreserved:
+    description: "Functions share account-wide pool on demand. Default."
+    default_account_limit: 1000
+    min_unreserved_pool: 100     # always kept available for unreserved functions
+    cold_starts: true
+    cost: "No additional charge"
+  reserved:
+    description: >
+      Guarantees capacity for this function. No other function can use it.
+      Also caps maximum concurrency (prevents runaway scaling).
+    terraform_attribute: "reserved_concurrent_executions"
+    cold_starts: true
+    cost: "No additional charge"
+    max_per_account: 900         # if account limit is 1000
+  provisioned:
+    description: >
+      Pre-initializes execution environments before requests arrive.
+      Eliminates cold starts within provisioned capacity.
+    terraform_resource: "aws_lambda_provisioned_concurrency_config"
+    cold_starts: false           # within provisioned capacity
+    cost: "Additional charge — billed for provisioned hours regardless of usage"
+    max_allocation_rate: 6000    # instances per minute per function
+  calculation: "Concurrency = (avg requests/sec) * (avg duration in seconds)"
+
+# -- 8. VPC Configuration --------------------------------------------------------
+vpc:
+  description: >
+    Lambda can connect to VPC resources (RDS, ElastiCache, Redshift, etc.)
+    via Elastic Network Interfaces (ENIs) in VPC subnets. Requires
+    ec2:CreateNetworkInterface, ec2:DescribeNetworkInterfaces,
+    ec2:DeleteNetworkInterface permissions on the execution role.
+  terraform_block: "vpc_config"
+  terraform_attributes:
+    subnet_ids: "list of subnet IDs"
+    security_group_ids: "list of security group IDs"
+  iam_permissions_required:
+    - "ec2:CreateNetworkInterface"
+    - "ec2:DescribeNetworkInterfaces"
+    - "ec2:DeleteNetworkInterface"
+  considerations:
+    - "VPC Lambda cannot access internet without NAT Gateway or VPC endpoint"
+    - "Use VPC endpoints for AWS services (S3, DynamoDB, SQS, etc.)"
+    - "ENI creation adds cold start latency (~1-2 seconds)"
+    - "Place Lambda in private subnets, not public subnets"
+    - "Use at least 2 subnets in different AZs for high availability"
+
+# -- 9. Event Sources (Poll-Based Triggers) --------------------------------------
+event_sources:
+  description: >
+    Lambda event source mappings poll these services and invoke the function
+    with batches of records. The Lambda renderer creates aws_lambda_event_source_mapping.
+  supported_services:
+    sqs:
+      terraform_resource_type: "aws_sqs_queue"
+      arn_attribute: "arn"
+      default_batch_size: 10
+      max_batch_size: 10000
+      max_batching_window: 300     # seconds
+      starting_position: null      # not applicable for SQS
+      supports_bisect_on_error: false
+      supports_max_record_age: false
+    kinesis_streams:
+      terraform_resource_type: "aws_kinesis_stream"
+      arn_attribute: "arn"
+      default_batch_size: 100
+      max_batch_size: 10000
+      max_batching_window: 300
+      starting_position: "LATEST"  # or TRIM_HORIZON, AT_TIMESTAMP
+      supports_bisect_on_error: true
+      supports_max_record_age: true
+      supports_parallelization_factor: true  # 1-10
+    dynamodb:
+      terraform_resource_type: "aws_dynamodb_table"
+      arn_attribute: "stream_arn"
+      default_batch_size: 100
+      max_batch_size: 10000
+      max_batching_window: 300
+      starting_position: "LATEST"  # or TRIM_HORIZON
+      supports_bisect_on_error: true
+      supports_max_record_age: true
+      supports_parallelization_factor: true
+    msk:
+      terraform_resource_type: "aws_msk_cluster"
+      arn_attribute: "arn"
+      default_batch_size: 100
+      max_batch_size: 10000
+      max_batching_window: 300
+      starting_position: "LATEST"  # or TRIM_HORIZON
+    self_managed_kafka:
+      note: "Self-managed Apache Kafka clusters"
+    amazon_mq:
+      note: "ActiveMQ and RabbitMQ brokers"
+    documentdb:
+      note: "DocumentDB (MongoDB compatible) change streams"
+
+# -- 10. Invocation Models -------------------------------------------------------
+invocation:
+  synchronous:
+    invocation_type: "RequestResponse"
+    payload_limit: "6 MB"
+    response_streaming: true      # up to 200 MB
+    timeout: "Caller waits for function to complete"
+    use_case: "API Gateway, SDK invoke, CLI"
+  asynchronous:
+    invocation_type: "Event"
+    payload_limit: "1 MB"
+    retry_attempts: 2             # default, configurable 0-2
+    max_event_age: 21600          # seconds (6 hours), configurable
+    dead_letter_queue: true       # SQS or SNS
+    destinations: true            # on success and/or failure
+    use_case: "S3 events, SNS, CloudWatch Events, IoT"
+  dry_run:
+    invocation_type: "DryRun"
+    description: "Validate parameter values and permissions without executing"
+
+# -- 11. Destinations -----------------------------------------------------------
+destinations:
+  description: >
+    Route asynchronous invocation results to another service without code.
+    Configured per function for success and/or failure outcomes.
+  supported_destinations:
+    - "SQS queue"
+    - "SNS topic"
+    - "Lambda function"
+    - "EventBridge event bus"
+  terraform_resource: "aws_lambda_function_event_invoke_config"
+  terraform_attributes:
+    maximum_retry_attempts: "0-2"
+    maximum_event_age_in_seconds: "60-21600"
+    destination_config:
+      on_success: "arn of SQS/SNS/Lambda/EventBridge"
+      on_failure: "arn of SQS/SNS/Lambda/EventBridge"
+
+# -- 12. Function URLs -----------------------------------------------------------
+function_urls:
+  description: "Dedicated HTTPS endpoint for a Lambda function (no API Gateway needed)"
+  terraform_resource: "aws_lambda_function_url"
+  auth_types:
+    AWS_IAM: "Requires IAM auth (SigV4)"
+    NONE: "Public access (use resource-based policy for control)"
+  cors_support: true
+  invoke_mode:
+    BUFFERED: "Standard (payload limit applies)"
+    RESPONSE_STREAM: "Streaming response (up to 200 MB)"
+  url_format: "https://<url-id>.lambda-url.<region>.on.aws"
+
+# -- 13. Encryption & Code Signing -----------------------------------------------
+encryption:
+  environment_variables:
+    at_rest: "Encrypted with AWS managed KMS key by default"
+    custom_kms: "Optional customer-managed KMS key via kms_key_arn attribute"
+    in_transit: "Encrypted in transit using TLS"
+    terraform_attribute: "kms_key_arn"
+  code_signing:
+    description: "Ensures only trusted code runs in Lambda functions"
+    terraform_resources:
+      - "aws_lambda_code_signing_config"
+      - "aws_signer_signing_profile"
+    iam_actions:
+      - "lambda:CreateCodeSigningConfig"
+      - "lambda:GetCodeSigningConfig"
+      - "lambda:PutFunctionCodeSigningConfig"
+
+# -- 14. IAM --------------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    function: "arn:aws:lambda:REGION:ACCOUNT:function:FUNCTION-NAME"
+    function_version: "arn:aws:lambda:REGION:ACCOUNT:function:FUNCTION-NAME:VERSION"
+    function_alias: "arn:aws:lambda:REGION:ACCOUNT:function:FUNCTION-NAME:ALIAS"
+    layer: "arn:aws:lambda:REGION:ACCOUNT:layer:LAYER-NAME"
+    layer_version: "arn:aws:lambda:REGION:ACCOUNT:layer:LAYER-NAME:VERSION"
+    event_source_mapping: "arn:aws:lambda:REGION:ACCOUNT:event-source-mapping:UUID"
+
+  # Execution role trust policy principal
+  service_principal: "lambda.amazonaws.com"
+
+  # Permissions Lambda ALWAYS needs (regardless of integrations)
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+
+  # Complete IAM action catalog
+  actions:
+    function_management:
+      - "lambda:CreateFunction"
+      - "lambda:DeleteFunction"
+      - "lambda:UpdateFunctionCode"
+      - "lambda:UpdateFunctionConfiguration"
+      - "lambda:PublishVersion"
+      - "lambda:CreateAlias"
+      - "lambda:UpdateAlias"
+      - "lambda:DeleteAlias"
+      - "lambda:GetFunction"
+      - "lambda:GetFunctionConfiguration"
+      - "lambda:ListFunctions"
+      - "lambda:ListVersionsByFunction"
+      - "lambda:ListAliases"
+      - "lambda:GetAccountSettings"
+    invocation:
+      - "lambda:InvokeFunction"
+      - "lambda:InvokeAsync"          # deprecated
+      - "lambda:InvokeFunctionUrl"
+    permissions:
+      - "lambda:AddPermission"
+      - "lambda:RemovePermission"
+      - "lambda:GetPolicy"
+      - "lambda:DisableReplication"     # Lambda@Edge
+      - "lambda:EnableReplication"      # Lambda@Edge
+    concurrency:
+      - "lambda:PutFunctionConcurrency"
+      - "lambda:DeleteFunctionConcurrency"
+      - "lambda:GetFunctionConcurrency"
+      - "lambda:PutProvisionedConcurrencyConfig"
+      - "lambda:DeleteProvisionedConcurrencyConfig"
+      - "lambda:GetProvisionedConcurrencyConfig"
+      - "lambda:ListProvisionedConcurrencyConfigs"
+    event_source_mapping:
+      - "lambda:CreateEventSourceMapping"
+      - "lambda:DeleteEventSourceMapping"
+      - "lambda:GetEventSourceMapping"
+      - "lambda:UpdateEventSourceMapping"
+      - "lambda:ListEventSourceMappings"
+    event_invoke_config:
+      - "lambda:PutFunctionEventInvokeConfig"
+      - "lambda:DeleteFunctionEventInvokeConfig"
+      - "lambda:GetFunctionEventInvokeConfig"
+      - "lambda:UpdateFunctionEventInvokeConfig"
+      - "lambda:ListFunctionEventInvokeConfigs"
+    function_url:
+      - "lambda:CreateFunctionUrlConfig"
+      - "lambda:GetFunctionUrlConfig"
+      - "lambda:DeleteFunctionUrlConfig"
+      - "lambda:UpdateFunctionUrlConfig"
+      - "lambda:ListFunctionUrlConfigs"
+    layers:
+      - "lambda:PublishLayerVersion"
+      - "lambda:DeleteLayerVersion"
+      - "lambda:GetLayerVersion"
+      - "lambda:GetLayerVersionPolicy"
+      - "lambda:AddLayerVersionPermission"
+      - "lambda:RemoveLayerVersionPermission"
+      - "lambda:ListLayerVersions"
+      - "lambda:ListLayers"
+    code_signing:
+      - "lambda:CreateCodeSigningConfig"
+      - "lambda:DeleteCodeSigningConfig"
+      - "lambda:GetCodeSigningConfig"
+      - "lambda:UpdateCodeSigningConfig"
+      - "lambda:ListCodeSigningConfigs"
+      - "lambda:PutFunctionCodeSigningConfig"
+      - "lambda:DeleteFunctionCodeSigningConfig"
+      - "lambda:GetFunctionCodeSigningConfig"
+      - "lambda:ListFunctionsByCodeSigningConfig"
+    scaling:
+      - "lambda:PutFunctionScalingConfig"
+      - "lambda:GetFunctionScalingConfig"
+      - "lambda:PutFunctionRecursionConfig"
+      - "lambda:GetFunctionRecursionConfig"
+      - "lambda:PutRuntimeManagementConfig"
+      - "lambda:GetRuntimeManagementConfig"
+    tagging:
+      - "lambda:TagResource"
+      - "lambda:UntagResource"
+      - "lambda:ListTags"
+
+  # Integration graph IAM rules (used by spec_builder)
+  # Permissions Lambda needs when it RECEIVES from a source service
+  as_target_of:
+    s3:
+      - "s3:GetObject"
+      - "s3:ListBucket"
+    sqs:
+      - "sqs:ReceiveMessage"
+      - "sqs:DeleteMessage"
+      - "sqs:GetQueueAttributes"
+    kinesis_streams:
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+    sns:
+      - "sns:Subscribe"
+      - "sns:Receive"
+    dynamodb:
+      - "dynamodb:GetRecords"
+      - "dynamodb:GetShardIterator"
+      - "dynamodb:DescribeStream"
+      - "dynamodb:ListStreams"
+    eventbridge:
+      - "logs:CreateLogGroup"
+    cloudwatch:
+      - "logs:CreateLogGroup"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:DescribeClusterV2"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+
+  # Permissions Lambda needs when it SENDS to a target service
+  as_source_to:
+    s3:
+      - "s3:PutObject"
+      - "s3:GetObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    sqs:
+      - "sqs:SendMessage"
+    sns:
+      - "sns:Publish"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:DeleteItem"
+      - "dynamodb:BatchWriteItem"
+    stepfunctions:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    lambda:
+      - "lambda:InvokeFunction"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    kinesis_firehose:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    redshift:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+      - "redshift:GetClusterCredentials"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    sagemaker:
+      - "sagemaker:InvokeEndpoint"
+    eventbridge:
+      - "events:PutEvents"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+    emr_serverless:
+      - "emr-serverless:StartJobRun"
+      - "emr-serverless:GetJobRun"
+      - "emr-serverless:CancelJobRun"
+      - "emr-serverless:ListJobRuns"
+      - "emr-serverless:GetApplication"
+      - "iam:PassRole"
+    emr:
+      - "elasticmapreduce:AddJobFlowSteps"
+      - "elasticmapreduce:DescribeStep"
+      - "elasticmapreduce:ListSteps"
+      - "elasticmapreduce:DescribeCluster"
+      - "iam:PassRole"
+    glue:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:StartCrawler"
+      - "glue:GetCrawler"
+      - "glue:GetCrawlerMetrics"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+      - "kafka-cluster:Connect"
+      - "kafka-cluster:DescribeGroup"
+      - "kafka-cluster:AlterGroup"
+      - "kafka-cluster:DescribeTopic"
+      - "kafka-cluster:ReadData"
+      - "kafka-cluster:WriteData"
+      - "kafka-cluster:DescribeClusterDynamicConfiguration"
+    glue_databrew:
+      - "databrew:StartJobRun"
+      - "databrew:DescribeJobRun"
+    dms:
+      - "dms:StartReplicationTask"
+      - "dms:StopReplicationTask"
+      - "dms:DescribeReplicationTasks"
+    quicksight:
+      - "quicksight:CreateIngestion"
+      - "quicksight:DescribeIngestion"
+    lake_formation:
+      - "lakeformation:GetDataAccess"
+      - "lakeformation:GrantPermissions"
+
+  # Condition keys for Lambda resource policies
+  condition_keys:
+    - "lambda:FunctionArn"
+    - "lambda:FunctionUrlAuthType"
+    - "lambda:Principal"
+    - "lambda:SourceFunctionArn"       # recursive invocation detection
+    - "lambda:EventSourceToken"
+    - "lambda:CodeSigningConfigArn"
+    - "lambda:Layer"
+    - "lambda:SecurityGroupIds"
+    - "lambda:SubnetIds"
+    - "lambda:VpcIds"
+    - "aws:SourceArn"
+    - "aws:SourceAccount"
+
+# -- 15. Environment Variables ---------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    sqs:
+      pattern: "{PEER_UPPER}_QUEUE_URL"
+      ref: "aws_sqs_queue.{peer_label}.url"
+    sns:
+      pattern: "{PEER_UPPER}_TOPIC_ARN"
+      ref: "aws_sns_topic.{peer_label}.arn"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+    stepfunctions:
+      pattern: "{PEER_UPPER}_STATE_MACHINE_ARN"
+      ref: "aws_sfn_state_machine.{peer_label}.arn"
+    lambda:
+      pattern: "{PEER_UPPER}_FUNCTION_ARN"
+      ref: "aws_lambda_function.{peer_label}.arn"
+    kinesis_streams:
+      pattern: "{PEER_UPPER}_STREAM_NAME"
+      ref: "aws_kinesis_stream.{peer_label}.name"
+    kinesis_firehose:
+      pattern: "{PEER_UPPER}_DELIVERY_STREAM"
+      ref: "aws_kinesis_firehose_delivery_stream.{peer_label}.name"
+    eventbridge:
+      pattern: "{PEER_UPPER}_EVENT_BUS"
+      ref: "aws_cloudwatch_event_bus.{peer_label}.name"
+    emr_serverless:
+      - pattern: "{PEER_UPPER}_APPLICATION_ID"
+        ref: "aws_emrserverless_application.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_EXECUTION_ROLE_ARN"
+        ref: "aws_iam_role.{peer_label}_role.arn"
+    emr:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_emr_cluster.{peer_label}.id"
+    glue:
+      - pattern: "{PEER_UPPER}_CRAWLER_NAME"
+        ref: "aws_glue_crawler.{peer_label}.name"
+    athena:
+      - pattern: "{PEER_UPPER}_WORKGROUP"
+        ref: "aws_athena_workgroup.{peer_label}.name"
+    msk:
+      - pattern: "{PEER_UPPER}_BOOTSTRAP_BROKERS"
+        ref: "aws_msk_cluster.{peer_label}.bootstrap_brokers"
+    redshift:
+      - pattern: "{PEER_UPPER}_CLUSTER_ID"
+        ref: "aws_redshift_cluster.{peer_label}.id"
+      - pattern: "{PEER_UPPER}_DATABASE"
+        ref: "aws_redshift_cluster.{peer_label}.database_name"
+    aurora:
+      - pattern: "{PEER_UPPER}_CLUSTER_ARN"
+        ref: "aws_rds_cluster.{peer_label}.arn"
+      - pattern: "{PEER_UPPER}_DATABASE"
+        ref: "aws_rds_cluster.{peer_label}.database_name"
+    sagemaker:
+      - pattern: "{PEER_UPPER}_ENDPOINT_NAME"
+        ref: "aws_sagemaker_endpoint.{peer_label}.name"
+
+# -- 16. VPC Triggers -----------------------------------------------------------
+vpc_triggers:
+  - redshift
+  - aurora
+  - rds
+  - opensearch
+  - elasticache
+  - msk
+
+# -- 17. Integration Wiring Ownership -------------------------------------------
+integrations:
+  # Lambda as TARGET (receives events)
+  s3_to_lambda:
+    description: "S3 event notification triggers Lambda"
+    owned_by: "s3"
+    terraform_resources:
+      - "aws_s3_bucket_notification (lambda_function block)"
+      - "aws_lambda_permission (principal: s3.amazonaws.com)"
+    note: "S3 renderer creates notification + permission; Lambda does NOT create these"
+
+  sqs_to_lambda:
+    description: "SQS queue triggers Lambda via event source mapping"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping"
+    config:
+      batch_size: 10
+      enabled: true
+
+  kinesis_to_lambda:
+    description: "Kinesis stream triggers Lambda via event source mapping"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping"
+    config:
+      starting_position: "LATEST"
+      batch_size: 100
+
+  dynamodb_to_lambda:
+    description: "DynamoDB Streams triggers Lambda via event source mapping"
+    owned_by: "lambda"
+    terraform_resources:
+      - "aws_lambda_event_source_mapping"
+    config:
+      starting_position: "LATEST"
+      batch_size: 100
+
+  sns_to_lambda:
+    description: "SNS subscription delivers messages to Lambda"
+    owned_by: "sns"
+    terraform_resources:
+      - "aws_sns_topic_subscription (protocol: lambda)"
+    note: "SNS renderer creates the subscription"
+
+  eventbridge_to_lambda:
+    description: "EventBridge rule targets Lambda"
+    owned_by: "cloudwatch/eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_target"
+      - "aws_lambda_permission (principal: events.amazonaws.com)"
+
+  cloudwatch_to_lambda:
+    description: "CloudWatch Events rule targets Lambda"
+    owned_by: "cloudwatch"
+    terraform_resources:
+      - "aws_cloudwatch_event_target"
+      - "aws_lambda_permission (principal: events.amazonaws.com)"
+
+  # Lambda as SOURCE (invokes/sends to other services)
+  lambda_to_lambda:
+    description: "Lambda invokes another Lambda function"
+    owned_by: "lambda (caller)"
+    terraform_resources:
+      - "aws_lambda_permission on target (principal: lambda.amazonaws.com)"
+    iam_on_caller: ["lambda:InvokeFunction"]
+
+  lambda_to_s3:
+    description: "Lambda reads/writes S3 objects"
+    owned_by: "lambda"
+    iam_on_caller: ["s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:DeleteObject"]
+    env_var: "{PEER_UPPER}_BUCKET"
+
+  lambda_to_sqs:
+    description: "Lambda sends messages to SQS"
+    owned_by: "lambda"
+    iam_on_caller: ["sqs:SendMessage"]
+    env_var: "{PEER_UPPER}_QUEUE_URL"
+
+  lambda_to_sns:
+    description: "Lambda publishes to SNS topic"
+    owned_by: "lambda"
+    iam_on_caller: ["sns:Publish"]
+    env_var: "{PEER_UPPER}_TOPIC_ARN"
+
+  lambda_to_dynamodb:
+    description: "Lambda reads/writes DynamoDB table"
+    owned_by: "lambda"
+    iam_on_caller: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]
+    env_var: "{PEER_UPPER}_TABLE"
+
+  lambda_to_stepfunctions:
+    description: "Lambda starts Step Functions execution"
+    owned_by: "lambda"
+    iam_on_caller: ["states:StartExecution", "states:DescribeExecution"]
+    env_var: "{PEER_UPPER}_STATE_MACHINE_ARN"
+
+  lambda_to_kinesis_streams:
+    description: "Lambda puts records to Kinesis stream"
+    owned_by: "lambda"
+    iam_on_caller: ["kinesis:PutRecord", "kinesis:PutRecords"]
+    env_var: "{PEER_UPPER}_STREAM_NAME"
+
+  lambda_to_kinesis_firehose:
+    description: "Lambda puts records to Firehose delivery stream"
+    owned_by: "lambda"
+    iam_on_caller: ["firehose:PutRecord", "firehose:PutRecordBatch"]
+    env_var: "{PEER_UPPER}_DELIVERY_STREAM"
+
+  lambda_to_eventbridge:
+    description: "Lambda puts events to EventBridge"
+    owned_by: "lambda"
+    iam_on_caller: ["events:PutEvents"]
+    env_var: "{PEER_UPPER}_EVENT_BUS"
+
+  lambda_to_redshift:
+    description: "Lambda executes queries on Redshift via Data API"
+    owned_by: "lambda"
+    iam_on_caller: ["redshift-data:ExecuteStatement", "redshift-data:GetStatementResult", "redshift-data:DescribeStatement", "redshift:GetClusterCredentials"]
+    env_vars: ["{PEER_UPPER}_CLUSTER_ID", "{PEER_UPPER}_DATABASE"]
+
+  lambda_to_aurora:
+    description: "Lambda executes queries on Aurora via Data API"
+    owned_by: "lambda"
+    iam_on_caller: ["rds-data:ExecuteStatement", "rds-data:BatchExecuteStatement", "secretsmanager:GetSecretValue"]
+    env_vars: ["{PEER_UPPER}_CLUSTER_ARN", "{PEER_UPPER}_DATABASE"]
+
+  lambda_to_sagemaker:
+    description: "Lambda invokes SageMaker endpoint for inference"
+    owned_by: "lambda"
+    iam_on_caller: ["sagemaker:InvokeEndpoint"]
+    env_var: "{PEER_UPPER}_ENDPOINT_NAME"
+
+  lambda_to_athena:
+    description: "Lambda starts Athena query execution"
+    owned_by: "lambda"
+    iam_on_caller: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+    env_var: "{PEER_UPPER}_WORKGROUP"
+
+  lambda_to_emr_serverless:
+    description: "Lambda starts EMR Serverless job run"
+    owned_by: "lambda"
+    iam_on_caller: ["emr-serverless:StartJobRun", "emr-serverless:GetJobRun", "emr-serverless:CancelJobRun", "emr-serverless:ListJobRuns", "emr-serverless:GetApplication", "iam:PassRole"]
+    env_vars: ["{PEER_UPPER}_APPLICATION_ID", "{PEER_UPPER}_EXECUTION_ROLE_ARN"]
+    note: "iam:PassRole is MANDATORY for passing EMR execution role"
+
+  lambda_to_emr:
+    description: "Lambda submits steps to EMR cluster"
+    owned_by: "lambda"
+    iam_on_caller: ["elasticmapreduce:AddJobFlowSteps", "elasticmapreduce:DescribeStep", "elasticmapreduce:ListSteps", "elasticmapreduce:DescribeCluster", "iam:PassRole"]
+    env_var: "{PEER_UPPER}_CLUSTER_ID"
+
+  lambda_to_glue:
+    description: "Lambda starts Glue job/crawler"
+    owned_by: "lambda"
+    iam_on_caller: ["glue:StartJobRun", "glue:GetJobRun", "glue:StartCrawler", "glue:GetCrawler", "glue:GetCrawlerMetrics"]
+    env_var: "{PEER_UPPER}_CRAWLER_NAME"
+
+  lambda_to_msk:
+    description: "Lambda produces/consumes Kafka messages on MSK"
+    owned_by: "lambda"
+    iam_on_caller: ["kafka:DescribeCluster", "kafka:GetBootstrapBrokers", "kafka-cluster:Connect", "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup", "kafka-cluster:DescribeTopic", "kafka-cluster:ReadData", "kafka-cluster:WriteData", "kafka-cluster:DescribeClusterDynamicConfiguration"]
+    env_var: "{PEER_UPPER}_BOOTSTRAP_BROKERS"
+
+  lambda_to_glue_databrew:
+    description: "Lambda starts Glue DataBrew job"
+    owned_by: "lambda"
+    iam_on_caller: ["databrew:StartJobRun", "databrew:DescribeJobRun"]
+
+  lambda_to_dms:
+    description: "Lambda starts/stops DMS replication task"
+    owned_by: "lambda"
+    iam_on_caller: ["dms:StartReplicationTask", "dms:StopReplicationTask", "dms:DescribeReplicationTasks"]
+
+# -- 18. Terraform Resources ----------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_lambda_function"
+      description: "The Lambda function itself"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "Execution role (trust: lambda.amazonaws.com)"
+      always_created: true
+      suffix: "_role"
+    - resource: "aws_iam_role_policy"
+      description: "Inline policy with computed IAM permissions"
+      always_created: true
+      suffix: "_policy"
+    - resource: "aws_cloudwatch_log_group"
+      description: "Log group /aws/lambda/{function_name}"
+      always_created: true
+      suffix: "_lg"
+    - resource: "data.archive_file"
+      description: "Placeholder ZIP for initial deployment"
+      always_created: true
+      suffix: "_placeholder"
+
+  conditional:
+    - resource: "aws_lambda_event_source_mapping"
+      condition: "When SQS, Kinesis, DynamoDB, or MSK triggers this Lambda"
+      suffix: "_esm_{source_label}"
+    - resource: "aws_lambda_permission"
+      condition: "When this Lambda invokes another Lambda, or when S3/EventBridge/CloudWatch invokes this Lambda"
+    - resource: "aws_security_group"
+      condition: "When vpc_required is true"
+      suffix: "_sg"
+
+  created_by_others:
+    - resource: "aws_s3_bucket_notification"
+      created_by: "s3 renderer"
+      condition: "When S3 triggers this Lambda"
+    - resource: "aws_lambda_permission"
+      created_by: "s3 renderer, cloudwatch renderer, eventbridge renderer"
+      condition: "When S3/CloudWatch/EventBridge invokes this Lambda"
+    - resource: "aws_sns_topic_subscription"
+      created_by: "sns renderer"
+      condition: "When SNS delivers to this Lambda"
+    - resource: "aws_cloudwatch_event_target"
+      created_by: "cloudwatch/eventbridge renderer"
+      condition: "When EventBridge targets this Lambda"
+
+  available_but_not_in_default_renderer:
+    - "aws_lambda_function_url"
+    - "aws_lambda_provisioned_concurrency_config"
+    - "aws_lambda_function_event_invoke_config"
+    - "aws_lambda_layer_version"
+    - "aws_lambda_alias"
+    - "aws_lambda_code_signing_config"
+
+# -- 19. Boto3 Operations -------------------------------------------------------
+boto3_operations:
+  client: "lambda"
+  function_operations:
+    create_function:
+      description: "Create a new Lambda function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        Runtime: {type: string, required: true}
+        Role: {type: string, required: true, description: "Execution role ARN"}
+        Handler: {type: string, required: true}
+        Code: {type: object, required: true, description: "{'ZipFile': bytes} or {'S3Bucket': str, 'S3Key': str}"}
+        MemorySize: {type: integer}
+        Timeout: {type: integer}
+        Environment: {type: object, description: "{'Variables': {'KEY': 'VALUE'}}"}
+        Layers: {type: list, description: "List of layer version ARNs"}
+        VpcConfig: {type: object, description: "{'SubnetIds': [...], 'SecurityGroupIds': [...]}"}
+        Architectures: {type: list, description: "['x86_64'] or ['arm64']"}
+    update_function_code:
+      description: "Deploy new code to an existing function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        ZipFile: {type: bytes, description: "Zip file content"}
+        S3Bucket: {type: string, description: "S3 bucket with deployment package"}
+        S3Key: {type: string, description: "S3 key for deployment package"}
+        Architectures: {type: list}
+    update_function_configuration:
+      description: "Update function settings (memory, timeout, env vars, runtime, layers)"
+      parameters:
+        FunctionName: {type: string, required: true}
+        Runtime: {type: string}
+        Handler: {type: string}
+        MemorySize: {type: integer}
+        Timeout: {type: integer}
+        Environment: {type: object, description: "{'Variables': {'KEY': 'VALUE'}}"}
+        Layers: {type: list, description: "List of layer version ARNs"}
+        VpcConfig: {type: object}
+        KMSKeyArn: {type: string}
+        EphemeralStorage: {type: object, description: "{'Size': 512-10240}"}
+    invoke:
+      description: "Invoke a Lambda function (sync or async)"
+      parameters:
+        FunctionName: {type: string, required: true}
+        InvocationType: {type: string, description: "RequestResponse, Event, or DryRun"}
+        Payload: {type: string, description: "JSON payload"}
+        LogType: {type: string, description: "Tail (returns last 4KB of logs)"}
+      returns: ["StatusCode", "Payload", "LogResult", "FunctionError", "ExecutedVersion"]
+    get_function:
+      description: "Get function configuration and code location"
+      parameters:
+        FunctionName: {type: string, required: true}
+      returns: ["Code.Location", "Configuration.FunctionArn", "Configuration.Role", "Configuration.Environment.Variables", "Configuration.Timeout", "Configuration.MemorySize", "Configuration.Runtime", "Configuration.Handler", "Configuration.Layers"]
+    get_function_configuration:
+      description: "Get version-specific settings"
+      parameters:
+        FunctionName: {type: string, required: true}
+      returns: ["Environment.Variables", "Role", "Timeout", "MemorySize", "LastUpdateStatus", "LastUpdateStatusReason", "State", "StateReason"]
+    delete_function:
+      description: "Delete a Lambda function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        Qualifier: {type: string, description: "Version or alias to delete"}
+    list_functions:
+      description: "List all Lambda functions"
+      parameters:
+        MaxItems: {type: integer}
+        FunctionVersion: {type: string, description: "ALL to include all versions"}
+    publish_version:
+      description: "Publish a new version of the function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        Description: {type: string}
+    create_alias:
+      description: "Create an alias pointing to a specific version"
+      parameters:
+        FunctionName: {type: string, required: true}
+        Name: {type: string, required: true}
+        FunctionVersion: {type: string, required: true}
+        RoutingConfig: {type: object, description: "Traffic shifting: {'AdditionalVersionWeights': {'2': 0.1}}"}
+    add_permission:
+      description: "Grant another AWS service permission to invoke this function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        StatementId: {type: string, required: true}
+        Action: {type: string, required: true, description: "Usually lambda:InvokeFunction"}
+        Principal: {type: string, required: true, description: "Service principal (s3.amazonaws.com, events.amazonaws.com, etc.)"}
+        SourceArn: {type: string, description: "ARN of the source resource"}
+        SourceAccount: {type: string}
+    put_function_concurrency:
+      description: "Set reserved concurrency for a function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        ReservedConcurrentExecutions: {type: integer, required: true}
+    create_event_source_mapping:
+      description: "Map an event source (SQS, Kinesis, DynamoDB, MSK) to a function"
+      parameters:
+        FunctionName: {type: string, required: true}
+        EventSourceArn: {type: string, required: true}
+        BatchSize: {type: integer}
+        MaximumBatchingWindowInSeconds: {type: integer}
+        Enabled: {type: boolean}
+        StartingPosition: {type: string, description: "LATEST, TRIM_HORIZON, AT_TIMESTAMP"}
+        BisectBatchOnFunctionError: {type: boolean}
+        MaximumRetryAttempts: {type: integer}
+        MaximumRecordAgeInSeconds: {type: integer}
+        ParallelizationFactor: {type: integer, description: "1-10"}
+
+  # Pre-signed URL generation (not applicable to Lambda)
+
+# -- 20. Runtime Diagnostics -----------------------------------------------------
+runtime_diagnostics:
+  - pattern: "Task timed out after|Lambda\\.Unknown|timed out"
+    category: RUNTIME
+    cause: "Lambda exceeded its configured timeout (default 30s)"
+    fix_type: update_config
+    resolution: "lam.update_function_configuration(FunctionName=name, Timeout=300)"
+
+  - pattern: "Runtime exited|Process exited before completing|signal: killed|OOM|out of memory"
+    category: RUNTIME
+    cause: "Lambda ran out of memory (default 128 MB)"
+    fix_type: update_config
+    resolution: "lam.update_function_configuration(FunctionName=name, MemorySize=512)"
+
+  - pattern: "Unable to import module|No module named|ModuleNotFoundError|ImportError"
+    category: CONFIG
+    cause: "Missing Python dependency - package not bundled in deployment ZIP"
+    fix_type: update_code
+    resolution: "Download ZIP, install missing package into a temp dir alongside the handler, rebuild ZIP, re-upload via update_function_code"
+
+  - pattern: "AccessDenied|not authorized to perform|UnauthorizedAccess"
+    category: PERMISSION
+    cause: "Lambda's IAM role is missing the required permission"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={statement with missing action})"
+
+  - pattern: "Invalid length for parameter executionRoleArn, value: 0"
+    category: CONFIG
+    cause: "EMR Serverless executionRoleArn env var is empty - env var {PEER}_EXECUTION_ROLE_ARN was not set"
+    fix_type: update_env_vars
+    resolution: >
+      Get the EMR execution role ARN from IAM and set it as a Lambda env var:
+      iam = boto3.client('iam')
+      role_name = emr_resource_name + '-role'
+      role_arn = iam.get_role(RoleName=role_name)['Role']['Arn']
+      Also find APPLICATION_ID: emr_s.list_applications() filter by name.
+      Update both via update_function_configuration(Environment={'Variables': {**current, 'X_EXECUTION_ROLE_ARN': role_arn, 'X_APPLICATION_ID': app_id}})
+
+  - pattern: "ResourceNotFoundException|Function not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Lambda function does not exist or was deleted"
+    fix_type: manual
+    resolution: "Verify terraform apply completed. Function name must match resource_name exactly."
+
+  - pattern: "TooManyRequestsException|Rate exceeded|Throttl"
+    category: THROTTLE
+    cause: "Lambda concurrency limit reached or API rate limit exceeded"
+    fix_type: update_config
+    resolution: "Request concurrency increase via Service Quotas, or add reserved concurrency"
+
+  - pattern: "InvalidParameterValueException.*Unzipped size must be smaller"
+    category: SIZE_LIMIT
+    cause: "Deployment package exceeds 250 MB unzipped limit"
+    fix_type: code_change
+    resolution: "Reduce package size: use Lambda layers for large dependencies, or switch to container image deployment"
+
+  - pattern: "ENILimitReachedException|NetworkInterface"
+    category: VPC
+    cause: "VPC ENI limit reached for Lambda functions"
+    fix_type: manual
+    resolution: "Request ENI limit increase or reduce VPC Lambda concurrency"
+
+  - pattern: "KMSAccessDeniedException|KMSNotFoundException"
+    category: ENCRYPTION
+    cause: "Lambda cannot access KMS key for environment variable decryption"
+    fix_type: update_iam
+    resolution: "Add kms:Decrypt permission to execution role for the specified KMS key ARN"
+
+  - pattern: "InvalidSecurityGroupIDException|InvalidSubnetIDException"
+    category: VPC
+    cause: "VPC config references non-existent security group or subnet"
+    fix_type: manual
+    resolution: "Verify security group and subnet IDs exist in the VPC"
+
+# -- 21. Tags -------------------------------------------------------------------
+tags:
+  max_per_function: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"        # uses _tags_block(bp) helper
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+  reserved_prefixes:
+    - "aws:"                     # reserved for AWS use
+
+# -- 22. Code Update (Developer Agent) ------------------------------------------
+code_update:
+  method: lambda_zip
+  boto3_client: lambda
+  description: >
+    Lambda code is a ZIP deployment package managed by AWS.
+    ENV VAR UPDATES (most common fix): use update_function_configuration() -
+    no zip required, takes effect immediately.
+    CODE UPDATES: download zip via get_function()['Code']['Location'],
+    modify .py files in-memory with zipfile + io.BytesIO, re-upload via
+    update_function_code(ZipFile=bytes). Wait for LastUpdateStatus == 'Successful'.
+
+  env_update:
+    client: lambda
+    operation: update_function_configuration
+    id_param: FunctionName
+    id_value: "{resource_name}"
+    env_key: "Environment.Variables"
+    critical_note: >
+      ALWAYS fetch current vars first to avoid erasing existing wiring:
+      current = lam.get_function_configuration(FunctionName=name).get('Environment', {}).get('Variables', {})
+      Then merge: {**current, 'NEW_KEY': 'new_value'}
+
+  config_update:
+    client: lambda
+    operation: update_function_configuration
+    id_param: FunctionName
+    updatable: [Timeout, MemorySize, Handler, Runtime, Environment, Layers, VpcConfig, ReservedConcurrentExecutions, EphemeralStorage, KMSKeyArn]
+
+  code_update_steps:
+    - "import boto3, io, zipfile, urllib.request, time"
+    - "lam = boto3.client('lambda', region_name=region)"
+    - "info = lam.get_function(FunctionName=resource_name)"
+    - "Download zip bytes from info['Code']['Location'] using urllib.request.urlopen"
+    - "Modify .py files in memory: zipfile.ZipFile(io.BytesIO(zip_bytes)) -> write modified files -> io.BytesIO"
+    - "lam.update_function_code(FunctionName=resource_name, ZipFile=modified_zip.getvalue())"
+    - "Poll lam.get_function_configuration(FunctionName=name)['LastUpdateStatus'] until 'Successful'"
+    - "WAIT before re-triggering - Lambda needs ~5-30s to propagate new code"
+
+  discovery_ops:
+    - op: get_function
+      returns: ["Code.Location", "Configuration.FunctionArn", "Configuration.Role", "Configuration.Environment.Variables", "Configuration.Timeout", "Configuration.MemorySize"]
+    - op: get_function_configuration
+      returns: ["Environment.Variables", "Role", "Timeout", "MemorySize", "LastUpdateStatus", "LastUpdateStatusReason"]

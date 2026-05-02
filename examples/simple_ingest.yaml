@@ -1,0 +1,28 @@
+pipeline_name: simple_ingest
+business_unit: analytics
+cost_center: cc001
+region: us-east-1
+
+services:
+  - name: ingest_bucket
+    type: s3
+
+  - name: processor_fn
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: handler.process
+      memory_size: 128
+      timeout: 30
+
+  - name: result_queue
+    type: sqs
+
+integrations:
+  - source: ingest_bucket
+    target: processor_fn
+    event: "s3:ObjectCreated:*"
+
+  - source: processor_fn
+    target: result_queue
+    event: send_message

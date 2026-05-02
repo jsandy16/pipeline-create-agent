@@ -1,0 +1,131 @@
+business_unit: operations
+cost_center: c01
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: order_bucket
+  suffix: null
+  target: process_order
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: invoice_bucket
+  suffix: null
+  target: process_invoice
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: product_bucket
+  suffix: null
+  target: process_product
+- event: put_object
+  prefix: order/
+  source: process_order
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: invoice/
+  source: process_invoice
+  suffix: null
+  target: staging_bucket
+- event: put_object
+  prefix: product/
+  source: process_product
+  suffix: null
+  target: staging_bucket
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: staging_bucket
+  suffix: null
+  target: refine_data
+- event: put_object
+  prefix: null
+  source: refine_data
+  suffix: null
+  target: curated_bucket
+- event: crawl
+  prefix: order/
+  source: curated_bucket
+  suffix: null
+  target: order_table
+- event: crawl
+  prefix: invoice/
+  source: curated_bucket
+  suffix: null
+  target: invoice_table
+- event: crawl
+  prefix: product/
+  source: curated_bucket
+  suffix: null
+  target: product_table
+pipeline_name: order_processing_pipeline
+region: us-east-1
+services:
+- config:
+    versioning: false
+  name: order_bucket
+  type: s3
+- config:
+    versioning: false
+  name: invoice_bucket
+  type: s3
+- config:
+    versioning: false
+  name: product_bucket
+  type: s3
+- config:
+    versioning: false
+  name: staging_bucket
+  type: s3
+- config:
+    versioning: false
+  name: curated_bucket
+  type: s3
+- config:
+    handler: index.handler
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: process_order
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: process_invoice
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 256
+    runtime: python3.12
+    timeout: 60
+  name: process_product
+  type: lambda
+- config:
+    handler: index.handler
+    memory_size: 512
+    runtime: python3.12
+    timeout: 120
+  name: refine_data
+  type: lambda
+- config:
+    database_name: order_processing
+  name: order_processing_database
+  type: glue_data_catalog
+- config:
+    database_name: order_processing
+    storage_location: s3://curated/order/
+    table_name: order
+  name: order_table
+  type: glue_data_catalog
+- config:
+    database_name: order_processing
+    storage_location: s3://curated/invoice/
+    table_name: invoice
+  name: invoice_table
+  type: glue_data_catalog
+- config:
+    database_name: order_processing
+    storage_location: s3://curated/product/
+    table_name: product
+  name: product_table
+  type: glue_data_catalog

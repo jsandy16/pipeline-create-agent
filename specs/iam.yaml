@@ -1,0 +1,51 @@
+service_type: iam
+is_principal: false
+terraform_resource: aws_iam_role
+description: "AWS IAM — standalone IAM role and policy for cross-service permissions or custom trust relationships"
+
+defaults:
+  path: "/"
+  max_session_duration: 3600
+
+iam:
+  always: []
+  as_target_of: {}
+  as_source_to: {}
+
+env_vars:
+  as_target_of: {}
+  as_source_to: {}
+
+vpc_triggers: []
+
+code_update:
+  method: api_config
+  boto3_client: iam
+  description: >
+    IAM roles/policies updated via put_role_policy() (inline policy, immediate effect).
+    Managed policies via attach_role_policy(). Trust policy (who can assume) via
+    update_assume_role_policy(). All changes take effect immediately.
+  config_update:
+    client: iam
+    operation: put_role_policy
+    id_param: RoleName
+    note: "put_role_policy() is an upsert — creates or replaces the named inline policy"
+  discovery_ops:
+    - op: get_role
+      id_param: RoleName
+      returns: ["Role.Arn", "Role.AssumeRolePolicyDocument", "Role.RoleName", "Role.Description"]
+    - op: list_role_policies
+      id_param: RoleName
+      returns: ["PolicyNames"]
+    - op: get_role_policy
+      id_params: [RoleName, PolicyName]
+      returns: ["PolicyDocument"]
+    - op: list_attached_role_policies
+      id_param: RoleName
+      returns: ["AttachedPolicies[].PolicyName", "AttachedPolicies[].PolicyArn"]
+runtime_diagnostics:
+  - pattern: "NoSuchEntityException.*role|role.*does not exist"
+    category: RESOURCE_NOT_FOUND
+    cause: "IAM role not found — terraform apply may not have completed"
+    fix_type: manual
+    resolution: "Verify role name (should be resource_name + '-role'). Re-run terraform apply if missing."

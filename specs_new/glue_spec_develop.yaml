@@ -1,0 +1,1085 @@
+# ============================================================================
+# AWS Glue Comprehensive Development Spec
+# ============================================================================
+# This spec is the single source of truth for ALL Glue knowledge needed by
+# the pipeline engine, HCL renderer, spec builder, developer agent, and
+# autofix agent. It extends the original specs/glue.yaml with exhaustive
+# coverage of Glue capabilities, constraints, IAM, integrations, and Terraform
+# resource patterns.
+#
+# Structure:
+#   1. identity            — service metadata & Terraform mapping
+#   2. naming              — resource name constraints
+#   3. defaults            — Terraform attribute defaults (free-tier safe)
+#   4. quotas              — AWS service limits
+#   5. job_types           — Spark ETL, Python Shell, Streaming, Ray
+#   6. crawler             — crawlers, classifiers, schema change policies
+#   7. connections         — JDBC, Kafka, MongoDB, network connections
+#   8. triggers_workflows  — Glue triggers and workflows
+#   9. data_quality        — DQDL rules, rulesets, evaluations
+#  10. encryption          — SSE, CloudWatch encryption, job bookmark encryption
+#  11. iam                 — complete action catalog, integration graph rules
+#  12. env_vars            — auto-wired environment variables
+#  13. vpc_triggers        — VPC placement rules
+#  14. integrations        — wiring ownership with all connected services
+#  15. terraform_resources — all TF resource types
+#  16. boto3_operations    — complete API reference
+#  17. runtime_diagnostics — error patterns & auto-fix rules
+#  18. tags                — tagging constraints
+#  19. code_update         — developer agent instructions
+# ============================================================================
+
+# -- 1. Identity -------------------------------------------------------------
+identity:
+  service_type: glue
+  aws_service_name: "AWS Glue"
+  is_principal: true              # Glue has an IAM execution role
+  terraform_resource: aws_glue_crawler
+  description: >
+    Fully managed ETL service that makes it easy to discover, prepare, move,
+    and integrate data from multiple sources. Includes crawlers for schema
+    discovery, Spark/Python Shell ETL jobs, a Data Catalog (Hive-compatible
+    metastore), triggers, workflows, and data quality rules.
+  free_tier:
+    status: partial_free
+    details: >
+      Glue Data Catalog: free for first 1 million objects stored and 1 million
+      requests/month. Crawlers and ETL jobs: no free tier — billed per DPU-hour
+      ($0.44/DPU-hour for Spark, $0.0625/DPU-hour for Python Shell).
+  pricing_model: per_dpu_hour
+
+# -- 2. Naming ---------------------------------------------------------------
+naming:
+  resource_name_limit: 255        # Glue job/crawler name max
+  resource_name_min: 1
+  valid_characters: "a-zA-Z0-9_-"
+  rules:
+    - "Must be unique within the AWS account and region"
+    - "Allows letters, digits, hyphens, and underscores"
+    - "Catalog database names: lowercase letters, digits, underscores only"
+    - "Catalog database name max: 252 characters"
+  catalog_database_naming:
+    valid_characters: "a-z0-9_"
+    max_length: 252
+    note: "Hyphens are NOT allowed in Glue Catalog database names — use underscores"
+
+# -- 3. Defaults (free-tier / minimum-cost safe) -----------------------------
+defaults:
+  # Crawler defaults
+  database_description: "Glue Data Catalog database"
+  update_behavior: "UPDATE_IN_DATABASE"
+  delete_behavior: "LOG"
+  # ETL job defaults
+  glue_version: "4.0"            # latest; uses Spark 3.3, Python 3.10
+  worker_type: "G.1X"            # smallest standard worker (4 vCPU, 16 GB RAM)
+  number_of_workers: 2           # minimum for Spark
+  max_retries: 0
+  timeout: 2880                  # 48 hours (max)
+  job_command_name: "glueetl"    # glueetl | pythonshell | gluestreaming | glueray
+  # Python Shell defaults
+  python_shell_dpu: 0.0625       # 1/16 DPU (cheapest)
+  python_shell_python_version: "3.9"
+  # Spark defaults
+  spark_python_version: "3"
+
+# -- 4. Quotas ---------------------------------------------------------------
+quotas:
+  max_jobs_per_account: 1000                # soft limit, adjustable
+  max_concurrent_job_runs_per_account: 200  # soft limit
+  max_concurrent_job_runs_per_job: 1000     # soft limit
+  max_crawlers_per_account: 1000            # soft limit
+  max_concurrent_crawler_runs: 100          # soft limit
+  max_databases_per_catalog: 10000          # soft limit
+  max_tables_per_database: 1000000          # soft limit
+  max_partitions_per_table: 10000000        # soft limit
+  max_table_versions_per_table: 100000
+  max_triggers_per_account: 1000
+  max_workflows_per_account: 250            # soft limit
+  max_dpu_per_job: 100                      # Spark
+  max_job_script_size: "50 MB"
+  max_connections_per_account: 1000
+  max_classifiers_per_account: 250
+  max_job_bookmark_entries: 1000000
+  max_security_configurations: 250
+  job_run_timeout_max: 2880                 # minutes (48 hours)
+  crawler_timeout_max: 2880                 # minutes (48 hours)
+
+# -- 5. Job Types ------------------------------------------------------------
+job_types:
+  glueetl:
+    description: "Apache Spark ETL jobs — batch processing at scale"
+    command_name: "glueetl"
+    worker_types: ["G.1X", "G.2X", "G.4X", "G.8X", "G.025X"]
+    min_workers: 2
+    languages: ["Python", "Scala"]
+    glue_versions: ["2.0", "3.0", "4.0"]
+    features:
+      - "Spark DataFrame and DynamicFrame APIs"
+      - "Job bookmarks for incremental processing"
+      - "Spark UI for job monitoring"
+      - "Continuous logging to CloudWatch"
+      - "Auto-scaling (Glue 3.0+)"
+    default_arguments:
+      "--enable-continuous-cloudwatch-log": "true"
+      "--enable-spark-ui": "true"
+      "--enable-metrics": "true"
+      "--enable-auto-scaling": "true"
+      "--job-language": "python"
+
+  pythonshell:
+    description: "Lightweight Python script execution — for small tasks"
+    command_name: "pythonshell"
+    dpu_options: [0.0625, 1]     # 1/16 DPU or 1 DPU
+    languages: ["Python"]
+    python_versions: ["3.9"]
+    glue_versions: ["1.0", "3.0"]
+    features:
+      - "Runs pure Python (no Spark)"
+      - "Good for small data, API calls, orchestration"
+      - "Much cheaper than Spark ($0.0625/hr at 1/16 DPU)"
+    constraints:
+      - "Max 1 DPU"
+      - "No auto-scaling"
+      - "No Spark UI"
+
+  gluestreaming:
+    description: "Spark Structured Streaming for real-time ETL"
+    command_name: "gluestreaming"
+    worker_types: ["G.1X", "G.2X", "G.4X", "G.8X", "G.025X"]
+    min_workers: 2
+    sources: ["Kinesis Data Streams", "Apache Kafka", "Amazon MSK"]
+    features:
+      - "Micro-batch streaming with Spark"
+      - "Checkpointing for exactly-once semantics"
+      - "Window functions for aggregation"
+
+  glueray:
+    description: "Ray distributed computing for ML workloads"
+    command_name: "glueray"
+    worker_types: ["Z.2X"]
+    min_workers: 2
+    languages: ["Python"]
+    features:
+      - "Ray framework for distributed ML"
+      - "Parallel data processing"
+
+  worker_type_specs:
+    "G.025X":
+      vcpu: 2
+      memory_gb: 4
+      disk_gb: 64
+      cost_per_dpu_hour: 0.44
+    "G.1X":
+      vcpu: 4
+      memory_gb: 16
+      disk_gb: 64
+      cost_per_dpu_hour: 0.44
+    "G.2X":
+      vcpu: 8
+      memory_gb: 32
+      disk_gb: 128
+      cost_per_dpu_hour: 0.44
+    "G.4X":
+      vcpu: 16
+      memory_gb: 64
+      disk_gb: 256
+      cost_per_dpu_hour: 0.44
+    "G.8X":
+      vcpu: 32
+      memory_gb: 128
+      disk_gb: 512
+      cost_per_dpu_hour: 0.44
+    "Z.2X":
+      vcpu: 8
+      memory_gb: 64
+      disk_gb: 128
+      cost_per_dpu_hour: 0.44
+      note: "Ray jobs only"
+
+# -- 6. Crawler --------------------------------------------------------------
+crawler:
+  description: "Glue Crawlers scan data stores and populate the Data Catalog with table definitions"
+  targets:
+    s3:
+      description: "Crawl S3 paths for schema discovery"
+      terraform_block: "s3_target"
+      attributes: ["path", "exclusions", "sample_size", "event_queue_arn", "dlq_event_queue_arn"]
+    jdbc:
+      description: "Crawl JDBC databases (RDS, Redshift, etc.)"
+      terraform_block: "jdbc_target"
+      attributes: ["connection_name", "path", "exclusions", "enable_additional_metadata"]
+    dynamodb:
+      description: "Crawl DynamoDB tables"
+      terraform_block: "dynamodb_target"
+      attributes: ["path", "scan_all", "scan_rate"]
+    catalog:
+      description: "Crawl other Glue Catalog tables"
+      terraform_block: "catalog_target"
+      attributes: ["database_name", "tables", "connection_name"]
+    delta_lake:
+      description: "Crawl Delta Lake tables on S3"
+      terraform_block: "delta_target"
+      attributes: ["delta_tables", "connection_name", "write_manifest"]
+    iceberg:
+      description: "Crawl Apache Iceberg tables on S3"
+      terraform_block: "iceberg_target"
+      attributes: ["paths", "connection_name", "maximum_traversal_depth"]
+    hudi:
+      description: "Crawl Apache Hudi tables on S3"
+      terraform_block: "hudi_target"
+      attributes: ["paths", "connection_name", "maximum_traversal_depth"]
+
+  classifiers:
+    built_in: ["CSV", "JSON", "Avro", "Parquet", "ORC", "XML", "BSON", "Ion", "Grok"]
+    custom_types: ["csv", "json", "xml", "grok"]
+    terraform_resources:
+      - "aws_glue_classifier"
+
+  schema_change_policy:
+    update_behavior:
+      - "UPDATE_IN_DATABASE"     # update existing table schema
+      - "LOG"                    # log change but don't update
+    delete_behavior:
+      - "LOG"                    # log deleted tables
+      - "DELETE_FROM_DATABASE"   # remove table from catalog
+      - "DEPRECATE_IN_DATABASE"  # mark table as deprecated
+
+  recrawl_policy:
+    options:
+      - "CRAWL_EVERYTHING"       # re-crawl all data on every run
+      - "CRAWL_NEW_FOLDERS_ONLY" # only crawl new S3 folders since last crawl
+      - "CRAWL_EVENT_MODE"       # crawl based on S3 event notifications
+
+  scheduling:
+    format: "cron(Minutes Hours Day-of-month Month Day-of-week Year)"
+    examples:
+      hourly: "cron(0 * * * ? *)"
+      daily_6am: "cron(0 6 * * ? *)"
+      weekly_monday: "cron(0 0 ? * MON *)"
+
+# -- 7. Connections -----------------------------------------------------------
+connections:
+  description: "Glue Connections provide network and authentication to external data stores"
+  types:
+    JDBC:
+      description: "Connect to JDBC-compatible databases (RDS, Redshift, etc.)"
+      properties: ["JDBC_CONNECTION_URL", "USERNAME", "PASSWORD"]
+      terraform_resource: "aws_glue_connection"
+    KAFKA:
+      description: "Connect to Apache Kafka or Amazon MSK"
+      properties: ["KAFKA_BOOTSTRAP_SERVERS", "KAFKA_SSL_ENABLED"]
+    MONGODB:
+      description: "Connect to MongoDB or DocumentDB"
+      properties: ["CONNECTION_URL", "USERNAME", "PASSWORD"]
+    NETWORK:
+      description: "VPC network connection for private data stores"
+      properties: ["AVAILABILITY_ZONE", "SUBNET_ID", "SECURITY_GROUP_ID"]
+    MARKETPLACE:
+      description: "AWS Marketplace connector"
+    CUSTOM:
+      description: "Custom connector via Glue Connector interface"
+  vpc_config:
+    description: "Physical connection requirements for VPC-based connections"
+    required_for: ["JDBC", "KAFKA", "MONGODB", "NETWORK"]
+    terraform_block: "physical_connection_requirements"
+    attributes: ["availability_zone", "subnet_id", "security_group_id_list"]
+
+# -- 8. Triggers and Workflows -----------------------------------------------
+triggers_workflows:
+  triggers:
+    types:
+      SCHEDULED:
+        description: "Run on a cron schedule"
+        terraform_attribute: "schedule"
+      CONDITIONAL:
+        description: "Run when predecessor jobs/crawlers complete"
+        terraform_block: "predicate"
+      ON_DEMAND:
+        description: "Run manually via API"
+      EVENT:
+        description: "Run in response to EventBridge event"
+        terraform_block: "event_batching_condition"
+    terraform_resource: "aws_glue_trigger"
+    actions:
+      - "Start a job"
+      - "Start a crawler"
+      - "Notify via SNS"
+
+  workflows:
+    description: "Orchestrate multiple Glue jobs and crawlers as a DAG"
+    terraform_resource: "aws_glue_workflow"
+    max_concurrent_runs: 1       # default
+    features:
+      - "Visual graph of job/crawler dependencies"
+      - "Run properties (key-value params passed to all jobs)"
+      - "Blueprint-based workflow templates"
+    states: ["RUNNING", "COMPLETED", "STOPPING", "STOPPED", "ERROR"]
+
+# -- 9. Data Quality ---------------------------------------------------------
+data_quality:
+  description: "Glue Data Quality uses DQDL rules to validate data during ETL"
+  terraform_resource: "aws_glue_data_quality_ruleset"
+  dqdl_rules:
+    - "RowCount > 0"
+    - "IsComplete \"column_name\""
+    - "IsUnique \"column_name\""
+    - "ColumnLength \"column_name\" between 1 and 100"
+    - "ColumnValues \"column_name\" in [\"val1\", \"val2\"]"
+    - "CustomSql \"SELECT COUNT(*) FROM primary WHERE col IS NULL\" = 0"
+  integration:
+    - "Inline in ETL jobs via GlueContext"
+    - "As standalone ruleset evaluations"
+    - "CloudWatch metrics for rule pass/fail"
+
+# -- 10. Encryption -----------------------------------------------------------
+encryption:
+  security_configuration:
+    terraform_resource: "aws_glue_security_configuration"
+    s3_encryption:
+      modes: ["SSE-S3", "SSE-KMS"]
+      terraform_block: "s3_encryption"
+    cloudwatch_encryption:
+      modes: ["SSE-KMS", "NONE"]
+      terraform_block: "cloud_watch_encryption"
+    job_bookmarks_encryption:
+      modes: ["SSE-KMS", "NONE"]
+      terraform_block: "job_bookmarks_encryption"
+  data_catalog_encryption:
+    terraform_resource: "aws_glue_data_catalog_encryption_settings"
+    encryption_at_rest:
+      terraform_block: "encryption_at_rest"
+      attributes: ["catalog_encryption_mode", "sse_aws_kms_key_id"]
+    connection_password_encryption:
+      terraform_block: "connection_password_encryption"
+      attributes: ["return_connection_password_encrypted", "aws_kms_key_id"]
+
+# -- 11. IAM -----------------------------------------------------------------
+iam:
+  # ARN formats
+  arn_formats:
+    job: "arn:aws:glue:REGION:ACCOUNT:job/JOB_NAME"
+    crawler: "arn:aws:glue:REGION:ACCOUNT:crawler/CRAWLER_NAME"
+    database: "arn:aws:glue:REGION:ACCOUNT:database/DB_NAME"
+    table: "arn:aws:glue:REGION:ACCOUNT:table/DB_NAME/TABLE_NAME"
+    catalog: "arn:aws:glue:REGION:ACCOUNT:catalog"
+    connection: "arn:aws:glue:REGION:ACCOUNT:connection/CONNECTION_NAME"
+    trigger: "arn:aws:glue:REGION:ACCOUNT:trigger/TRIGGER_NAME"
+    workflow: "arn:aws:glue:REGION:ACCOUNT:workflow/WORKFLOW_NAME"
+    dev_endpoint: "arn:aws:glue:REGION:ACCOUNT:devEndpoint/ENDPOINT_NAME"
+
+  service_principal: "glue.amazonaws.com"
+
+  # Actions the Glue crawler/job always needs (from existing spec)
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+    - "glue:GetDatabase"
+    - "glue:GetTable"
+    - "glue:CreateTable"
+    - "glue:UpdateTable"
+    - "glue:DeleteTable"
+    - "glue:GetPartition"
+    - "glue:CreatePartition"
+    - "glue:UpdatePartition"
+    - "glue:BatchCreatePartition"
+    - "glue:BatchDeletePartition"
+
+  # Complete action catalog by category
+  actions:
+    catalog_management:
+      - "glue:CreateDatabase"
+      - "glue:GetDatabase"
+      - "glue:GetDatabases"
+      - "glue:UpdateDatabase"
+      - "glue:DeleteDatabase"
+      - "glue:CreateTable"
+      - "glue:GetTable"
+      - "glue:GetTables"
+      - "glue:UpdateTable"
+      - "glue:DeleteTable"
+      - "glue:BatchDeleteTable"
+      - "glue:GetTableVersion"
+      - "glue:GetTableVersions"
+      - "glue:DeleteTableVersion"
+      - "glue:BatchDeleteTableVersion"
+      - "glue:CreatePartition"
+      - "glue:GetPartition"
+      - "glue:GetPartitions"
+      - "glue:UpdatePartition"
+      - "glue:DeletePartition"
+      - "glue:BatchCreatePartition"
+      - "glue:BatchDeletePartition"
+      - "glue:BatchGetPartition"
+      - "glue:BatchUpdatePartition"
+      - "glue:GetCatalogImportStatus"
+      - "glue:ImportCatalogToGlue"
+      - "glue:SearchTables"
+    job_management:
+      - "glue:CreateJob"
+      - "glue:GetJob"
+      - "glue:GetJobs"
+      - "glue:UpdateJob"
+      - "glue:DeleteJob"
+      - "glue:BatchGetJobs"
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:GetJobRuns"
+      - "glue:BatchGetJobRuns"
+      - "glue:BatchStopJobRun"
+      - "glue:GetJobBookmark"
+      - "glue:ResetJobBookmark"
+    crawler_management:
+      - "glue:CreateCrawler"
+      - "glue:GetCrawler"
+      - "glue:GetCrawlers"
+      - "glue:UpdateCrawler"
+      - "glue:DeleteCrawler"
+      - "glue:BatchGetCrawlers"
+      - "glue:StartCrawler"
+      - "glue:StopCrawler"
+      - "glue:GetCrawlerMetrics"
+    connection_management:
+      - "glue:CreateConnection"
+      - "glue:GetConnection"
+      - "glue:GetConnections"
+      - "glue:UpdateConnection"
+      - "glue:DeleteConnection"
+    trigger_management:
+      - "glue:CreateTrigger"
+      - "glue:GetTrigger"
+      - "glue:GetTriggers"
+      - "glue:UpdateTrigger"
+      - "glue:DeleteTrigger"
+      - "glue:StartTrigger"
+      - "glue:StopTrigger"
+      - "glue:BatchGetTriggers"
+    workflow_management:
+      - "glue:CreateWorkflow"
+      - "glue:GetWorkflow"
+      - "glue:GetWorkflowRun"
+      - "glue:GetWorkflowRuns"
+      - "glue:UpdateWorkflow"
+      - "glue:DeleteWorkflow"
+      - "glue:StartWorkflowRun"
+      - "glue:StopWorkflowRun"
+      - "glue:PutWorkflowRunProperties"
+    security_configuration:
+      - "glue:CreateSecurityConfiguration"
+      - "glue:GetSecurityConfiguration"
+      - "glue:GetSecurityConfigurations"
+      - "glue:DeleteSecurityConfiguration"
+    data_quality:
+      - "glue:CreateDataQualityRuleset"
+      - "glue:GetDataQualityRuleset"
+      - "glue:UpdateDataQualityRuleset"
+      - "glue:DeleteDataQualityRuleset"
+      - "glue:StartDataQualityRulesetEvaluationRun"
+      - "glue:GetDataQualityResult"
+    classifier_management:
+      - "glue:CreateClassifier"
+      - "glue:GetClassifier"
+      - "glue:GetClassifiers"
+      - "glue:UpdateClassifier"
+      - "glue:DeleteClassifier"
+    dev_endpoint:
+      - "glue:CreateDevEndpoint"
+      - "glue:GetDevEndpoint"
+      - "glue:GetDevEndpoints"
+      - "glue:UpdateDevEndpoint"
+      - "glue:DeleteDevEndpoint"
+    schema_registry:
+      - "glue:CreateRegistry"
+      - "glue:GetRegistry"
+      - "glue:UpdateRegistry"
+      - "glue:DeleteRegistry"
+      - "glue:CreateSchema"
+      - "glue:GetSchema"
+      - "glue:GetSchemaVersion"
+      - "glue:UpdateSchema"
+      - "glue:DeleteSchema"
+      - "glue:RegisterSchemaVersion"
+    tagging:
+      - "glue:TagResource"
+      - "glue:UntagResource"
+      - "glue:GetTags"
+
+  # Integration graph IAM rules (used by spec_builder)
+  as_target_of:
+    stepfunctions:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+    lambda:
+      - "glue:StartCrawler"
+      - "glue:GetCrawler"
+
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    dynamodb:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+    redshift:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    glue_data_catalog:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+
+  # Common IAM policies for Glue
+  managed_policies:
+    - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+    - "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
+
+  # Service-linked role
+  service_linked_role: false   # Glue uses a regular IAM role, not SLR
+
+  # Condition keys
+  condition_keys:
+    - "glue:VpcIds"
+    - "glue:SubnetIds"
+    - "glue:SecurityGroupIds"
+    - "aws:RequestTag/${TagKey}"
+    - "aws:ResourceTag/${TagKey}"
+    - "aws:TagKeys"
+
+# -- 12. Environment Variables ------------------------------------------------
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+
+# -- 13. VPC Triggers --------------------------------------------------------
+vpc_triggers:
+  - aurora
+  - redshift
+
+# -- 14. Integration Wiring Ownership ----------------------------------------
+integrations:
+  s3_to_glue:
+    description: "S3 provides data for Glue crawler/job to process"
+    owned_by: "glue"
+    terraform_resources:
+      - "aws_glue_crawler s3_target block"
+    iam_permissions_on_glue:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+
+  glue_to_s3:
+    description: "Glue job writes output to S3"
+    owned_by: "glue"
+    terraform_resources:
+      - "aws_glue_crawler s3_target block"
+    iam_permissions_on_glue:
+      - "s3:PutObject"
+      - "s3:GetBucketLocation"
+      - "s3:ListBucket"
+
+  glue_to_dynamodb:
+    description: "Glue job reads from or writes to DynamoDB"
+    owned_by: "glue"
+    iam_permissions_on_glue:
+      - "dynamodb:GetItem"
+      - "dynamodb:PutItem"
+      - "dynamodb:BatchWriteItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+
+  glue_to_redshift:
+    description: "Glue job reads from or writes to Redshift via JDBC"
+    owned_by: "glue"
+    requires_connection: true
+    vpc_required: true
+    iam_permissions_on_glue:
+      - "redshift:DescribeClusters"
+      - "redshift:GetClusterCredentials"
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+
+  glue_to_aurora:
+    description: "Glue job connects to Aurora via JDBC or Data API"
+    owned_by: "glue"
+    requires_connection: true
+    vpc_required: true
+    iam_permissions_on_glue:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+
+  glue_to_kinesis_streams:
+    description: "Glue streaming job reads from or writes to Kinesis"
+    owned_by: "glue"
+    iam_permissions_on_glue:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+      - "kinesis:GetRecords"
+      - "kinesis:GetShardIterator"
+      - "kinesis:DescribeStream"
+      - "kinesis:ListShards"
+
+  glue_to_glue_data_catalog:
+    description: "Glue crawler populates the Glue Data Catalog"
+    owned_by: "glue"
+    iam_permissions_on_glue:
+      - "glue:GetDatabase"
+      - "glue:GetTable"
+      - "glue:GetPartition"
+      - "glue:CreateTable"
+      - "glue:UpdateTable"
+      - "glue:CreatePartition"
+
+  stepfunctions_to_glue:
+    description: "Step Functions starts Glue job runs"
+    owned_by: "step_functions"
+    iam_permissions_on_caller:
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+      - "glue:GetJobRuns"
+      - "glue:BatchStopJobRun"
+
+  lambda_to_glue:
+    description: "Lambda starts Glue crawlers or jobs"
+    owned_by: "lambda"
+    iam_permissions_on_caller:
+      - "glue:StartCrawler"
+      - "glue:GetCrawler"
+      - "glue:StartJobRun"
+      - "glue:GetJobRun"
+
+  eventbridge_to_glue:
+    description: "EventBridge triggers Glue job on schedule or event"
+    owned_by: "eventbridge"
+    terraform_resources:
+      - "aws_cloudwatch_event_rule"
+      - "aws_cloudwatch_event_target"
+
+  glue_to_msk:
+    description: "Glue streaming job reads from MSK/Kafka"
+    owned_by: "glue"
+    requires_connection: true
+    vpc_required: true
+    iam_permissions_on_glue:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+
+  glue_to_lake_formation:
+    description: "Glue operates under Lake Formation permissions"
+    owned_by: "lake_formation"
+    iam_permissions_on_glue:
+      - "lakeformation:GetDataAccess"
+
+# -- 15. Terraform Resources --------------------------------------------------
+terraform_resources:
+  primary:
+    - resource: "aws_glue_catalog_database"
+      description: "Glue Data Catalog database (created by Glue renderer)"
+      always_created: true
+    - resource: "aws_iam_role"
+      description: "IAM execution role for Glue crawler/job"
+      always_created: true
+    - resource: "aws_iam_role_policy"
+      description: "Inline policy for Glue role"
+      always_created: true
+    - resource: "aws_glue_crawler"
+      description: "Glue crawler for schema discovery"
+      always_created: true
+    - resource: "aws_cloudwatch_log_group"
+      description: "CloudWatch log group for Glue job logs"
+      always_created: true
+
+  conditional:
+    - resource: "aws_glue_job"
+      condition: "When an ETL job is needed (not just a crawler)"
+    - resource: "aws_glue_trigger"
+      condition: "When scheduling or conditional triggers are configured"
+    - resource: "aws_glue_workflow"
+      condition: "When orchestrating multiple Glue jobs/crawlers"
+    - resource: "aws_glue_connection"
+      condition: "When connecting to VPC-based data stores (JDBC, Kafka)"
+    - resource: "aws_glue_classifier"
+      condition: "When custom classifiers are needed"
+    - resource: "aws_glue_security_configuration"
+      condition: "When encryption at rest is required"
+    - resource: "aws_glue_data_quality_ruleset"
+      condition: "When data quality rules are defined"
+
+  all_known:
+    - "aws_glue_catalog_database"
+    - "aws_glue_catalog_table"
+    - "aws_glue_crawler"
+    - "aws_glue_job"
+    - "aws_glue_trigger"
+    - "aws_glue_workflow"
+    - "aws_glue_connection"
+    - "aws_glue_classifier"
+    - "aws_glue_security_configuration"
+    - "aws_glue_data_catalog_encryption_settings"
+    - "aws_glue_resource_policy"
+    - "aws_glue_schema"
+    - "aws_glue_registry"
+    - "aws_glue_partition"
+    - "aws_glue_partition_index"
+    - "aws_glue_user_defined_function"
+    - "aws_glue_data_quality_ruleset"
+    - "aws_glue_dev_endpoint"
+    - "aws_glue_ml_transform"
+
+# -- 16. Boto3 Operations -----------------------------------------------------
+boto3_operations:
+  client: "glue"
+
+  job_operations:
+    create_job:
+      description: "Create a new Glue ETL job"
+      parameters:
+        Name: {type: string, required: true}
+        Role: {type: string, required: true}
+        Command: {type: object, required: true, description: "{'Name': 'glueetl|pythonshell', 'ScriptLocation': 's3://...', 'PythonVersion': '3'}"}
+        DefaultArguments: {type: object, description: "Job parameters (--key = value)"}
+        GlueVersion: {type: string, description: "2.0, 3.0, or 4.0"}
+        NumberOfWorkers: {type: integer}
+        WorkerType: {type: string, description: "G.1X, G.2X, G.4X, G.8X, G.025X"}
+        MaxCapacity: {type: float, description: "For Python Shell only: 0.0625 or 1"}
+        MaxRetries: {type: integer}
+        Timeout: {type: integer, description: "Minutes, max 2880"}
+        Connections: {type: object, description: "{'Connections': ['conn_name']}"}
+        SecurityConfiguration: {type: string}
+        Tags: {type: object}
+      returns: ["Name"]
+
+    start_job_run:
+      description: "Start an execution of a Glue job"
+      parameters:
+        JobName: {type: string, required: true}
+        Arguments: {type: object, description: "Override DefaultArguments"}
+        AllocatedCapacity: {type: integer}
+        Timeout: {type: integer}
+        MaxCapacity: {type: float}
+        NumberOfWorkers: {type: integer}
+        WorkerType: {type: string}
+      returns: ["JobRunId"]
+
+    get_job_run:
+      description: "Get status and details of a job run"
+      parameters:
+        JobName: {type: string, required: true}
+        RunId: {type: string, required: true}
+      returns: ["JobRun.JobRunState", "JobRun.ErrorMessage", "JobRun.StartedOn", "JobRun.CompletedOn", "JobRun.ExecutionTime"]
+
+    get_job_runs:
+      description: "List all runs for a job"
+      parameters:
+        JobName: {type: string, required: true}
+        MaxResults: {type: integer}
+      returns: ["JobRuns[].JobRunId", "JobRuns[].JobRunState", "JobRuns[].ErrorMessage", "JobRuns[].StartedOn"]
+
+    get_job:
+      description: "Get job definition"
+      parameters:
+        JobName: {type: string, required: true}
+      returns: ["Job.Command.ScriptLocation", "Job.DefaultArguments", "Job.Role", "Job.MaxCapacity", "Job.NumberOfWorkers", "Job.WorkerType", "Job.GlueVersion"]
+
+    update_job:
+      description: "Update job definition"
+      parameters:
+        JobName: {type: string, required: true}
+        JobUpdate: {type: object, required: true, description: "Same structure as CreateJob minus Name"}
+      returns: ["JobName"]
+
+    batch_stop_job_run:
+      description: "Stop one or more job runs"
+      parameters:
+        JobName: {type: string, required: true}
+        JobRunIds: {type: list, required: true}
+
+  crawler_operations:
+    create_crawler:
+      description: "Create a crawler to catalog data"
+      parameters:
+        Name: {type: string, required: true}
+        Role: {type: string, required: true}
+        DatabaseName: {type: string, required: true}
+        Targets: {type: object, required: true, description: "{'S3Targets': [{'Path': 's3://bucket/prefix'}]}"}
+        Schedule: {type: string, description: "Cron expression"}
+        Classifiers: {type: list}
+        SchemaChangePolicy: {type: object}
+        RecrawlPolicy: {type: object}
+        Tags: {type: object}
+
+    start_crawler:
+      description: "Start a crawler run"
+      parameters:
+        Name: {type: string, required: true}
+
+    stop_crawler:
+      description: "Stop a running crawler"
+      parameters:
+        Name: {type: string, required: true}
+
+    get_crawler:
+      description: "Get crawler details"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["Crawler.Role", "Crawler.Targets", "Crawler.DatabaseName", "Crawler.State", "Crawler.LastCrawl", "Crawler.Schedule"]
+
+    update_crawler:
+      description: "Update crawler configuration"
+      parameters:
+        Name: {type: string, required: true}
+        Role: {type: string}
+        DatabaseName: {type: string}
+        Targets: {type: object}
+        Schedule: {type: string}
+
+  catalog_operations:
+    create_database:
+      description: "Create a database in the Glue Data Catalog"
+      parameters:
+        DatabaseInput: {type: object, required: true, description: "{'Name': '...', 'Description': '...', 'LocationUri': '...'}"}
+        CatalogId: {type: string}
+
+    create_table:
+      description: "Create a table in a catalog database"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableInput: {type: object, required: true, description: "{'Name': '...', 'StorageDescriptor': {...}, 'PartitionKeys': [...], 'TableType': 'EXTERNAL_TABLE'}"}
+        CatalogId: {type: string}
+
+    update_table:
+      description: "Update a table definition"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableInput: {type: object, required: true}
+
+    get_table:
+      description: "Get table details"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        Name: {type: string, required: true}
+      returns: ["Table.StorageDescriptor", "Table.PartitionKeys", "Table.TableType", "Table.Parameters", "Table.CreateTime"]
+
+    get_tables:
+      description: "List tables in a database"
+      parameters:
+        DatabaseName: {type: string, required: true}
+      returns: ["TableList[].Name", "TableList[].StorageDescriptor.Location", "TableList[].PartitionKeys"]
+
+    create_partition:
+      description: "Create a partition in a table"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionInput: {type: object, required: true}
+
+    batch_create_partition:
+      description: "Create multiple partitions"
+      parameters:
+        DatabaseName: {type: string, required: true}
+        TableName: {type: string, required: true}
+        PartitionInputList: {type: list, required: true}
+
+  connection_operations:
+    create_connection:
+      description: "Create a connection to an external data store"
+      parameters:
+        ConnectionInput: {type: object, required: true}
+        CatalogId: {type: string}
+
+    get_connection:
+      description: "Get connection details"
+      parameters:
+        Name: {type: string, required: true}
+      returns: ["Connection.ConnectionProperties", "Connection.ConnectionType", "Connection.PhysicalConnectionRequirements"]
+
+  trigger_operations:
+    create_trigger:
+      description: "Create a trigger for job/crawler scheduling"
+      parameters:
+        Name: {type: string, required: true}
+        Type: {type: string, required: true, description: "SCHEDULED, CONDITIONAL, ON_DEMAND, EVENT"}
+        Actions: {type: list, required: true}
+        Schedule: {type: string}
+        Predicate: {type: object}
+
+    start_trigger:
+      description: "Activate a trigger"
+      parameters:
+        Name: {type: string, required: true}
+
+  workflow_operations:
+    create_workflow:
+      description: "Create a workflow"
+      parameters:
+        Name: {type: string, required: true}
+        DefaultRunProperties: {type: object}
+        MaxConcurrentRuns: {type: integer}
+
+    start_workflow_run:
+      description: "Start a workflow execution"
+      parameters:
+        Name: {type: string, required: true}
+        RunProperties: {type: object}
+      returns: ["RunId"]
+
+    get_workflow_run:
+      description: "Get workflow run status"
+      parameters:
+        Name: {type: string, required: true}
+        RunId: {type: string, required: true}
+      returns: ["Run.Status", "Run.Statistics", "Run.Graph"]
+
+# -- 17. Runtime Diagnostics --------------------------------------------------
+runtime_diagnostics:
+  - pattern: "AccessDenied.*s3|s3.*AccessDenied"
+    category: PERMISSION
+    cause: "Glue crawler/job cannot access S3 — missing s3:GetObject or s3:ListBucket on the target bucket"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={s3 permissions})"
+
+  - pattern: "EntityNotFoundException|database.*not found|table.*not found"
+    category: RESOURCE_NOT_FOUND
+    cause: "Glue Data Catalog database or table not found — crawler may not have run yet"
+    fix_type: trigger_crawler
+    resolution: "glue_client.start_crawler(Name=resource_name)"
+
+  - pattern: "CrawlerRunningException"
+    category: ALREADY_RUNNING
+    cause: "Crawler is already running — cannot start a concurrent run"
+    fix_type: wait_retry
+    resolution: "Poll glue.get_crawler(Name=name)['Crawler']['State'] until 'READY', then retry"
+
+  - pattern: "ConcurrentRunsExceededException"
+    category: THROTTLE
+    cause: "Too many concurrent job runs — exceeds account limit"
+    fix_type: wait_retry
+    resolution: "Wait for existing runs to complete. Check glue.get_job_runs() for RUNNING jobs."
+
+  - pattern: "InvalidInputException.*script"
+    category: VALIDATION
+    cause: "Job script location is invalid or inaccessible"
+    fix_type: manual
+    resolution: "Verify ScriptLocation S3 path exists and Glue role has s3:GetObject permission"
+
+  - pattern: "InternalServiceException"
+    category: AWS_INTERNAL
+    cause: "Glue internal service error"
+    fix_type: retry
+    resolution: "Retry with exponential backoff. If persistent, check AWS Health Dashboard."
+
+  - pattern: "AlreadyExistsException"
+    category: ALREADY_EXISTS
+    cause: "Resource (job, crawler, database, table) already exists"
+    fix_type: none
+    resolution: "Resource already created. Use update_* API to modify."
+
+  - pattern: "GlueEncryptionException|KMS.*key"
+    category: ENCRYPTION
+    cause: "KMS key issue — missing permissions or key disabled"
+    fix_type: update_iam
+    resolution: "Add kms:Decrypt and kms:GenerateDataKey* to Glue role for the KMS key"
+
+  - pattern: "Connection.*failed|JDBC.*error"
+    category: NETWORK
+    cause: "Cannot connect to target database — network or credentials issue"
+    fix_type: manual
+    resolution: "Check VPC/subnet/security group config. Verify JDBC URL, username, password in connection."
+
+  - pattern: "OutOfMemoryError|Container killed by YARN"
+    category: RESOURCE_LIMIT
+    cause: "Glue job ran out of memory"
+    fix_type: scale_up
+    resolution: "Increase worker type (G.1X -> G.2X) or number of workers"
+
+# -- 18. Tags ----------------------------------------------------------------
+tags:
+  max_per_resource: 50
+  key_max_length: 128
+  value_max_length: 256
+  terraform_block: "tags"
+  supported_resources:
+    - "aws_glue_crawler"
+    - "aws_glue_job"
+    - "aws_glue_trigger"
+    - "aws_glue_workflow"
+    - "aws_glue_connection"
+    - "aws_glue_catalog_database"
+    - "aws_glue_dev_endpoint"
+    - "aws_glue_security_configuration"
+  note: "Tags are mandatory per engineering standards. Every taggable resource uses _tags_block(bp)."
+
+# -- 19. Code Update (Developer Agent) ----------------------------------------
+code_update:
+  method: s3_script
+  boto3_client: glue
+  description: >
+    Glue crawler config via glue.update_crawler(). ETL job scripts are stored in S3
+    at the ScriptLocation path; update via s3.put_object(). Get script path via
+    glue.get_job(JobName=name)['Job']['Command']['ScriptLocation'].
+  config_update:
+    client: glue
+    operation: update_crawler
+    id_param: Name
+    id_value: "{resource_name}"
+  code_update_steps:
+    - "glue_client = boto3.client('glue', region_name=region)"
+    - "job = glue_client.get_job(JobName=resource_name)['Job']"
+    - "script_loc = job['Command']['ScriptLocation']  # s3://bucket/key"
+    - "bucket, key = script_loc[5:].split('/', 1)"
+    - "script = s3.get_object(Bucket=bucket, Key=key)['Body'].read().decode()"
+    - "modified = script.replace('<old>', '<new>')"
+    - "s3.put_object(Bucket=bucket, Key=key, Body=modified.encode())"
+  discovery_ops:
+    - op: get_crawler
+      id_param: Name
+      returns: ["Crawler.Role", "Crawler.Targets", "Crawler.DatabaseName", "Crawler.State", "Crawler.LastCrawl"]
+    - op: get_job
+      id_param: JobName
+      returns: ["Job.Command.ScriptLocation", "Job.DefaultArguments", "Job.Role", "Job.MaxCapacity"]
+    - op: get_job_runs
+      id_param: JobName
+      returns: ["JobRuns[].JobRunId", "JobRuns[].JobRunState", "JobRuns[].ErrorMessage"]
+
+invocation:
+  description: "Glue jobs started via start_job_run(JobName=name). Crawlers via start_crawler(Name=name)."
+  caller_env_vars:
+    - pattern: "{SELF_UPPER}_CRAWLER_NAME"
+      ref: "aws_glue_crawler.{self_label}.name"
+      boto3_param: "Name (for start_crawler) or JobName (for start_job_run)"
+      description: "Glue crawler/job name"
+  caller_iam:
+    - "glue:StartJobRun"
+    - "glue:GetJobRun"
+    - "glue:StartCrawler"
+    - "glue:GetCrawler"
+  passrole_required: false
+
+# Pipeline monitoring (log_aggregator.py)
+pipeline_monitoring:
+  method: "cloudwatch_logs"
+  log_group_pattern: "/aws-glue/jobs/{resource_name}"
+  terraform_log_group: "aws_cloudwatch_log_group"
+  log_aggregator_config:
+    service_to_tf: "aws_glue_crawler"
+    tf_name_attr: "name"

@@ -1,0 +1,18 @@
+templates:
+  free_tier:
+    display_name: "Free Tier (t2.micro)"
+    description: "t2.micro, 750 hours/month free for 12 months"
+    config:
+      instance_type: "t2.micro"
+
+  general_purpose:
+    display_name: "General Purpose (m5.large)"
+    description: "m5.large for balanced compute, memory, and networking"
+    config:
+      instance_type: "m5.large"
+
+  compute_optimized:
+    display_name: "Compute Optimized (c5.large)"
+    description: "c5.large for compute-intensive workloads"
+    config:
+      instance_type: "c5.large"

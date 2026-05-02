@@ -1,0 +1,131 @@
+service_type: ec2
+is_principal: true
+terraform_resource: aws_instance
+description: "EC2 instance with IAM instance profile and security group"
+
+defaults:
+  instance_type: "t3.micro"
+  ami_filter: "amzn2-ami-hvm-*-x86_64-gp2"
+
+iam:
+  always:
+    - "logs:CreateLogGroup"
+    - "logs:CreateLogStream"
+    - "logs:PutLogEvents"
+  as_target_of:
+    eventbridge:
+      - "logs:CreateLogGroup"
+    cloudwatch:
+      - "logs:CreateLogGroup"
+  as_source_to:
+    s3:
+      - "s3:GetObject"
+      - "s3:PutObject"
+      - "s3:ListBucket"
+      - "s3:DeleteObject"
+    sqs:
+      - "sqs:SendMessage"
+      - "sqs:ReceiveMessage"
+      - "sqs:DeleteMessage"
+      - "sqs:GetQueueAttributes"
+    dynamodb:
+      - "dynamodb:PutItem"
+      - "dynamodb:GetItem"
+      - "dynamodb:UpdateItem"
+      - "dynamodb:Query"
+      - "dynamodb:Scan"
+      - "dynamodb:DeleteItem"
+    sns:
+      - "sns:Publish"
+    kinesis_streams:
+      - "kinesis:PutRecord"
+      - "kinesis:PutRecords"
+    kinesis_firehose:
+      - "firehose:PutRecord"
+      - "firehose:PutRecordBatch"
+    redshift:
+      - "redshift-data:ExecuteStatement"
+      - "redshift-data:GetStatementResult"
+      - "redshift-data:DescribeStatement"
+      - "redshift:GetClusterCredentials"
+    aurora:
+      - "rds-data:ExecuteStatement"
+      - "rds-data:BatchExecuteStatement"
+      - "secretsmanager:GetSecretValue"
+    lambda:
+      - "lambda:InvokeFunction"
+    stepfunctions:
+      - "states:StartExecution"
+      - "states:DescribeExecution"
+    sagemaker:
+      - "sagemaker:InvokeEndpoint"
+    athena:
+      - "athena:StartQueryExecution"
+      - "athena:GetQueryExecution"
+      - "athena:GetQueryResults"
+    msk:
+      - "kafka:DescribeCluster"
+      - "kafka:GetBootstrapBrokers"
+
+env_vars:
+  as_source_to:
+    s3:
+      pattern: "{PEER_UPPER}_BUCKET"
+      ref: "aws_s3_bucket.{peer_label}.id"
+    sqs:
+      pattern: "{PEER_UPPER}_QUEUE_URL"
+      ref: "aws_sqs_queue.{peer_label}.url"
+    sns:
+      pattern: "{PEER_UPPER}_TOPIC_ARN"
+      ref: "aws_sns_topic.{peer_label}.arn"
+    dynamodb:
+      pattern: "{PEER_UPPER}_TABLE"
+      ref: "aws_dynamodb_table.{peer_label}.name"
+    kinesis_streams:
+      pattern: "{PEER_UPPER}_STREAM_NAME"
+      ref: "aws_kinesis_stream.{peer_label}.name"
+    lambda:
+      pattern: "{PEER_UPPER}_FUNCTION_ARN"
+      ref: "aws_lambda_function.{peer_label}.arn"
+
+vpc_triggers:
+  - aurora
+  - redshift
+  - msk
+
+# EC2 fragment creates:
+#   1. data.aws_ami (latest Amazon Linux 2)
+#   2. aws_iam_role (principal = ec2.amazonaws.com)
+#   3. aws_iam_role_policy
+#   4. aws_iam_instance_profile
+#   5. aws_security_group (egress-only, no ingress)
+#   6. aws_instance
+
+code_update:
+  method: api_config
+  boto3_client: ssm
+  description: >
+    Run commands on EC2 via SSM send_command() (instance must have SSM agent + AmazonSSMManagedInstanceCore policy).
+    For AMI/config changes: stop → modify_instance_attribute → start.
+    Find instance ID via describe_instances() filtering by Pipeline tag.
+  config_update:
+    client: ssm
+    operation: send_command
+    note: "DocumentName='AWS-RunShellScript', Parameters={'commands': ['your-command']}"
+  code_update_steps:
+    - "ec2 = boto3.client('ec2', region_name=region)"
+    - "ssm = boto3.client('ssm', region_name=region)"
+    - "resp = ec2.describe_instances(Filters=[{'Name':'tag:Pipeline','Values':[pipeline_name]},{'Name':'instance-state-name','Values':['running']}])"
+    - "instance_id = resp['Reservations'][0]['Instances'][0]['InstanceId']"
+    - "cmd = ssm.send_command(InstanceIds=[instance_id], DocumentName='AWS-RunShellScript', Parameters={'commands': ['echo hello']})"
+    - "Poll ssm.get_command_invocation(CommandId=cmd['Command']['CommandId'], InstanceId=instance_id)['Status'] until 'Success'"
+  discovery_ops:
+    - op: describe_instances
+      filter_by: "tag:Pipeline=pipeline_name AND instance-state-name=running"
+      returns: ["InstanceId", "PublicIpAddress", "PrivateIpAddress", "State.Name", "IamInstanceProfile.Arn"]
+runtime_diagnostics:
+  - pattern: "AccessDenied|not authorized"
+    category: PERMISSION
+    cause: "EC2 instance profile is missing required IAM permissions"
+    fix_type: update_iam
+    resolution: "iam.put_role_policy(RoleName=resource_name+'-role', PolicyName='inspector-fix', PolicyDocument={...})"

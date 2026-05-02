@@ -1,0 +1,174 @@
+# Pipeline matching the sample architecture diagram:
+#
+# Stage 1 (Raw → Staging):
+#   Raw data → S3 raw bucket → SQS → Lambda → Step Functions workflow
+#   Workflow: update DynamoDB catalogue → invoke Lambda → write to S3 staging → update catalogue
+#
+# Stage 2 (Staging → Analytics):
+#   S3 staging → CloudWatch timer → SQS → Lambda → Step Functions workflow
+#   Workflow: Glue job → Glue crawler → update DynamoDB catalogue → data quality Lambda → S3 analytics
+#
+pipeline_name: data_processing_pipeline
+business_unit: engineering
+cost_center: cc001
+region: us-east-1
+
+services:
+  - name: raw_data_bucket
+    type: s3
+    config:
+      purpose: receives raw data files
+
+  - name: raw_ingest_queue
+    type: sqs
+    config:
+      purpose: buffers raw data events for processing
+
+  - name: ingest_lambda
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 256
+      timeout: 60
+      purpose: reads raw data and starts staging workflow
+
+  - name: raw_to_staging_workflow
+    type: stepfunctions
+    config:
+      type: STANDARD
+      purpose: orchestrates raw-to-staging data movement
+
+  - name: catalogue_table
+    type: dynamodb
+    config:
+      hash_key: record_id
+      purpose: comprehensive data catalogue
+
+  - name: staging_lambda
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 512
+      timeout: 120
+      purpose: transforms and writes data to staging bucket
+
+  - name: staging_bucket
+    type: s3
+    config:
+      purpose: holds staged/transformed data
+
+  - name: staging_scheduler
+    type: cloudwatch
+    config:
+      schedule_expression: "rate(5 minutes)"
+      purpose: triggers analytics processing every 5 minutes
+
+  - name: analytics_queue
+    type: sqs
+    config:
+      purpose: buffers staging events for analytics processing
+
+  - name: analytics_trigger_lambda
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 256
+      timeout: 60
+      purpose: starts analytics workflow from queue events
+
+  - name: staging_to_analytics_workflow
+    type: stepfunctions
+    config:
+      type: STANDARD
+      purpose: orchestrates staging-to-analytics ETL
+
+  - name: analytics_catalogue_table
+    type: dynamodb
+    config:
+      hash_key: dataset_id
+      purpose: analytics data catalogue
+
+  - name: glue_etl_job
+    type: glue
+    config:
+      purpose: runs ETL transformations on staged data
+
+  - name: data_quality_lambda
+    type: lambda
+    config:
+      runtime: python3.12
+      handler: index.handler
+      memory_size: 256
+      timeout: 120
+      purpose: validates data quality after ETL
+
+  - name: analytics_bucket
+    type: s3
+    config:
+      purpose: stores final analytics-ready data
+
+integrations:
+  # Stage 1: Raw → Staging
+  - source: raw_data_bucket
+    target: raw_ingest_queue
+    event: "s3:ObjectCreated:*"
+
+  - source: raw_ingest_queue
+    target: ingest_lambda
+    event: sqs_trigger
+
+  - source: ingest_lambda
+    target: raw_to_staging_workflow
+    event: start_execution
+
+  - source: raw_to_staging_workflow
+    target: catalogue_table
+    event: put_item
+
+  - source: raw_to_staging_workflow
+    target: staging_lambda
+    event: invoke
+
+  - source: staging_lambda
+    target: staging_bucket
+    event: put_object
+
+  - source: raw_to_staging_workflow
+    target: catalogue_table
+    event: put_item
+
+  # Stage 2: Staging → Analytics
+  - source: staging_scheduler
+    target: analytics_queue
+    event: scheduled_event
+
+  - source: analytics_queue
+    target: analytics_trigger_lambda
+    event: sqs_trigger
+
+  - source: analytics_trigger_lambda
+    target: staging_to_analytics_workflow
+    event: start_execution
+
+  - source: staging_to_analytics_workflow
+    target: glue_etl_job
+    event: start_job
+
+  - source: glue_etl_job
+    target: analytics_bucket
+    event: write
+
+  - source: staging_to_analytics_workflow
+    target: analytics_catalogue_table
+    event: put_item
+
+  - source: staging_to_analytics_workflow
+    target: data_quality_lambda
+    event: invoke
+
+  - source: data_quality_lambda
+    target: analytics_catalogue_table
+    event: write

@@ -1,0 +1,13 @@
+templates:
+  provisioned:
+    display_name: "Provisioned Mode"
+    description: "Fixed shard count for predictable throughput"
+    config:
+      stream_mode: "PROVISIONED"
+      shard_count: 2
+
+  extended_retention:
+    display_name: "Extended Retention"
+    description: "7-day data retention for replay scenarios"
+    config:
+      retention_period: 168

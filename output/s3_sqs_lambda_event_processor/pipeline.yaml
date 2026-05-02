@@ -1,0 +1,35 @@
+business_unit: engineering
+cost_center: cc001
+integrations:
+- event: s3:ObjectCreated:*
+  prefix: null
+  source: source_bucket
+  suffix: null
+  target: message_queue
+- event: sqs_trigger
+  prefix: null
+  source: message_queue
+  suffix: null
+  target: message_processor
+pipeline_name: s3_sqs_lambda_event_processor
+region: us-east-1
+services:
+- config:
+    purpose: stores objects that trigger event notifications
+    versioning_status: Enabled
+  name: source_bucket
+  type: s3
+- config:
+    message_retention_seconds: 3600
+    purpose: message queue for event notifications from S3
+    visibility_timeout_seconds: 5
+  name: message_queue
+  type: sqs
+- config:
+    handler: index.handler
+    memory_size: 1024
+    purpose: processes messages from SQS queue
+    runtime: python3.12
+    timeout: 300
+  name: message_processor
+  type: lambda
