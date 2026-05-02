@@ -22,9 +22,15 @@ COPY . .
 # Runtime directories
 RUN mkdir -p output input_architecture_dgm input_dgm input_dgm_archive
 
-# Terraform plugin cache
+# Terraform plugin cache — pre-warm at build time so terraform init
+# copies from local cache (~2s) instead of downloading (~2min).
+# This prevents HTTP timeout on Render/similar platforms.
 ENV TF_PLUGIN_CACHE_DIR=/tmp/.terraform_cache
-RUN mkdir -p /tmp/.terraform_cache
+RUN mkdir -p /tmp/.terraform_cache /tmp/_tf_warmup && \
+    printf 'terraform {\n  required_providers {\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    archive = { source = "hashicorp/archive", version = "~> 2.0" }\n    time = { source = "hashicorp/time", version = "~> 0.9" }\n  }\n}\n' \
+      > /tmp/_tf_warmup/main.tf && \
+    cd /tmp/_tf_warmup && terraform init -backend=false -input=false && \
+    rm -rf /tmp/_tf_warmup
 
 EXPOSE 8080
 

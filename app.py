@@ -268,6 +268,20 @@ async def _execute_job(job_id: str, diagram_path: Path) -> None:
             except Exception:
                 pass
 
+        # Pre-run terraform init so the /deploy/plan endpoint doesn't block
+        # downloading providers (which times out on Render's 30s proxy).
+        if result.main_tf_path:
+            try:
+                from tools.terraform_cli import init_for_deploy
+                _qlog("INFO", "Pre-initialising Terraform providers...")
+                init_res = await asyncio.to_thread(init_for_deploy, out_dir)
+                if init_res.ok:
+                    _qlog("INFO", "Terraform providers ready.")
+                else:
+                    _qlog("WARNING", f"Terraform init warning: {init_res.stderr[:200]}")
+            except Exception as exc:
+                _qlog("WARNING", f"Terraform pre-init skipped: {exc}")
+
         hard_errors = [e for e in result.lint_errors if e.severity == "error"]
         warnings    = [e for e in result.lint_errors if e.severity == "warning"]
         exit_code   = 1 if hard_errors else 0
@@ -687,6 +701,20 @@ async def _execute_job_from_request(job_id: str, request: PipelineRequest) -> No
                 (out_dir / "pipeline.yaml").write_text(yaml_text)
             except Exception:
                 pass
+
+        # Pre-run terraform init so the /deploy/plan endpoint doesn't block
+        # downloading providers (which times out on Render's 30s proxy).
+        if result.main_tf_path:
+            try:
+                from tools.terraform_cli import init_for_deploy
+                _qlog("INFO", "Pre-initialising Terraform providers...")
+                init_res = await asyncio.to_thread(init_for_deploy, out_dir)
+                if init_res.ok:
+                    _qlog("INFO", "Terraform providers ready.")
+                else:
+                    _qlog("WARNING", f"Terraform init warning: {init_res.stderr[:200]}")
+            except Exception as exc:
+                _qlog("WARNING", f"Terraform pre-init skipped: {exc}")
 
         hard_errors = [e for e in result.lint_errors if e.severity == "error"]
         warnings    = [e for e in result.lint_errors if e.severity == "warning"]
