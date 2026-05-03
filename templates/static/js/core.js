@@ -40,6 +40,7 @@ const dropZone=$('dropZone'),fileInput=$('fileInput'),
       svcEmpty=$('svcEmpty'),svcList=$('svcList'),
       wsSplit=$('wsSplit'),dragH=$('dragH'),consoleEl=$('console');
 
+// matrixBtn aliases dlArtifactsBtn (single download button for plan + matrix)
 const matrixBtn=$('dlArtifactsBtn');
 const monitorBtn=$('monitorBtn');
 const autofixToggle=$('autofixToggle'), autofixCheck=$('autofixCheck');

@@ -105,9 +105,8 @@ function _shimTfRow(el) {
 const planBtn       = $('planBtn');
 const applyBtn      = $('applyBtn');
 const dlArtifactsBtn = $('dlArtifactsBtn');
-// Back-compat aliases so existing code referencing dlPlanBtn/matrixBtn still works
+// Back-compat aliases so existing code referencing dlPlanBtn still works
 const dlPlanBtn = dlArtifactsBtn;
-const matrixBtn = dlArtifactsBtn;
 
 // Apply shim to all tf-row elements so .disabled/.textContent work
 [planBtn, applyBtn, dlArtifactsBtn,
