@@ -34,4 +34,5 @@ RUN mkdir -p /tmp/.terraform_cache /tmp/_tf_warmup && \
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*", "--ws-ping-interval", "5", "--ws-ping-timeout", "10"]
+# Use Render's PORT env var (falls back to 8080 for local dev)
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips '*' --ws-ping-interval 5 --ws-ping-timeout 10"]
