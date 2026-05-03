@@ -510,15 +510,12 @@
     }
     .zbtn:hover{color:var(--text);border-color:var(--border-strong);background:var(--surface3)}
     .pb-topbar-btn{
-      display:flex;align-items:center;gap:5px;
-      padding:3px 10px;border-radius:var(--radius-sm);
-      border:1px solid var(--accent);background:transparent;
-      color:var(--accent);font-size:10px;font-weight:600;
-      cursor:pointer;font-family:var(--font);letter-spacing:.03em;
-      transition:all .15s;white-space:nowrap;
+      display:flex;align-items:center;justify-content:center;
+      padding:0;border:none;background:transparent;
+      cursor:pointer;transition:all .15s;border-radius:50%;
     }
-    .pb-topbar-btn:hover{background:var(--accent);color:#fff}
-    .pb-topbar-btn:hover img{filter:brightness(0) invert(1)}
+    .pb-topbar-btn img{width:24px;height:24px;border-radius:50%}
+    .pb-topbar-btn:hover{transform:scale(1.15);filter:drop-shadow(0 0 4px var(--accent))}
 
     /* The render area — fills 100% of panel */
     .dgm-stage{flex:1;position:relative;overflow:hidden;min-height:0;
