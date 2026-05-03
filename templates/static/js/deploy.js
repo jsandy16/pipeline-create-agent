@@ -362,24 +362,27 @@ destroyCancelBtn.addEventListener('click', closeDestroyModal);
 destroyOverlay.addEventListener('click', e=>{ if(e.target===destroyOverlay) closeDestroyModal(); });
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && destroyOverlay.classList.contains('show')) closeDestroyModal(); });
 
-// ── Download Plan ────────────────────────────────────────────────────────────
-dlPlanBtn.addEventListener('click', ()=>{
-  if(!_cachedPlanText || dlPlanBtn.disabled) return;
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([_cachedPlanText], {type:'text/plain'}));
-  const pipelineRow = $('rcRows').querySelector('.v');
-  const pipeline = (pipelineRow?.textContent)||'pipeline';
-  a.download = pipeline+'_tfplan.txt';
-  a.click(); URL.revokeObjectURL(a.href);
-});
-
-// ── Download Matrix (CSV from backend) ──────────────────────────────────────
-matrixBtn.addEventListener('click', ()=>{
-  if(!_deployJobId || matrixBtn.disabled) return;
-  const a = document.createElement('a');
-  a.href = `/matrix/${_deployJobId}`;
-  a.download = '';
-  a.click();
+// ── Download Artifacts (plan + matrix) ───────────────────────────────────────
+dlArtifactsBtn.addEventListener('click', ()=>{
+  if(dlArtifactsBtn.disabled) return;
+  // Download plan text
+  if(_cachedPlanText){
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([_cachedPlanText], {type:'text/plain'}));
+    const pipelineRow = $('rcRows').querySelector('.v');
+    const pipeline = (pipelineRow?.textContent)||'pipeline';
+    a.download = pipeline+'_tfplan.txt';
+    a.click(); URL.revokeObjectURL(a.href);
+  }
+  // Download matrix CSV
+  if(_deployJobId){
+    setTimeout(()=>{
+      const a2 = document.createElement('a');
+      a2.href = `/matrix/${_deployJobId}`;
+      a2.download = '';
+      a2.click();
+    }, 300);
+  }
 });
 
 // Reset all deploy/download state when a new run starts
@@ -388,8 +391,7 @@ runBtn.addEventListener('click', ()=>{
   if(_deployWs){ try{_deployWs.close()}catch(_){} _deployWs=null; }
   planBtn.disabled=true; planBtn.classList.remove('enabled'); planBtn.textContent='📋\u00a0 Deploy to AWS: Plan';
   applyBtn.disabled=true; applyBtn.classList.remove('enabled'); applyBtn.textContent='🚀\u00a0 Deploy to AWS: Deploy';
-  dlPlanBtn.disabled=true; dlPlanBtn.classList.remove('enabled');
-  matrixBtn.disabled=true; matrixBtn.classList.remove('enabled');
+  dlArtifactsBtn.disabled=true; dlArtifactsBtn.classList.remove('enabled');
   _destroyJobId=null; destroyBtn.disabled=true; destroyBtn.classList.remove('enabled');
   destroyBtn.textContent='🗑️\u00a0 Destroy Resources';
   stopRunPreview(); monitorBtn._monitorJobId=null; monitorBtn._monitorPipelineName=null; resetMonitorBtn();

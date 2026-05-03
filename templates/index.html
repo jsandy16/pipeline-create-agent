@@ -76,10 +76,18 @@
       </button>
     </div>
 
-    <!-- TERRAFORM / AWS SECTION (collapsible) -->
+    <!-- Pipeline Builder Agent -->
+    <div class="admin-sec" style="border:none;margin:0;padding:0">
+      <div class="admin-row enabled" id="pipeBuilderBtn" style="margin:4px 0">
+        <img class="admin-row-icon-img" src="/static/icons/icon-robot.png" alt="">
+        <span class="admin-row-label" style="color:var(--accent)">Pipeline Builder Agent</span>
+      </div>
+    </div>
+
+    <!-- DEPLOYMENT SECTION (collapsible) -->
     <div class="admin-sec" id="tfSec">
       <div class="admin-sec-hdr" id="tfSecHdr">
-        <span class="admin-sec-title">Terraform / AWS</span>
+        <span class="admin-sec-title">Deployment</span>
         <span class="admin-chevron" id="tfChevron">&#9654;</span>
       </div>
       <div class="admin-menu-rows" id="tfMenuRows">
@@ -112,13 +120,9 @@
           </div>
         </div>
 
-        <div class="admin-row tf-row disabled" id="dlPlanBtn">
+        <div class="admin-row tf-row disabled" id="dlArtifactsBtn">
           <img class="admin-row-icon-img" src="/static/icons/icon-download.png" alt="">
-          <span class="admin-row-label">Download Plan</span>
-        </div>
-        <div class="admin-row tf-row disabled" id="matrixBtn">
-          <img class="admin-row-icon-img" src="/static/icons/icon-download.png" alt="">
-          <span class="admin-row-label">Download Matrix</span>
+          <span class="admin-row-label">Download Artifacts</span>
         </div>
         <div class="admin-row tf-row disabled" id="destroyBtn">
           <span class="admin-row-icon">&#128465;&#65039;</span>
@@ -132,14 +136,6 @@
           <input type="checkbox" id="autofixCheck">
           <span class="autofix-label">Auto-fix errors (AI Inspector)</span>
         </label>
-      </div>
-    </div>
-
-    <!-- Pipeline Builder Agent (placed after TF/AWS, before Admin) -->
-    <div class="admin-sec" style="border:none;margin:0;padding:0">
-      <div class="admin-row enabled" id="pipeBuilderBtn" style="margin:4px 0">
-        <img class="admin-row-icon-img" src="/static/icons/icon-robot.png" alt="">
-        <span class="admin-row-label" style="color:var(--accent)">Pipeline Builder Agent</span>
       </div>
     </div>
 

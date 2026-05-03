@@ -102,13 +102,16 @@ function _shimTfRow(el) {
 // ── DEPLOY TO AWS (plan + apply — all output goes to main console) ────────────
 // ══════════════════════════════════════════════════════════════════════════════
 
-const planBtn   = $('planBtn');
-const applyBtn  = $('applyBtn');
-const dlPlanBtn = $('dlPlanBtn');
+const planBtn       = $('planBtn');
+const applyBtn      = $('applyBtn');
+const dlArtifactsBtn = $('dlArtifactsBtn');
+// Back-compat aliases so existing code referencing dlPlanBtn/matrixBtn still works
+const dlPlanBtn = dlArtifactsBtn;
+const matrixBtn = dlArtifactsBtn;
 
 // Apply shim to all tf-row elements so .disabled/.textContent work
-[planBtn, applyBtn, dlPlanBtn,
- $('matrixBtn'), $('destroyBtn'), $('monitorBtn'), $('cancelBtn')
+[planBtn, applyBtn, dlArtifactsBtn,
+ $('destroyBtn'), $('monitorBtn'), $('cancelBtn')
 ].forEach(_shimTfRow);
 
 let _deployJobId  = null;

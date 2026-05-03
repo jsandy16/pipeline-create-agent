@@ -40,7 +40,7 @@ const dropZone=$('dropZone'),fileInput=$('fileInput'),
       svcEmpty=$('svcEmpty'),svcList=$('svcList'),
       wsSplit=$('wsSplit'),dragH=$('dragH'),consoleEl=$('console');
 
-const matrixBtn=$('matrixBtn');
+const matrixBtn=$('dlArtifactsBtn');
 const monitorBtn=$('monitorBtn');
 const autofixToggle=$('autofixToggle'), autofixCheck=$('autofixCheck');
 const tabBuild=$('tabBuild'),tabRun=$('tabRun'),runDot=$('runDot'),runCount=$('runCount'),
