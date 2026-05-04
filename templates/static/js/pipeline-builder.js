@@ -52,34 +52,35 @@ dcHeader.addEventListener('click', e => {
   dcToggleCollapse();
 });
 
-// ── Developer Agent mode (double-click a service node) ───────────────────────
+// ── Developer Agent mode (Ctrl+Right-click a service node) ───────────────────
+// Uses the designer chat window but routes messages to /developer-agent/chat
+// with full service context, rendering code/deploy responses inline.
 let _devAgentService = null;
-let _blinkingNode = null; // array of blinking elements
+let _devAgentCtx = null;    // service context for /developer-agent/chat
+let _devAgentChatId = null;  // chat session id
+let _blinkingNode = null;    // array of blinking elements
 
-function enterDevAgentMode(serviceName) {
-  // Remove any existing banner
+async function enterDevAgentMode(serviceName) {
   exitDevAgentMode();
   _devAgentService = serviceName;
 
-  // Expand designer chat if collapsed
   if (_dcCollapsed) dcExpand();
 
-  // Add banner to designer chat
+  // Add banner inside the chat messages area (top of dcMessages)
   const banner = document.createElement('div');
   banner.className = 'dev-agent-banner';
   banner.id = 'devAgentBanner';
   banner.innerHTML = `<span>Developer Agent — <b>${serviceName}</b></span>` +
     `<button class="dab-close" title="Exit Developer Agent mode">&times;</button>`;
   banner.querySelector('.dab-close').addEventListener('click', exitDevAgentMode);
-  const dcBody = designerChat.querySelector('.dc-body');
-  dcBody.insertBefore(banner, dcBody.firstChild);
+  const dcMsgs = $('dcMessages');
+  dcMsgs.insertBefore(banner, dcMsgs.firstChild);
 
-  // Blink the node on both dagre diagram and architect canvas
+  // Blink nodes on both panels
   _blinkingNode = [];
   const sid = serviceName.replace(/[^a-zA-Z0-9_]/g, '_');
   const dgmNode = document.getElementById('nd_' + sid);
   if (dgmNode) { dgmNode.classList.add('blinking'); _blinkingNode.push(dgmNode); }
-  // Architect canvas nodes use data-nid matching archNodes by name
   if (typeof archNodes !== 'undefined') {
     const archNode = archNodes.find(n => n.name === serviceName);
     if (archNode) {
@@ -88,17 +89,107 @@ function enterDevAgentMode(serviceName) {
     }
   }
 
-  // Pre-fill input with context
-  dcInput.placeholder = `Describe changes for ${serviceName}...`;
+  dcInput.placeholder = `Describe code/config changes for ${serviceName}...`;
   dcInput.focus();
+
+  // Load service context from backend if we have a build job
+  if (_deployJobId) {
+    try {
+      const r = await fetch(`/pipeline/${_deployJobId}/service/${encodeURIComponent(serviceName)}/config`);
+      if (r.ok) {
+        const d = await r.json();
+        const svc = d.service || {};
+        const bp = d.blueprint || {};
+        _devAgentCtx = {
+          service_name: svc.name,
+          service_type: svc.type,
+          config: bp.required_configuration || {},
+          iam_permissions: bp.iam_permissions || [],
+          env_vars: bp.env_vars || {},
+          integrations: bp.integrations || [],
+          job_id: _deployJobId,
+        };
+      }
+    } catch (_) {}
+  }
+  // Fallback context if no build job yet
+  if (!_devAgentCtx) {
+    const svcInfo = (_dcServices || []).find(s => s.name === serviceName);
+    _devAgentCtx = {
+      service_name: serviceName,
+      service_type: svcInfo ? svcInfo.type : 'unknown',
+    };
+  }
 }
 
 function exitDevAgentMode() {
   _devAgentService = null;
+  _devAgentCtx = null;
+  _devAgentChatId = null;
   const banner = document.getElementById('devAgentBanner');
   if (banner) banner.remove();
   if (_blinkingNode) { _blinkingNode.forEach(n => n.classList.remove('blinking')); _blinkingNode = null; }
   dcInput.placeholder = 'Describe your pipeline, or type create @service to add a service...';
+}
+
+// Developer agent message sender — called from dcSendMessage when in dev agent mode
+async function _sendDevAgentViaDesigner(msg) {
+  dcAddMsg('user', escHtml(msg));
+  dcShowThinking();
+
+  try {
+    const r = await fetch('/developer-agent/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        message: msg,
+        chat_id: _devAgentChatId || '',
+        ...(_devAgentCtx || {}),
+      }),
+    });
+    dcHideThinking();
+
+    if (!r.ok) {
+      const d = await r.json();
+      dcAddMsg('agent', `<span style="color:var(--red)">Error: ${escHtml(d.detail || 'Request failed')}</span>`);
+      return;
+    }
+
+    const d = await r.json();
+    _devAgentChatId = d.chat_id;
+
+    // Build response HTML with code blocks + deploy buttons (same as developer agent overlay)
+    let html = '';
+    if (d.explanation) {
+      html += `<div style="margin-bottom:8px">${escHtml(d.explanation)}</div>`;
+    }
+    if (d.operations_used && d.operations_used.length) {
+      html += `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${d.operations_used.map(o =>
+        `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--surface2);color:var(--muted-light)">${o}</span>`
+      ).join('')}</div>`;
+    }
+    if (d.code) {
+      const codeId = 'dac_' + Date.now();
+      const resultId = 'dar_' + Date.now();
+      html += `<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:6px">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 10px;background:var(--surface2);font-size:10px;color:var(--muted)">
+          <span>Python (boto3)</span>
+          <button onclick="copyCode('${codeId}')" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:10px;padding:2px 8px">Copy</button>
+        </div>
+        <pre style="padding:10px;font-size:11px;overflow-x:auto;margin:0;background:var(--bg);font-family:var(--mono);color:var(--text)" id="${codeId}">${escHtml(d.code)}</pre>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--surface2);border-top:1px solid var(--border)">
+          <span style="font-size:10px;color:var(--muted)" id="es_${resultId}">Ready to deploy</span>
+          <button onclick="executeCode('${codeId}','${resultId}',this)" style="padding:4px 12px;border-radius:4px;border:none;background:var(--green);color:#fff;font-size:11px;font-weight:600;cursor:pointer">▶ Deploy</button>
+        </div>
+      </div>
+      <div id="${resultId}"></div>`;
+    }
+    dcAddMsg('agent', html || '<span style="color:var(--muted)">No changes generated.</span>');
+
+  } catch (e) {
+    dcHideThinking();
+    dcAddMsg('agent', `<span style="color:var(--red)">Network error: ${escHtml(e.message)}</span>`);
+  }
 }
 
 // Ctrl + Right-click on diagram SVG nodes → Developer Agent mode
@@ -205,6 +296,19 @@ async function dcSendMessage() {
   const msg = dcInput.value.trim();
   if (!msg || _dcBusy) return;
 
+  // In Developer Agent mode, route to dev agent backend
+  if (_devAgentService) {
+    dcInput.value = '';
+    _dcBusy = true;
+    dcSend.disabled = true;
+    dcStatus.textContent = 'Developer Agent...';
+    await _sendDevAgentViaDesigner(msg);
+    _dcBusy = false;
+    dcSend.disabled = false;
+    dcStatus.textContent = 'Developer Agent — ' + _devAgentService;
+    return;
+  }
+
   // Intercept "create @service" / "add @service" — handle locally
   if (/^(?:create|add)\s+@/i.test(msg)) {
     dcInput.value = '';
@@ -225,14 +329,10 @@ async function dcSendMessage() {
   dcShowThinking();
 
   try {
-    // In Developer Agent mode, prefix with service context
-    const chatMsg = _devAgentService
-      ? `[Service: ${_devAgentService}] ${msg}`
-      : msg;
     const r = await fetch('/pipeline-designer/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ message: chatMsg, chat_id: _dcChatId }),
+      body: JSON.stringify({ message: msg, chat_id: _dcChatId }),
     });
     dcHideThinking();
     const d = await r.json();
