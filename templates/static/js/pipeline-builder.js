@@ -196,7 +196,8 @@ async function _sendDevAgentViaDesigner(msg) {
       </div>
       <div id="${resultId}"></div>`;
     }
-    dcAddMsg('agent', html || '<span style="color:var(--muted)">No changes generated.</span>');
+    const msgEl = dcAddMsg('agent', html || '<span style="color:var(--muted)">No changes generated.</span>');
+    if (d.code) msgEl.classList.add('devagent');
 
   } catch (e) {
     dcHideThinking();

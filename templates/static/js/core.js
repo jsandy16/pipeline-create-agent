@@ -585,14 +585,16 @@ document.addEventListener('mousemove',e=>{
     // Top handle: resize diagram vs (chat+console)
     let topPct = Math.max(15, Math.min(70, y/h*100));
     const rest = 100 - topPct;
-    const chatRatio = _splitFr[1]/(_splitFr[1]+_splitFr[2]);
+    const chatPlusLog = _splitFr[1]+_splitFr[2];
+    const chatRatio = chatPlusLog > 0 ? _splitFr[1]/chatPlusLog : 0.5;
     _splitFr[0] = topPct;
     _splitFr[1] = rest * chatRatio;
     _splitFr[2] = rest * (1-chatRatio);
   } else {
     // Bottom handle: resize (diagram+chat) vs console
     let topTwo = Math.max(30, Math.min(85, y/h*100));
-    const dgmRatio = _splitFr[0]/(_splitFr[0]+_splitFr[1]);
+    const dgmPlusChat = _splitFr[0]+_splitFr[1];
+    const dgmRatio = dgmPlusChat > 0 ? _splitFr[0]/dgmPlusChat : 0.5;
     _splitFr[0] = topTwo * dgmRatio;
     _splitFr[1] = topTwo * (1-dgmRatio);
     _splitFr[2] = 100 - topTwo;

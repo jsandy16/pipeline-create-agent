@@ -840,6 +840,10 @@
       border: 1px solid var(--border);
       color: var(--text); font-size: 12px;
     }
+    .dc-msg.agent.devagent {
+      max-width: 100%; width: 100%;
+      background: transparent; border: none; padding: 0;
+    }
     .dc-msg .dc-svc-list {
       display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
     }
