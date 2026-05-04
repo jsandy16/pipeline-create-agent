@@ -423,7 +423,7 @@
     .prog-pct{font-size:10px;font-weight:600;color:var(--accent);min-width:32px;text-align:right;flex-shrink:0}
 
     /* ── WORKSPACE SPLIT ── */
-    .ws-split{flex:1;display:grid;grid-template-rows:50% 5px auto 5px 1fr;overflow:hidden;min-height:0}
+    .ws-split{flex:1;display:grid;grid-template-rows:1fr 5px auto 5px auto;overflow:hidden;min-height:0}
     .dgm-row{display:flex;overflow:hidden;min-height:0}
 
     /* ── RESOURCE TABLE PANEL (right of architecture diagram) ── */
@@ -675,7 +675,7 @@
       display: flex; align-items: center;
     }
     .con-wrap.collapsed .con-toggle { transform: rotate(-90deg); }
-    .con-wrap.collapsed .con-tabs { border-bottom: none; }
+    .con-wrap.collapsed .con-tabs { display: none; }
     .con-toggle:hover { color: var(--text); }
     .con-tab {
       padding: 9px 18px;

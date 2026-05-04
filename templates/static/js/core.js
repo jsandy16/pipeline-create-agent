@@ -546,23 +546,31 @@ let _splitFr = [50, 25, 25]; // initial: diagram 50%, designer 25%, logs 25%
 function _applyGridRows() {
   const chatCollapsed = _splitFr[1] <= 0;
   const conCollapsed  = _splitFr[2] <= 0;
-
+  // Use calc() to subtract drag handle space so rows never exceed 100%
   if (chatCollapsed && conCollapsed) {
     wsSplit.style.gridTemplateRows = '1fr 0px auto 0px auto';
   } else if (chatCollapsed) {
     const total = _splitFr[0] + _splitFr[2];
+    const r0 = (_splitFr[0]/total*100).toFixed(1);
+    const r2 = (_splitFr[2]/total*100).toFixed(1);
     wsSplit.style.gridTemplateRows =
-      `${(_splitFr[0]/total*100).toFixed(1)}% 5px auto 0px ${(_splitFr[2]/total*100).toFixed(1)}%`;
+      `calc(${r0}% - 3px) 5px auto 0px calc(${r2}% - 2px)`;
   } else if (conCollapsed) {
     const total = _splitFr[0] + _splitFr[1];
+    const r0 = (_splitFr[0]/total*100).toFixed(1);
+    const r1 = (_splitFr[1]/total*100).toFixed(1);
     wsSplit.style.gridTemplateRows =
-      `${(_splitFr[0]/total*100).toFixed(1)}% 5px ${(_splitFr[1]/total*100).toFixed(1)}% 0px auto`;
+      `calc(${r0}% - 3px) 5px calc(${r1}% - 2px) 0px auto`;
   } else {
     const total = _splitFr[0] + _splitFr[1] + _splitFr[2];
+    const r0 = (_splitFr[0]/total*100).toFixed(1);
+    const r1 = (_splitFr[1]/total*100).toFixed(1);
+    const r2 = (_splitFr[2]/total*100).toFixed(1);
     wsSplit.style.gridTemplateRows =
-      `${(_splitFr[0]/total*100).toFixed(1)}% 5px ${(_splitFr[1]/total*100).toFixed(1)}% 5px ${(_splitFr[2]/total*100).toFixed(1)}%`;
+      `calc(${r0}% - 4px) 5px calc(${r1}% - 3px) 5px calc(${r2}% - 3px)`;
   }
 }
+_applyGridRows(); // apply initial 50/25/25 layout
 
 dragH.addEventListener('mousedown',e=>{_rowDrag=1;e.preventDefault()});
 dragH2.addEventListener('mousedown',e=>{_rowDrag=2;e.preventDefault()});
