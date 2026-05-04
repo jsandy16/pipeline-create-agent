@@ -66,15 +66,17 @@ async function enterDevAgentMode(serviceName) {
 
   if (_dcCollapsed) dcExpand();
 
-  // Add banner inside the chat messages area (top of dcMessages)
+  // Add banner just above the textarea input row
   const banner = document.createElement('div');
   banner.className = 'dev-agent-banner';
   banner.id = 'devAgentBanner';
   banner.innerHTML = `<span>Developer Agent — <b>${serviceName}</b></span>` +
+    `<span class="dab-hint">Ctrl+E to resume Pipeline Designer</span>` +
     `<button class="dab-close" title="Exit Developer Agent mode">&times;</button>`;
   banner.querySelector('.dab-close').addEventListener('click', exitDevAgentMode);
-  const dcMsgs = $('dcMessages');
-  dcMsgs.insertBefore(banner, dcMsgs.firstChild);
+  const dcBody = designerChat.querySelector('.dc-body');
+  const inputRow = designerChat.querySelector('.dc-input-row');
+  dcBody.insertBefore(banner, inputRow);
 
   // Blink nodes on both panels
   _blinkingNode = [];
@@ -130,7 +132,17 @@ function exitDevAgentMode() {
   if (banner) banner.remove();
   if (_blinkingNode) { _blinkingNode.forEach(n => n.classList.remove('blinking')); _blinkingNode = null; }
   dcInput.placeholder = 'Describe your pipeline, or type create @service to add a service...';
+  dcStatus.textContent = 'Ready';
 }
+
+// Ctrl+E — resume Pipeline Designer mode (exit Developer Agent)
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'e' && _devAgentService) {
+    e.preventDefault();
+    exitDevAgentMode();
+    dcInput.focus();
+  }
+});
 
 // Developer agent message sender — called from dcSendMessage when in dev agent mode
 async function _sendDevAgentViaDesigner(msg) {
