@@ -132,7 +132,7 @@ autofixRegenerateBtn.addEventListener('click', async ()=>{
 
 // ── Plan ─────────────────────────────────────────────────────────────────────
 planBtn.addEventListener('click', async () => {
-  if(!_deployJobId || planBtn.disabled) return;
+  if(!_deployJobId || planBtn.disabled) { showHint('Build Terraform first before running Plan'); return; }
   planBtn.disabled=true; planBtn.textContent='📋 Running plan…';
   applyBtn.disabled=true; applyBtn.classList.remove('enabled');
   dlPlanBtn.disabled=true; dlPlanBtn.classList.remove('enabled');
@@ -209,7 +209,7 @@ planBtn.addEventListener('click', async () => {
 
 // ── Apply ────────────────────────────────────────────────────────────────────
 applyBtn.addEventListener('click', async () => {
-  if(!_deployJobId || applyBtn.disabled) return;
+  if(!_deployJobId || applyBtn.disabled) { showHint('Run Terraform Plan first before deploying'); return; }
   applyBtn.disabled=true; applyBtn.textContent='🚀 Deploying…';
   planBtn.disabled=true;
 
@@ -287,7 +287,7 @@ let _destroyWs    = null;
 
 // Open destroy modal
 destroyBtn.addEventListener('click', () => {
-  if(!_destroyJobId || destroyBtn.disabled) return;
+  if(!_destroyJobId || destroyBtn.disabled) { showHint('No deployed resources to destroy'); return; }
   // Reset modal state
   destroyConfirmView.style.display='flex';
   destroyLog.classList.remove('show'); destroyLog.innerHTML='';
@@ -364,7 +364,7 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && destroyOverlay.
 
 // ── Download Artifacts (plan + matrix) ───────────────────────────────────────
 dlArtifactsBtn.addEventListener('click', ()=>{
-  if(dlArtifactsBtn.disabled) return;
+  if(dlArtifactsBtn.disabled) { showHint('Artifacts not available yet — run Plan first'); return; }
   // Download plan text
   if(_cachedPlanText){
     const a = document.createElement('a');

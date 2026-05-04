@@ -65,30 +65,56 @@ function makeWs(url, onMessage, { onGiveUp, retries = 4 } = {}) {
   return { close(){ abandoned=true; try{ ws.close() }catch(_){} } };
 }
 
+// ── Hint toast helper ─────────────────────────────────────────────────────────
+let _hintTimer = null;
+function showHint(msg) {
+  const el = document.getElementById('hintToast');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(_hintTimer);
+  _hintTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
 // ── Compatibility shim for div-based "buttons" (tf-row items) ────────────────
-// Makes .disabled and .textContent work on div.tf-row elements
-// so existing JS (deploy.js, core.js, etc.) doesn't need changes.
+// Items are always visually enabled. `.disabled` is a logical flag that
+// existing JS sets — click handlers check it and show a hint toast instead
+// of silently returning.
 function _shimTfRow(el) {
   if (!el || !el.classList.contains('tf-row')) return;
   const label = el.querySelector('.admin-row-label');
   const origText = label ? label.textContent : '';
+  let _logicalDisabled = true;  // start logically disabled
   Object.defineProperty(el, 'disabled', {
-    get() { return el.classList.contains('disabled'); },
-    set(v) {
-      if (v) { el.classList.add('disabled'); el.classList.remove('enabled'); }
-      else   { el.classList.remove('disabled'); el.classList.add('enabled'); }
-    },
+    get() { return _logicalDisabled; },
+    set(v) { _logicalDisabled = !!v; },
     configurable: true,
   });
+  // .classList.add/remove('enabled') is called by existing code — intercept
+  // but keep items always visually enabled
+  const origAdd = el.classList.add.bind(el.classList);
+  const origRemove = el.classList.remove.bind(el.classList);
+  el.classList.add = function(...tokens) {
+    // 'enabled' class → mark logically ready, 'disabled' → mark logically not ready
+    for (const t of tokens) {
+      if (t === 'enabled') { _logicalDisabled = false; }
+      else if (t === 'disabled') { _logicalDisabled = true; }
+      else { origAdd(t); }
+    }
+  };
+  el.classList.remove = function(...tokens) {
+    for (const t of tokens) {
+      if (t === 'enabled') { _logicalDisabled = true; }
+      else if (t === 'disabled') { _logicalDisabled = false; }
+      else { origRemove(t); }
+    }
+  };
   // .textContent setter updates only the label span, not the icon.
-  // Transient states (e.g. "Running plan…", "Deploying…") update the label.
-  // Reset values (with emoji prefixes) restore the original label text.
   Object.defineProperty(el, 'textContent', {
     get() { return label ? label.textContent : ''; },
     set(v) {
       if (!label) return;
-      // If the value starts with an emoji or matches the old button pattern, restore original
-      if (/^[\u{1F4CB}\u{1F680}\u2705\u274C\u23F3\u{1F4E1}\u{1F5D1}\u{1F4E5}\u{1FA84}\u00a0\u2718\u2716✕📋🚀✅📡🗑📥\s]/u.test(v)) {
+      if (/^[\u{1F4CB}\u{1F680}\u2705\u274C\u23F3\u{1F4E1}\u{1F5D1}\u{1F4E5}\u{1FA84}\u00a0\u2718\u2716\s]/u.test(v)) {
         label.textContent = origText;
       } else {
         label.textContent = v || origText;

@@ -91,11 +91,11 @@
           <div class="rc-head" id="rcHead"></div>
           <div class="rc-rows" id="rcRows"></div>
         </div>
-        <div class="admin-row tf-row disabled" id="planBtn">
+        <div class="admin-row tf-row enabled" id="planBtn">
           <img class="admin-row-icon-img" src="/static/icons/icon-plan.png" alt="">
           <span class="admin-row-label">Terraform Plan</span>
         </div>
-        <div class="admin-row tf-row disabled" id="applyBtn">
+        <div class="admin-row tf-row enabled" id="applyBtn">
           <img class="admin-row-icon-img" src="/static/icons/icon-deploy.png" alt="">
           <span class="admin-row-label">Terraform Deploy</span>
         </div>
@@ -112,15 +112,15 @@
           </div>
         </div>
 
-        <div class="admin-row tf-row disabled" id="dlArtifactsBtn">
+        <div class="admin-row tf-row enabled" id="dlArtifactsBtn">
           <img class="admin-row-icon-img" src="/static/icons/icon-download.png" alt="">
           <span class="admin-row-label">Download Artifacts</span>
         </div>
-        <div class="admin-row tf-row disabled" id="destroyBtn">
+        <div class="admin-row tf-row enabled" id="destroyBtn">
           <span class="admin-row-icon">&#128465;&#65039;</span>
           <span class="admin-row-label">Destroy Resources</span>
         </div>
-        <div class="admin-row tf-row disabled" id="monitorBtn">
+        <div class="admin-row tf-row enabled" id="monitorBtn">
           <span class="admin-row-icon">&#128225;</span>
           <span class="admin-row-label">Monitor Pipeline Run</span>
         </div>
@@ -163,6 +163,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Hint toast for deployment actions -->
+  <div class="hint-toast" id="hintToast"></div>
 
   <!-- DESTROY MODAL -->
   <div class="destroy-overlay" id="destroyOverlay">
@@ -509,8 +512,11 @@
       <div class="drag-h" id="dragH2"><div class="drag-pip"></div></div>
 
       <div class="con-wrap" id="conWrap">
+        <div class="logs-hdr" id="logsHeader">
+          <button class="dc-toggle" id="conToggle" title="Collapse/Expand logs">&#9660;</button>
+          <span class="panel-label">Logs</span>
+        </div>
         <div class="con-tabs" id="conTabs">
-          <button class="con-toggle" id="conToggle" title="Collapse/Expand logs">&#9660;</button>
           <div class="con-tab active" data-tab="build" id="tabBuild">Pipeline Build</div>
           <div class="con-tab" data-tab="run" id="tabRun">Pipeline Run <span class="tab-dot" id="runDot"></span> <span class="tab-count" id="runCount"></span></div>
           <div class="con-tab" data-tab="config" id="tabConfig">Config Chat</div>

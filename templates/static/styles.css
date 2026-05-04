@@ -517,6 +517,34 @@
     .pb-topbar-btn img{width:24px;height:24px;border-radius:50%}
     .pb-topbar-btn:hover{transform:scale(1.15);filter:drop-shadow(0 0 4px var(--accent))}
 
+    /* ── Hint toast ── */
+    .hint-toast{
+      position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
+      padding:8px 18px;border-radius:8px;font-size:12px;font-weight:500;
+      color:var(--muted-light);background:var(--surface2);border:1px solid var(--border-strong);
+      box-shadow:var(--shadow-xl);opacity:0;pointer-events:none;
+      transition:opacity .25s,transform .25s;z-index:9999;white-space:nowrap;
+      font-family:var(--font);
+    }
+    .hint-toast.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto}
+
+    /* ── Developer Agent banner in designer chat ── */
+    .dev-agent-banner{
+      display:flex;align-items:center;gap:8px;
+      padding:6px 12px;background:var(--accent-glow);
+      border-bottom:1px solid var(--accent);font-size:11px;font-weight:600;
+      color:var(--accent);flex-shrink:0;
+    }
+    .dev-agent-banner .dab-close{
+      margin-left:auto;background:none;border:none;color:var(--muted);
+      cursor:pointer;font-size:14px;padding:0 4px;
+    }
+    .dev-agent-banner .dab-close:hover{color:var(--text)}
+
+    /* ── Node blink animation ── */
+    @keyframes nodeBlink{0%,100%{opacity:1}50%{opacity:.3}}
+    .dgm-node.blinking .node-border{animation:nodeBlink .8s ease-in-out infinite;stroke:var(--accent);stroke-width:2}
+
     /* The render area — fills 100% of panel */
     .dgm-stage{flex:1;position:relative;overflow:hidden;min-height:0;
       background-image:radial-gradient(circle,rgba(255,255,255,0.045) 1px,transparent 1px);
@@ -621,6 +649,16 @@
     .lg{color:#3d4a60;flex-shrink:0;margin-right:8px;font-size:9px}
     .lm{word-break:break-word;color:#c5d0df}
     .INFO .ll{color:var(--blue)}.WARNING .ll{color:var(--yellow)}.ERROR .ll{color:var(--red)}.SUCCESS .ll{color:var(--green)}
+
+    /* ── LOGS HEADER ── */
+    .logs-hdr {
+      display:flex;align-items:center;gap:6px;
+      padding:6px 10px;
+      border-bottom:1px solid var(--border);
+      background:var(--surface);flex-shrink:0;cursor:pointer;
+    }
+    .logs-hdr .panel-label{flex:1}
+    .con-wrap.collapsed .logs-hdr{border-bottom:none}
 
     /* ── CONSOLE TAB BAR ── */
     .con-tabs {

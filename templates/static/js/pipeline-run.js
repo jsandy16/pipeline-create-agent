@@ -21,7 +21,7 @@ function switchConsoleTab(tab) {
 
 // ── Monitor button handler ─────────────────────────────────────────────────
 monitorBtn.addEventListener('click', async () => {
-  if (monitorBtn.disabled) return;
+  if (monitorBtn.disabled) { showHint('Deploy first before monitoring pipeline run'); return; }
 
   // If already monitoring, stop
   if (activePreviewId) {

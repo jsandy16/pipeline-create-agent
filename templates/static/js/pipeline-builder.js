@@ -39,7 +39,7 @@ function dcExpand() {
   if (_dcSavedFr) {
     _splitFr = [..._dcSavedFr];
   } else {
-    _splitFr = [5, 2, 3];
+    _splitFr = [50, 25, 25];
   }
   _applyGridRows();
 }
@@ -50,6 +50,66 @@ dcHeader.addEventListener('click', e => {
   // Don't toggle if clicking the build button
   if (e.target.closest('.dc-build-btn')) return;
   dcToggleCollapse();
+});
+
+// ── Developer Agent mode (double-click a service node) ───────────────────────
+let _devAgentService = null;
+let _blinkingNode = null;
+
+function enterDevAgentMode(serviceName) {
+  // Remove any existing banner
+  exitDevAgentMode();
+  _devAgentService = serviceName;
+
+  // Expand designer chat if collapsed
+  if (_dcCollapsed) dcExpand();
+
+  // Add banner to designer chat
+  const banner = document.createElement('div');
+  banner.className = 'dev-agent-banner';
+  banner.id = 'devAgentBanner';
+  banner.innerHTML = `<span>Developer Agent — <b>${serviceName}</b></span>` +
+    `<button class="dab-close" title="Exit Developer Agent mode">&times;</button>`;
+  banner.querySelector('.dab-close').addEventListener('click', exitDevAgentMode);
+  const dcBody = designerChat.querySelector('.dc-body');
+  dcBody.insertBefore(banner, dcBody.firstChild);
+
+  // Blink the node on the diagram
+  const sid = serviceName.replace(/[^a-zA-Z0-9_]/g, '_');
+  const node = document.getElementById('nd_' + sid);
+  if (node) { node.classList.add('blinking'); _blinkingNode = node; }
+
+  // Pre-fill input with context
+  dcInput.placeholder = `Describe changes for ${serviceName}...`;
+  dcInput.focus();
+}
+
+function exitDevAgentMode() {
+  _devAgentService = null;
+  const banner = document.getElementById('devAgentBanner');
+  if (banner) banner.remove();
+  if (_blinkingNode) { _blinkingNode.classList.remove('blinking'); _blinkingNode = null; }
+  dcInput.placeholder = 'Describe your pipeline, or type create @service to add a service...';
+}
+
+// Listen for double-click on diagram SVG nodes
+document.getElementById('diagramSvg').addEventListener('dblclick', e => {
+  const nodeGrp = e.target.closest('.dgm-node');
+  if (!nodeGrp) return;
+  const name = nodeGrp.dataset.name;
+  if (name) enterDevAgentMode(name);
+});
+
+// Also listen on architect canvas nodes
+document.getElementById('archCanvas').addEventListener('dblclick', e => {
+  const nodeGrp = e.target.closest('[data-nid]');
+  if (!nodeGrp) return;
+  const nid = nodeGrp.dataset.nid;
+  // archNodes is from architect.js — find the name
+  if (typeof archNodes !== 'undefined') {
+    const node = archNodes.find(n => n.id === nid);
+    if (node) enterDevAgentMode(node.name);
+  }
 });
 
 // ── Shared message helpers ───────────────────────────────────────────────────
@@ -153,10 +213,14 @@ async function dcSendMessage() {
   dcShowThinking();
 
   try {
+    // In Developer Agent mode, prefix with service context
+    const chatMsg = _devAgentService
+      ? `[Service: ${_devAgentService}] ${msg}`
+      : msg;
     const r = await fetch('/pipeline-designer/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ message: msg, chat_id: _dcChatId }),
+      body: JSON.stringify({ message: chatMsg, chat_id: _dcChatId }),
     });
     dcHideThinking();
     const d = await r.json();

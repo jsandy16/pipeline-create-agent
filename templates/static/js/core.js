@@ -541,7 +541,7 @@ cancelBtn.addEventListener('click',async()=>{
 let _rowDrag=0; // 0=none, 1=top handle, 2=bottom handle
 const dragH2=$('dragH2');
 // Track row fractions: [diagram, chat, console] in fr units
-let _splitFr = [5, 2, 3]; // initial proportions
+let _splitFr = [50, 25, 25]; // initial: diagram 50%, designer 25%, logs 25%
 
 function _applyGridRows() {
   const chatCollapsed = _splitFr[1] <= 0;
@@ -615,10 +615,16 @@ function conExpand() {
   _conCollapsed = false;
   conWrap.classList.remove('collapsed');
   if (_conSavedFr) { _splitFr = [..._conSavedFr]; }
-  else { _splitFr = [5, 2, 3]; }
+  else { _splitFr = [50, 25, 25]; }
   _applyGridRows();
 }
 conToggle.addEventListener('click', () => {
+  if (_conCollapsed) conExpand(); else conCollapse();
+});
+// Also toggle when clicking the Logs header bar
+const logsHeader = $('logsHeader');
+if (logsHeader) logsHeader.addEventListener('click', (e) => {
+  if (e.target === conToggle) return; // already handled
   if (_conCollapsed) conExpand(); else conCollapse();
 });
 
