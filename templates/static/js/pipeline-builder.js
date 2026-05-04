@@ -54,7 +54,7 @@ dcHeader.addEventListener('click', e => {
 
 // ── Developer Agent mode (double-click a service node) ───────────────────────
 let _devAgentService = null;
-let _blinkingNode = null;
+let _blinkingNode = null; // array of blinking elements
 
 function enterDevAgentMode(serviceName) {
   // Remove any existing banner
@@ -74,10 +74,19 @@ function enterDevAgentMode(serviceName) {
   const dcBody = designerChat.querySelector('.dc-body');
   dcBody.insertBefore(banner, dcBody.firstChild);
 
-  // Blink the node on the diagram
+  // Blink the node on both dagre diagram and architect canvas
+  _blinkingNode = [];
   const sid = serviceName.replace(/[^a-zA-Z0-9_]/g, '_');
-  const node = document.getElementById('nd_' + sid);
-  if (node) { node.classList.add('blinking'); _blinkingNode = node; }
+  const dgmNode = document.getElementById('nd_' + sid);
+  if (dgmNode) { dgmNode.classList.add('blinking'); _blinkingNode.push(dgmNode); }
+  // Architect canvas nodes use data-nid matching archNodes by name
+  if (typeof archNodes !== 'undefined') {
+    const archNode = archNodes.find(n => n.name === serviceName);
+    if (archNode) {
+      const archEl = document.querySelector(`[data-nid="${archNode.id}"]`);
+      if (archEl) { archEl.classList.add('blinking'); _blinkingNode.push(archEl); }
+    }
+  }
 
   // Pre-fill input with context
   dcInput.placeholder = `Describe changes for ${serviceName}...`;
@@ -88,24 +97,27 @@ function exitDevAgentMode() {
   _devAgentService = null;
   const banner = document.getElementById('devAgentBanner');
   if (banner) banner.remove();
-  if (_blinkingNode) { _blinkingNode.classList.remove('blinking'); _blinkingNode = null; }
+  if (_blinkingNode) { _blinkingNode.forEach(n => n.classList.remove('blinking')); _blinkingNode = null; }
   dcInput.placeholder = 'Describe your pipeline, or type create @service to add a service...';
 }
 
-// Listen for double-click on diagram SVG nodes
-document.getElementById('diagramSvg').addEventListener('dblclick', e => {
+// Ctrl + Right-click on diagram SVG nodes → Developer Agent mode
+document.getElementById('diagramSvg').addEventListener('contextmenu', e => {
+  if (!e.ctrlKey) return;
   const nodeGrp = e.target.closest('.dgm-node');
   if (!nodeGrp) return;
+  e.preventDefault();
   const name = nodeGrp.dataset.name;
   if (name) enterDevAgentMode(name);
 });
 
-// Also listen on architect canvas nodes
-document.getElementById('archCanvas').addEventListener('dblclick', e => {
+// Ctrl + Right-click on architect canvas nodes → Developer Agent mode
+document.getElementById('archCanvas').addEventListener('contextmenu', e => {
+  if (!e.ctrlKey) return;
   const nodeGrp = e.target.closest('[data-nid]');
   if (!nodeGrp) return;
+  e.preventDefault();
   const nid = nodeGrp.dataset.nid;
-  // archNodes is from architect.js — find the name
   if (typeof archNodes !== 'undefined') {
     const node = archNodes.find(n => n.id === nid);
     if (node) enterDevAgentMode(node.name);

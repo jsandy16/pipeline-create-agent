@@ -100,10 +100,9 @@ let _pipelineServices = [];
 const _origBuildDagram = buildDagram;
 buildDagram = function(services, integrations) {
   _origBuildDagram(services, integrations);
-  // Attach click handlers to all nodes
+  // Attach double-click handlers to all nodes for service config
   document.querySelectorAll('.dgm-node').forEach(grp => {
-    grp.addEventListener('click', e => {
-      // Don't trigger during drag
+    grp.addEventListener('dblclick', e => {
       if(_svgDrag) return;
       const name = grp.getAttribute('data-name');
       if(name && _deployJobId) openServiceConfig(name);

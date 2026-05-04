@@ -544,6 +544,7 @@
     /* ── Node blink animation ── */
     @keyframes nodeBlink{0%,100%{opacity:1}50%{opacity:.3}}
     .dgm-node.blinking .node-border{animation:nodeBlink .8s ease-in-out infinite;stroke:var(--accent);stroke-width:2}
+    [data-nid].blinking rect:first-child{animation:nodeBlink .8s ease-in-out infinite;stroke:var(--accent);stroke-width:2}
 
     /* The render area — fills 100% of panel */
     .dgm-stage{flex:1;position:relative;overflow:hidden;min-height:0;
