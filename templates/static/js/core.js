@@ -638,6 +638,60 @@ if (logsHeader) logsHeader.addEventListener('click', (e) => {
   if (_conCollapsed) conExpand(); else conCollapse();
 });
 
+// ── Maximize / Restore panels ────────────────────────────────────────────────
+const dcMaxBtn = $('dcMaxBtn');
+const conMaxBtn = $('conMaxBtn');
+let _maximized = null; // 'dc' | 'con' | null
+let _preFr = null;     // saved fractions before maximize
+
+function dcMaximize() {
+  if (_maximized === 'dc') { _restoreMax(); return; }
+  _preFr = [..._splitFr];
+  _maximized = 'dc';
+  if (_conCollapsed) {} else { conWrap.classList.add('collapsed'); }
+  _splitFr = [0, 100, 0];
+  _applyGridRows();
+  dcMaxBtn.textContent = '\u2750'; // restore icon
+  if (_dcCollapsed) { _dcCollapsed = false; designerChat.classList.remove('collapsed'); }
+}
+
+function conMaximize() {
+  if (_maximized === 'con') { _restoreMax(); return; }
+  _preFr = [..._splitFr];
+  _maximized = 'con';
+  if (_dcCollapsed) {} else { designerChat.classList.add('collapsed'); }
+  _splitFr = [0, 0, 100];
+  _applyGridRows();
+  conMaxBtn.textContent = '\u2750';
+  if (_conCollapsed) { _conCollapsed = false; conWrap.classList.remove('collapsed'); }
+}
+
+function _restoreMax() {
+  if (!_maximized) return;
+  if (_maximized === 'dc') {
+    dcMaxBtn.textContent = '\u25A1';
+    conWrap.classList.remove('collapsed');
+  } else {
+    conMaxBtn.textContent = '\u25A1';
+    designerChat.classList.remove('collapsed');
+  }
+  _maximized = null;
+  _dcCollapsed = false;
+  _conCollapsed = false;
+  _splitFr = _preFr || [50, 25, 25];
+  _preFr = null;
+  _applyGridRows();
+}
+
+dcMaxBtn.addEventListener('click', e => { e.stopPropagation(); dcMaximize(); });
+conMaxBtn.addEventListener('click', e => { e.stopPropagation(); conMaximize(); });
+
+// Ctrl+K → maximize Pipeline Designer, Ctrl+L → maximize Logs
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'k') { e.preventDefault(); dcMaximize(); }
+  if (e.ctrlKey && e.key === 'l') { e.preventDefault(); conMaximize(); }
+});
+
 // ── Console ────────────────────────────────────────────────────────────────
 function log(level,time,logger,msg){
   const empty=consoleEl.querySelector('.con-empty'); if(empty) empty.remove();

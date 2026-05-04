@@ -105,6 +105,8 @@ async function enterDevAgentMode(serviceName) {
         _devAgentCtx = {
           service_name: svc.name,
           service_type: svc.type,
+          resource_name: bp.resource_name || svc.name,
+          resource_label: bp.resource_label || '',
           config: bp.required_configuration || {},
           iam_permissions: bp.iam_permissions || [],
           env_vars: bp.env_vars || {},

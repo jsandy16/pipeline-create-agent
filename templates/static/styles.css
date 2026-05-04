@@ -662,6 +662,15 @@
       background:var(--surface);flex-shrink:0;cursor:pointer;
     }
     .logs-hdr .panel-label{flex:1}
+
+    /* ── Maximize / Restore button for panels ── */
+    .panel-maxbtn{
+      background:none;border:1px solid var(--border);border-radius:var(--radius-sm);
+      color:var(--muted);cursor:pointer;font-size:12px;width:22px;height:22px;
+      display:flex;align-items:center;justify-content:center;transition:all .15s;
+      padding:0;flex-shrink:0;
+    }
+    .panel-maxbtn:hover{color:var(--text);border-color:var(--border-strong);background:var(--surface3)}
     .con-wrap.collapsed .logs-hdr{border-bottom:none}
 
     /* ── CONSOLE TAB BAR ── */
