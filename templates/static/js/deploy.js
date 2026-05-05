@@ -136,6 +136,7 @@ planBtn.addEventListener('click', async () => {
   planBtn.disabled=true; planBtn.textContent='📋 Running plan…';
   applyBtn.disabled=true; applyBtn.classList.remove('enabled');
   dlPlanBtn.disabled=true; dlPlanBtn.classList.remove('enabled');
+  setPipelineStatus('planning', 'Generating Plan...');
   hideAutofixBanner();
 
   log('INFO', now(), 'terraform', '─── terraform init + plan ───────────────────');
@@ -200,9 +201,11 @@ planBtn.addEventListener('click', async () => {
     planBtn.disabled=false; planBtn.textContent='📋 Deploy to AWS: Plan';
     applyBtn.disabled=false; applyBtn.classList.add('enabled');
     dlPlanBtn.disabled=false; dlPlanBtn.classList.add('enabled');
+    setPipelineStatus('success', 'Plan Completed');
 
   }catch(e){
     log('ERROR', now(), 'terraform', 'Plan error: '+e.message);
+    setPipelineStatus('error', 'Plan Failed');
     planBtn.disabled=false; planBtn.textContent='📋 Deploy to AWS: Plan';
   }
 });
@@ -212,6 +215,7 @@ applyBtn.addEventListener('click', async () => {
   if(!_deployJobId || applyBtn.disabled) { showHint('Run Terraform Plan first before deploying'); return; }
   applyBtn.disabled=true; applyBtn.textContent='🚀 Deploying…';
   planBtn.disabled=true;
+  setPipelineStatus('deploying', 'Deploying Terraform...');
 
   log('INFO', now(), 'terraform', '─── terraform apply ─────────────────────────');
 
@@ -245,6 +249,7 @@ applyBtn.addEventListener('click', async () => {
         _deployWs=null;
         planBtn.disabled=false;
         if(m.exit_code===0){
+          setPipelineStatus('success', 'Terraform Deployed');
           log('SUCCESS', now(), 'terraform', '─── ✓ Deployment complete! ──────────────────');
           applyBtn.textContent='✅ Deployed'; applyBtn.disabled=true; applyBtn.classList.remove('enabled');
           _destroyJobId=_deployJobId;
@@ -258,6 +263,7 @@ applyBtn.addEventListener('click', async () => {
           // Fetch and render deployed resources table
           loadDeployedResources(_deployJobId);
         }else{
+          setPipelineStatus('error', 'Deploy Failed');
           log('ERROR', now(), 'terraform', '─── ✗ Deployment failed ─────────────────────');
           applyBtn.disabled=false; applyBtn.textContent='🚀 Deploy to AWS: Deploy';
         }

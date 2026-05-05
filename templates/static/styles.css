@@ -160,7 +160,7 @@
     .drop-zone {
       border: 1.5px dashed var(--border-strong);
       border-radius: var(--radius);
-      padding: 28px 16px 24px;
+      padding: 12px 10px 10px;
       text-align: center;
       cursor: pointer;
       background: var(--bg);
@@ -172,9 +172,9 @@
       background: var(--accent-glow);
     }
     .drop-zone input{position:absolute;inset:0;opacity:0;cursor:pointer}
-    .dz-icon{font-size:28px;margin-bottom:8px;opacity:0.9}
-    .drop-zone h3{font-size:12px;font-weight:600;margin-bottom:4px;color:var(--text)}
-    .drop-zone p{font-size:11px;color:var(--muted)}
+    .dz-icon{font-size:18px;margin-bottom:4px;opacity:0.9}
+    .drop-zone h3{font-size:10px;font-weight:600;margin-bottom:2px;color:var(--text)}
+    .drop-zone p{font-size:9px;color:var(--muted)}
     .fmt-row{display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-top:6px}
     .badge {
       background: var(--surface2);
@@ -236,6 +236,21 @@
     .spin{width:12px;height:12px;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;
       border-radius:50%;animation:spin .7s linear infinite;display:none;flex-shrink:0}
     @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* ── Pipeline status indicator ── */
+    .pipeline-status{
+      display:flex;align-items:center;gap:6px;
+      padding:6px 12px;border-radius:var(--radius-sm);
+      background:var(--surface2);border:1px solid var(--border);
+      font-size:11px;font-weight:500;color:var(--muted-light);
+    }
+    .ps-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
+    .pipeline-status.building .ps-dot{background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+    .pipeline-status.success .ps-dot{background:var(--green)}
+    .pipeline-status.error .ps-dot{background:var(--red)}
+    .pipeline-status.planning .ps-dot{background:var(--blue);animation:pulse 1.2s ease-in-out infinite}
+    .pipeline-status.deploying .ps-dot{background:var(--yellow);animation:pulse 1.2s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
     .cancel-btn {
       display: none;
       background: transparent;

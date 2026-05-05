@@ -55,10 +55,14 @@
         </div>
       </div>
       <input id="hintInput" type="hidden" value=""/>
-      <button class="run-btn" id="runBtn" disabled>
+      <button class="run-btn" id="runBtn" disabled style="display:none">
         <div class="spin" id="spin"></div>
         <span id="runLabel">Generate Terraform</span>
       </button>
+      <div class="pipeline-status" id="pipelineStatus">
+        <span class="ps-dot" id="psDot"></span>
+        <span class="ps-text" id="psText">Ready</span>
+      </div>
     </div>
 
     <!-- ARCHITECT SECTION -->

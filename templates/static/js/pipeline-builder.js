@@ -70,7 +70,8 @@ async function enterDevAgentMode(serviceName) {
   const banner = document.createElement('div');
   banner.className = 'dev-agent-banner';
   banner.id = 'devAgentBanner';
-  banner.innerHTML = `<span>Developer Agent — <b>${serviceName}</b></span>` +
+  banner.innerHTML = `<img src="/static/icons/icon-agent.png" style="width:16px;height:16px;border-radius:50%" alt="">` +
+    `<span>Developer Agent — <b>${serviceName}</b></span>` +
     `<span class="dab-hint">Ctrl+E to resume Pipeline Designer</span>` +
     `<button class="dab-close" title="Exit Developer Agent mode">&times;</button>`;
   banner.querySelector('.dab-close').addEventListener('click', exitDevAgentMode);
@@ -546,6 +547,7 @@ async function dcStartBuild() {
   pbBuildBtn.textContent = 'Building...';
   dcStatus.textContent = 'Building Terraform...';
   pbStatus.textContent = 'Building Terraform...';
+  setPipelineStatus('building', 'Building Terraform...');
 
   try {
     const r = await fetch('/pipeline-designer/build', {
@@ -603,6 +605,7 @@ async function dcStartBuild() {
         if (m.exit_code === 0) {
           setStatus('ok', 'Pipeline built successfully');
           setProg(100, 'Complete', 'done');
+          setPipelineStatus('success', 'Build Completed');
           log('SUCCESS', now(), 'pipeline', 'Terraform generated successfully.');
           _pipelineName = m.result?.pipeline_name || '';
           planBtn.disabled = false; planBtn.classList.add('enabled');
@@ -616,6 +619,7 @@ async function dcStartBuild() {
           }
         } else {
           setStatus('fail', 'Build failed');
+          setPipelineStatus('error', 'Build Failed');
           log('ERROR', now(), 'pipeline', 'Build failed.');
         }
         if (!m.cancelled) showResult(m.exit_code, m.result);

@@ -1,5 +1,14 @@
 const $=id=>document.getElementById(id);
 
+// ── Pipeline status indicator ───────────────────────────────────────────────
+function setPipelineStatus(state, text) {
+  const el = $('pipelineStatus');
+  if (!el) return;
+  el.className = 'pipeline-status ' + (state || '');
+  const t = $('psText');
+  if (t) t.textContent = text || 'Ready';
+}
+
 // ── Project + Cost Center global fields ──────────────────────────────────────
 const projectInput=$('projectInput'), costCenterInput=$('costCenterInput');
 
