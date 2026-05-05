@@ -432,7 +432,13 @@ function _showMentionDrop(items, atPos){
     });
     devagMentionDrop.appendChild(el);
   });
+  // Position fixed dropdown above the textarea
+  const rect = devagInput.getBoundingClientRect();
+  devagMentionDrop.style.left = rect.left + 'px';
+  devagMentionDrop.style.width = rect.width + 'px';
   devagMentionDrop.style.display = 'block';
+  const dropH = devagMentionDrop.offsetHeight;
+  devagMentionDrop.style.top = (rect.top - dropH - 6) + 'px';
 }
 
 function _hideMentionDrop(){

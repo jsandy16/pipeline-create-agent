@@ -1,12 +1,46 @@
 const $=id=>document.getElementById(id);
 
 // ── Pipeline status indicator ───────────────────────────────────────────────
+const _ARCH_STEPS = ['building','built','planning','planned','deploying','deployed'];
 function setPipelineStatus(state, text) {
   const el = $('pipelineStatus');
   if (!el) return;
   el.className = 'pipeline-status ' + (state || '');
   const t = $('psText');
   if (t) t.textContent = text || 'Ready';
+  // Update architecture pipeline status list
+  _updateArchPipelineStatus(state, text);
+}
+function _updateArchPipelineStatus(state, text) {
+  const wrap = $('archPipelineStatus');
+  if (!wrap) return;
+  // Map state+text to the current step
+  let activeStep = null;
+  if (state === 'building') activeStep = 'building';
+  else if (state === 'success' && /Build Completed/i.test(text)) activeStep = 'built';
+  else if (state === 'planning') activeStep = 'planning';
+  else if (state === 'success' && /Plan Completed/i.test(text)) activeStep = 'planned';
+  else if (state === 'deploying') activeStep = 'deploying';
+  else if (state === 'success' && /Terraform Deployed/i.test(text)) activeStep = 'deployed';
+  else if (state === 'error') {
+    // Mark current active as error
+    const items = wrap.querySelectorAll('.arch-ps-item');
+    items.forEach(el => {
+      if (el.classList.contains('active')) {
+        el.classList.remove('active');
+        el.classList.add('error');
+      }
+    });
+    return;
+  }
+  if (!activeStep) return;
+  const idx = _ARCH_STEPS.indexOf(activeStep);
+  const items = wrap.querySelectorAll('.arch-ps-item');
+  items.forEach((el, i) => {
+    el.classList.remove('active', 'done', 'error');
+    if (i < idx) el.classList.add('done');
+    else if (i === idx) el.classList.add(activeStep === 'built' || activeStep === 'planned' || activeStep === 'deployed' ? 'done' : 'active');
+  });
 }
 
 // ── Project + Cost Center global fields ──────────────────────────────────────

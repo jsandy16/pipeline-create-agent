@@ -75,9 +75,17 @@
       <div class="sec-label" style="margin-bottom:0">AWS Services — drag to canvas</div>
       <input class="pal-search" id="palSearch" placeholder="Search services..."/>
       <div class="pal-grid" id="palGrid"></div>
-      <button class="arch-run-btn" id="archRunBtn" disabled>
+      <button class="arch-run-btn" id="archRunBtn" disabled style="display:none">
         <span id="archRunLabel">Generate Terraform</span>
       </button>
+      <div class="arch-pipeline-status" id="archPipelineStatus">
+        <div class="arch-ps-item" data-step="building"><span class="arch-ps-dot"></span><span class="arch-ps-label">Building Terraform</span></div>
+        <div class="arch-ps-item" data-step="built"><span class="arch-ps-dot"></span><span class="arch-ps-label">Build Completed</span></div>
+        <div class="arch-ps-item" data-step="planning"><span class="arch-ps-dot"></span><span class="arch-ps-label">Generating Plan</span></div>
+        <div class="arch-ps-item" data-step="planned"><span class="arch-ps-dot"></span><span class="arch-ps-label">Plan Completed</span></div>
+        <div class="arch-ps-item" data-step="deploying"><span class="arch-ps-dot"></span><span class="arch-ps-label">Deploying Terraform</span></div>
+        <div class="arch-ps-item" data-step="deployed"><span class="arch-ps-dot"></span><span class="arch-ps-label">Terraform Deployed</span></div>
+      </div>
     </div>
 
     <!-- DEPLOYMENT SECTION (collapsible) -->
@@ -250,6 +258,7 @@
   <!-- @mention autocomplete dropdowns (outside overlays to avoid overflow clip) -->
   <div class="pb-mention-drop" id="pbMentionDrop"></div>
   <div class="dc-mention-drop" id="dcMentionDrop"></div>
+  <div class="devag-mention-drop" id="devagMentionDrop"></div>
 
   <!-- ADMIN: Configure API Key modal -->
   <div class="adm-overlay" id="apiKeyOverlay">
@@ -384,7 +393,6 @@
         </div>
         <div class="devag-input-row">
           <div class="devag-input-wrap">
-            <div class="devag-mention-drop" id="devagMentionDrop"></div>
             <textarea class="devag-input" id="devagInput" rows="2"
               placeholder="Describe what you want... (type @ to reference another service)"></textarea>
           </div>
