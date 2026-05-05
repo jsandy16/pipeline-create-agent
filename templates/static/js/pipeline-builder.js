@@ -398,22 +398,36 @@ function _dcGetMentionQuery() {
   return { query, atPos: at };
 }
 
-function _dcShowMentionDrop(items, atPos) {
+function _dcShowMentionDrop(items, atPos, isInstances) {
   _dcMentionActive = true;
   _dcMentionSelIdx = -1;
+  const hint = isInstances ? 'Pipeline services' : 'AWS Services';
   dcMentionDrop.innerHTML =
-    `<div class="pb-mention-hint">AWS Services — ↑↓ navigate · Enter select · Esc dismiss</div>`;
-  items.forEach(t => {
+    `<div class="pb-mention-hint">${hint} — ↑↓ navigate · Enter select · Esc dismiss</div>`;
+  items.forEach(item => {
     const el = document.createElement('div');
     el.className = 'pb-mention-item';
-    el.innerHTML =
-      `<span class="pb-mention-ico">${SVC_ICONS[t] || '☁️'}</span>` +
-      `<span class="pb-mention-name">${t}</span>` +
-      `<span class="pb-mention-badge">${ABBREV[t] || t}</span>`;
-    el.addEventListener('mousedown', e => {
-      e.preventDefault();
-      _dcInsertMention(t, atPos);
-    });
+    if (isInstances) {
+      // item = {name, type}
+      el.innerHTML =
+        `<span class="pb-mention-ico">${SVC_ICONS[item.type] || '☁️'}</span>` +
+        `<span class="pb-mention-name">${item.name}</span>` +
+        `<span class="pb-mention-badge">${ABBREV[item.type] || item.type}</span>`;
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        _dcInsertMention(`${item.name}[${item.type}]`, atPos);
+      });
+    } else {
+      // item = type string
+      el.innerHTML =
+        `<span class="pb-mention-ico">${SVC_ICONS[item] || '☁️'}</span>` +
+        `<span class="pb-mention-name">${item}</span>` +
+        `<span class="pb-mention-badge">${ABBREV[item] || item}</span>`;
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        _dcInsertMention(item, atPos);
+      });
+    }
     dcMentionDrop.appendChild(el);
   });
   const rect = dcInput.getBoundingClientRect();
@@ -430,12 +444,12 @@ function _dcHideMentionDrop() {
   dcMentionDrop.style.display = 'none';
 }
 
-function _dcInsertMention(type, atPos) {
+function _dcInsertMention(token, atPos) {
   const val = dcInput.value;
   const caret = dcInput.selectionStart;
-  const token = `@${type}`;
-  dcInput.value = val.slice(0, atPos) + token + ' ' + val.slice(caret);
-  const newPos = atPos + token.length + 1;
+  const full = `@${token}`;
+  dcInput.value = val.slice(0, atPos) + full + ' ' + val.slice(caret);
+  const newPos = atPos + full.length + 1;
   dcInput.setSelectionRange(newPos, newPos);
   dcInput.focus();
   _dcHideMentionDrop();
@@ -445,11 +459,23 @@ dcInput.addEventListener('input', () => {
   const r = _dcGetMentionQuery();
   if (!r) { _dcHideMentionDrop(); return; }
   const q = r.query.toLowerCase();
+
+  // In Developer Agent mode, show pipeline service instances (by name and type)
+  if (_devAgentService && _dcServices && _dcServices.length) {
+    const matches = _dcServices.filter(s =>
+      s.name.toLowerCase().includes(q) || s.type.toLowerCase().includes(q)
+    );
+    if (!matches.length) { _dcHideMentionDrop(); return; }
+    _dcShowMentionDrop(matches, r.atPos, true);
+    return;
+  }
+
+  // Normal designer mode — show service types
   const matches = ALL_SVC_TYPES.filter(t =>
     t.includes(q) || (ABBREV[t] || '').toLowerCase().includes(q)
   );
   if (!matches.length) { _dcHideMentionDrop(); return; }
-  _dcShowMentionDrop(matches, r.atPos);
+  _dcShowMentionDrop(matches, r.atPos, false);
 });
 
 dcInput.addEventListener('keydown', e => {
