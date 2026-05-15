@@ -3132,6 +3132,329 @@ async def config_supported_keys(service_type: str) -> JSONResponse:
     })
 
 
+# ─── Multi-Agent Orchestration ────────────────────────────────────────────────
+
+_orchestrations: dict[str, dict] = {}  # orchestration_id → state
+
+
+@app.post("/pipeline-designer/orchestrate")
+async def pipeline_designer_orchestrate(request: Request) -> JSONResponse:
+    """Submit full requirements document for multi-agent orchestration.
+
+    Starts a background orchestration that runs 5 phases:
+      1. Requirements Analysis
+      2. Infrastructure Design (Terraform)
+      3. Application Code Generation
+      4. Data Model Generation
+      5. Operations Configuration
+    """
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+
+    if not message:
+        return JSONResponse(status_code=400, content={"detail": "message is required"})
+
+    api_key = _admin_config.get("anthropic_api_key")
+    if not api_key:
+        import os as _os
+        api_key = _os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return JSONResponse(status_code=400, content={
+            "detail": "Anthropic API key required. Set it in Admin > Configure API Key."
+        })
+
+    orchestration_id = uuid.uuid4().hex
+    log_q: stdlib_queue.SimpleQueue = stdlib_queue.SimpleQueue()
+
+    _orchestrations[orchestration_id] = {
+        "status": "running",
+        "phases": [],
+        "log_q": log_q,
+        "result": None,
+        "task": None,
+    }
+
+    async def _run_orchestration():
+        from agents.orchestrator import OrchestratorAgent
+        orchestrator = OrchestratorAgent(api_key=api_key, model="claude-sonnet-4-5")
+
+        def _progress_callback(phase_result):
+            _orchestrations[orchestration_id]["phases"].append(
+                phase_result.model_dump()
+            )
+            log_q.put_nowait({
+                "type": "phase_update",
+                "phase": phase_result.phase,
+                "status": phase_result.status,
+                "message": phase_result.message,
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+
+        try:
+            result = await asyncio.to_thread(
+                orchestrator.orchestrate,
+                requirements=message,
+                orchestration_id=orchestration_id,
+                progress_callback=_progress_callback,
+            )
+            _orchestrations[orchestration_id]["status"] = result.status
+            _orchestrations[orchestration_id]["result"] = result.model_dump()
+
+            log_q.put_nowait({
+                "type": "orchestration_complete",
+                "status": result.status,
+                "pipeline_name": result.pipeline_name,
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "summary": {
+                    "services": len(result.plan.services),
+                    "app_code_files": len(result.app_code),
+                    "data_model_files": len(result.data_models),
+                    "operations_files": len(result.operations),
+                },
+            })
+        except Exception as exc:
+            _orchestrations[orchestration_id]["status"] = "failed"
+            log_q.put_nowait({
+                "type": "orchestration_error",
+                "message": str(exc),
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+
+    task = asyncio.create_task(_run_orchestration())
+    _orchestrations[orchestration_id]["task"] = task
+
+    return JSONResponse({
+        "orchestration_id": orchestration_id,
+        "status": "running",
+        "message": "Orchestration started. Connect to WebSocket for real-time updates.",
+    })
+
+
+@app.websocket("/ws/orchestrate/{orchestration_id}")
+async def ws_orchestrate(ws: WebSocket, orchestration_id: str):
+    """WebSocket for real-time orchestration phase progress."""
+    if orchestration_id not in _orchestrations:
+        await ws.close(code=4004, reason="Unknown orchestration ID")
+        return
+
+    await ws.accept()
+    orch = _orchestrations[orchestration_id]
+    log_q = orch["log_q"]
+
+    try:
+        # Send any phases already completed
+        for phase in orch.get("phases", []):
+            await ws.send_json({"type": "phase_update", **phase})
+
+        # Stream new updates
+        while True:
+            try:
+                msg = log_q.get_nowait()
+                await ws.send_json(msg)
+                if msg.get("type") in ("orchestration_complete", "orchestration_error"):
+                    break
+            except Exception:
+                if orch["status"] in ("completed", "failed"):
+                    break
+                await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        pass
+
+
+@app.get("/pipeline-designer/orchestrate/{orchestration_id}/status")
+async def orchestration_status(orchestration_id: str) -> JSONResponse:
+    """Get current orchestration status and phases."""
+    if orchestration_id not in _orchestrations:
+        return JSONResponse(status_code=404, content={"detail": "Unknown orchestration ID"})
+
+    orch = _orchestrations[orchestration_id]
+    return JSONResponse({
+        "orchestration_id": orchestration_id,
+        "status": orch["status"],
+        "phases": orch.get("phases", []),
+    })
+
+
+@app.get("/pipeline-designer/orchestrate/{orchestration_id}/artifacts")
+async def orchestration_artifacts(orchestration_id: str) -> JSONResponse:
+    """Get all generated artifacts from a completed orchestration."""
+    if orchestration_id not in _orchestrations:
+        return JSONResponse(status_code=404, content={"detail": "Unknown orchestration ID"})
+
+    orch = _orchestrations[orchestration_id]
+    result = orch.get("result")
+    if not result:
+        return JSONResponse(status_code=400, content={
+            "detail": "Orchestration not yet complete",
+            "status": orch["status"],
+        })
+
+    return JSONResponse({
+        "orchestration_id": orchestration_id,
+        "pipeline_name": result.get("pipeline_name", ""),
+        "diagram": result.get("diagram", ""),
+        "pipeline_yaml": result.get("pipeline_yaml", ""),
+        "terraform_hcl": result.get("terraform_hcl", ""),
+        "app_code": result.get("app_code", {}),
+        "data_models": result.get("data_models", {}),
+        "operations": result.get("operations", {}),
+        "plan": result.get("plan", {}),
+    })
+
+
+@app.post("/pipeline-designer/orchestrate/{orchestration_id}/refine")
+async def orchestration_refine(orchestration_id: str, request: Request) -> JSONResponse:
+    """Refine a specific phase of a completed orchestration."""
+    if orchestration_id not in _orchestrations:
+        return JSONResponse(status_code=404, content={"detail": "Unknown orchestration ID"})
+
+    orch = _orchestrations[orchestration_id]
+    result_data = orch.get("result")
+    if not result_data:
+        return JSONResponse(status_code=400, content={"detail": "Orchestration not yet complete"})
+
+    body = await request.json()
+    phase = body.get("phase", "")
+    feedback = body.get("feedback", "")
+    service_name = body.get("service_name")
+
+    if not phase or not feedback:
+        return JSONResponse(status_code=400, content={
+            "detail": "phase and feedback are required"
+        })
+
+    api_key = _admin_config.get("anthropic_api_key")
+    if not api_key:
+        import os as _os
+        api_key = _os.environ.get("ANTHROPIC_API_KEY")
+
+    try:
+        if phase == "application_code" and service_name:
+            from agents.application_code_agent import ApplicationCodeAgent
+            from schemas_orchestrator import RequirementsPlan, AppCodeTask
+
+            plan = RequirementsPlan(**result_data["plan"])
+            task = next(
+                (t for t in plan.app_code_tasks if t.service_name == service_name),
+                None,
+            )
+            if not task:
+                return JSONResponse(status_code=404, content={
+                    "detail": f"No code task found for service '{service_name}'"
+                })
+
+            # Update task description with feedback
+            task.description += f"\n\nAdditional requirements: {feedback}"
+
+            agent = ApplicationCodeAgent(api_key=api_key, model="claude-sonnet-4-5")
+            new_files = agent.generate(task, plan)
+
+            # Update result
+            for path, content in new_files.items():
+                full_path = f"app/{task.service_type}/{path}"
+                result_data["app_code"][full_path] = content
+
+            return JSONResponse({
+                "status": "refined",
+                "phase": phase,
+                "service_name": service_name,
+                "updated_files": list(new_files.keys()),
+            })
+
+        elif phase == "data_models":
+            from agents.data_model_agent import DataModelAgent
+            from schemas_orchestrator import RequirementsPlan
+
+            plan = RequirementsPlan(**result_data["plan"])
+            # Add feedback context to each task's description
+            for task in plan.data_model_tasks:
+                task.source_datasets.append(f"REFINEMENT: {feedback}")
+
+            agent = DataModelAgent(api_key=api_key)
+            new_files = agent.generate(plan.data_model_tasks, plan)
+            result_data["data_models"] = new_files
+
+            return JSONResponse({
+                "status": "refined",
+                "phase": phase,
+                "updated_files": list(new_files.keys()),
+            })
+
+        elif phase == "operations":
+            from agents.operations_agent import OperationsAgent
+            from schemas_orchestrator import RequirementsPlan
+
+            plan = RequirementsPlan(**result_data["plan"])
+            plan.security_notes.append(f"REFINEMENT: {feedback}")
+
+            agent = OperationsAgent(api_key=api_key)
+            new_files = agent.generate(plan)
+            result_data["operations"] = new_files
+
+            return JSONResponse({
+                "status": "refined",
+                "phase": phase,
+                "updated_files": list(new_files.keys()),
+            })
+
+        else:
+            return JSONResponse(status_code=400, content={
+                "detail": f"Refinement not supported for phase '{phase}'"
+            })
+
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={
+            "detail": f"Refinement failed: {exc}"
+        })
+
+
+@app.post("/pipeline-designer/orchestrate/{orchestration_id}/build")
+async def orchestration_build(orchestration_id: str, request: Request) -> JSONResponse:
+    """Build Terraform from orchestration result (runs engine + terraform validate)."""
+    if orchestration_id not in _orchestrations:
+        return JSONResponse(status_code=404, content={"detail": "Unknown orchestration ID"})
+
+    orch = _orchestrations[orchestration_id]
+    result_data = orch.get("result")
+    if not result_data:
+        return JSONResponse(status_code=400, content={"detail": "Orchestration not yet complete"})
+
+    pipeline_yaml = result_data.get("pipeline_yaml", "")
+    if not pipeline_yaml:
+        return JSONResponse(status_code=400, content={"detail": "No pipeline YAML available"})
+
+    try:
+        parsed = yaml.safe_load(pipeline_yaml)
+        body = await request.json()
+        bu = (body.get("business_unit") or "").strip()
+        cc = (body.get("cost_center") or "").strip()
+        if bu:
+            parsed["business_unit"] = bu
+        if cc:
+            parsed["cost_center"] = cc
+        pipeline_req = PipelineRequest.model_validate(parsed)
+    except Exception as exc:
+        return JSONResponse(status_code=422, content={
+            "detail": f"Invalid pipeline YAML: {exc}"
+        })
+
+    job_id = uuid.uuid4().hex
+    log_q: stdlib_queue.SimpleQueue = stdlib_queue.SimpleQueue()
+    _jobs[job_id] = {
+        "status": "running", "result_info": None,
+        "log_q": log_q, "task": None,
+        "details": None, "matrix": [], "plan_text": "",
+    }
+    task = asyncio.create_task(_execute_job_from_request(job_id, pipeline_req))
+    _jobs[job_id]["task"] = task
+
+    return JSONResponse({
+        "job_id": job_id,
+        "pipeline_name": pipeline_req.pipeline_name,
+        "orchestration_id": orchestration_id,
+    })
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

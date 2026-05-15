@@ -1000,3 +1000,270 @@ pbInput.addEventListener('keydown', e => {
 // Build Terraform — delegate to the shared build function
 pbBuildBtn.addEventListener('click', dcStartBuild);
 
+// ── Multi-Agent Orchestration Mode ───────────────────────────────────────────
+
+let _orchId = null;
+let _orchBusy = false;
+let _orchResult = null;
+let _orchWs = null;
+
+const orchBtn = $('orchBtn');
+const orchPanel = $('orchPanel');
+const orchPhases = $('orchPhases');
+const orchArtifacts = $('orchArtifacts');
+const orchArtifactTabs = $('orchArtifactTabs');
+const orchArtifactContent = $('orchArtifactContent');
+const orchBuildBtn = $('orchBuildBtn');
+const orchCloseBtn = $('orchCloseBtn');
+
+const PHASE_LABELS = {
+  analysis: 'Requirements Analysis',
+  infrastructure: 'Infrastructure (Terraform)',
+  application_code: 'Application Code',
+  data_models: 'Data Models',
+  operations: 'Operations & Monitoring',
+};
+
+const PHASE_ICONS = {
+  analysis: '\uD83D\uDD0D',
+  infrastructure: '\uD83C\uDFD7\uFE0F',
+  application_code: '\uD83D\uDCBB',
+  data_models: '\uD83D\uDDC3\uFE0F',
+  operations: '\uD83D\uDCCA',
+};
+
+function orchShowPanel() {
+  if (orchPanel) orchPanel.style.display = 'flex';
+}
+
+function orchHidePanel() {
+  if (orchPanel) orchPanel.style.display = 'none';
+  _orchId = null;
+  _orchResult = null;
+  if (_orchWs) { _orchWs.close(); _orchWs = null; }
+}
+
+function orchInitPhases() {
+  if (!orchPhases) return;
+  orchPhases.innerHTML = '';
+  for (const [key, label] of Object.entries(PHASE_LABELS)) {
+    const div = document.createElement('div');
+    div.className = 'orch-phase pending';
+    div.id = `orch-phase-${key}`;
+    div.innerHTML = `<span class="orch-phase-icon">${PHASE_ICONS[key]}</span>
+      <span class="orch-phase-label">${label}</span>
+      <span class="orch-phase-status">Pending</span>`;
+    orchPhases.appendChild(div);
+  }
+}
+
+function orchUpdatePhase(phase, status, message) {
+  const el = document.getElementById(`orch-phase-${phase}`);
+  if (!el) return;
+  el.className = `orch-phase ${status}`;
+  const statusEl = el.querySelector('.orch-phase-status');
+  if (statusEl) {
+    if (status === 'running') statusEl.textContent = 'Running...';
+    else if (status === 'completed') statusEl.textContent = message || 'Done';
+    else if (status === 'failed') statusEl.textContent = message || 'Failed';
+    else statusEl.textContent = 'Pending';
+  }
+}
+
+function orchShowArtifacts(result) {
+  if (!orchArtifacts || !orchArtifactTabs || !orchArtifactContent) return;
+  orchArtifacts.style.display = 'block';
+  orchArtifactTabs.innerHTML = '';
+  orchArtifactContent.innerHTML = '';
+
+  const tabs = [
+    { key: 'terraform', label: 'Terraform', files: { 'main.tf': result.terraform_hcl } },
+    { key: 'app_code', label: 'App Code', files: result.app_code || {} },
+    { key: 'data_models', label: 'Data Models', files: result.data_models || {} },
+    { key: 'operations', label: 'Operations', files: result.operations || {} },
+  ];
+
+  let first = true;
+  for (const tab of tabs) {
+    const fileCount = Object.keys(tab.files).length;
+    if (fileCount === 0 && tab.key !== 'terraform') continue;
+
+    const btn = document.createElement('button');
+    btn.className = `orch-tab${first ? ' active' : ''}`;
+    btn.textContent = `${tab.label} (${fileCount})`;
+    btn.addEventListener('click', () => {
+      orchArtifactTabs.querySelectorAll('.orch-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      orchRenderFiles(tab.files);
+    });
+    orchArtifactTabs.appendChild(btn);
+
+    if (first) orchRenderFiles(tab.files);
+    first = false;
+  }
+
+  if (orchBuildBtn) {
+    orchBuildBtn.style.display = 'inline-block';
+    orchBuildBtn.disabled = false;
+  }
+}
+
+function orchRenderFiles(files) {
+  if (!orchArtifactContent) return;
+  orchArtifactContent.innerHTML = '';
+
+  for (const [path, content] of Object.entries(files)) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'orch-file';
+
+    const header = document.createElement('div');
+    header.className = 'orch-file-header';
+    header.textContent = path;
+    header.style.cursor = 'pointer';
+
+    const pre = document.createElement('pre');
+    pre.className = 'orch-file-content';
+    pre.textContent = content;
+    pre.style.display = 'none';
+
+    header.addEventListener('click', () => {
+      pre.style.display = pre.style.display === 'none' ? 'block' : 'none';
+    });
+
+    wrapper.appendChild(header);
+    wrapper.appendChild(pre);
+    orchArtifactContent.appendChild(wrapper);
+  }
+}
+
+async function dcSendOrchestration() {
+  const msg = dcInput.value.trim();
+  if (!msg || _orchBusy) return;
+
+  dcInput.value = '';
+  _orchBusy = true;
+  dcSend.disabled = true;
+
+  dcAddMsg('user', escHtml(msg));
+  dcAddMsg('agent', '<b>Starting multi-agent orchestration...</b><br>Processing your requirements through 5 phases.');
+
+  orchShowPanel();
+  orchInitPhases();
+  if (orchArtifacts) orchArtifacts.style.display = 'none';
+
+  try {
+    const r = await fetch('/pipeline-designer/orchestrate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ message: msg }),
+    });
+    const d = await r.json();
+
+    if (!r.ok) {
+      dcAddMsg('agent', `<span style="color:var(--red)">Orchestration failed: ${escHtml(d.detail || '')}</span>`);
+      orchHidePanel();
+      _orchBusy = false;
+      dcSend.disabled = false;
+      return;
+    }
+
+    _orchId = d.orchestration_id;
+
+    // Connect WebSocket for real-time updates
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    _orchWs = new WebSocket(`${wsProto}://${location.host}/ws/orchestrate/${_orchId}`);
+
+    _orchWs.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'phase_update') {
+        orchUpdatePhase(msg.phase, msg.status, msg.message);
+        if (msg.status === 'completed' || msg.status === 'failed') {
+          dcAddMsg('agent', `<small>${PHASE_ICONS[msg.phase] || ''} ${PHASE_LABELS[msg.phase] || msg.phase}: ${escHtml(msg.message)}</small>`);
+        }
+      } else if (msg.type === 'orchestration_complete') {
+        dcAddMsg('agent', `<b>Orchestration complete!</b> Pipeline: <b>${escHtml(msg.pipeline_name)}</b><br>` +
+          `${msg.summary.services} services, ${msg.summary.app_code_files} app code files, ` +
+          `${msg.summary.data_model_files} data model files, ${msg.summary.operations_files} ops files.`);
+        // Fetch full artifacts
+        fetch(`/pipeline-designer/orchestrate/${_orchId}/artifacts`)
+          .then(r => r.json())
+          .then(data => {
+            _orchResult = data;
+            orchShowArtifacts(data);
+            // Also render the pipeline diagram if available
+            if (data.plan && data.plan.services) {
+              const svcs = data.plan.services.map(s => ({name: s.name, type: s.type}));
+              const integs = (data.plan.integrations || []).map(i => ({source: i.source, target: i.target, event: i.event}));
+              _lastRenderedPipelineName = data.pipeline_name || '';
+              initServices(svcs);
+              buildDagram(svcs, integs);
+              dgmLabel.textContent = 'Pipeline Design';
+            }
+          });
+        _orchBusy = false;
+        dcSend.disabled = false;
+      } else if (msg.type === 'orchestration_error') {
+        dcAddMsg('agent', `<span style="color:var(--red)">Orchestration error: ${escHtml(msg.message)}</span>`);
+        _orchBusy = false;
+        dcSend.disabled = false;
+      }
+    };
+
+    _orchWs.onerror = () => {
+      dcAddMsg('agent', '<span style="color:var(--red)">WebSocket connection error</span>');
+      _orchBusy = false;
+      dcSend.disabled = false;
+    };
+
+  } catch(e) {
+    dcAddMsg('agent', `<span style="color:var(--red)">Error: ${escHtml(e.message)}</span>`);
+    orchHidePanel();
+    _orchBusy = false;
+    dcSend.disabled = false;
+  }
+}
+
+async function orchStartBuild() {
+  if (!_orchId || !_orchResult) return;
+  if (!validateProjectFields()) return;
+
+  if (orchBuildBtn) {
+    orchBuildBtn.disabled = true;
+    orchBuildBtn.textContent = 'Building...';
+  }
+
+  try {
+    const r = await fetch(`/pipeline-designer/orchestrate/${_orchId}/build`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        business_unit: getBusinessUnit() || getProject(),
+        cost_center: getCostCenter(),
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      dcAddMsg('agent', `<span style="color:var(--red)">Build failed: ${escHtml(d.detail || '')}</span>`);
+      if (orchBuildBtn) { orchBuildBtn.disabled = false; orchBuildBtn.textContent = 'Build Terraform'; }
+      return;
+    }
+
+    dcAddMsg('agent', `Building Terraform for <b>${escHtml(d.pipeline_name)}</b>...`);
+    orchHidePanel();
+    dcCollapse();
+    _deployJobId = d.job_id;
+    switchConsoleTab('build');
+
+    const wsUrl = `${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/${d.job_id}`;
+    connectJobWs(wsUrl);
+  } catch(e) {
+    dcAddMsg('agent', `<span style="color:var(--red)">Build error: ${escHtml(e.message)}</span>`);
+    if (orchBuildBtn) { orchBuildBtn.disabled = false; orchBuildBtn.textContent = 'Build Terraform'; }
+  }
+}
+
+// Wire up orchestration button and build button
+if (orchBtn) orchBtn.addEventListener('click', dcSendOrchestration);
+if (orchBuildBtn) orchBuildBtn.addEventListener('click', orchStartBuild);
+if (orchCloseBtn) orchCloseBtn.addEventListener('click', orchHidePanel);
+

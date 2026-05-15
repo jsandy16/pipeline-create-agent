@@ -951,6 +951,101 @@
     .dc-send:hover:not(:disabled) { background: var(--accent-hover); }
     .dc-send:disabled { opacity: .35; cursor: not-allowed; }
 
+    /* ── Orchestration Button & Panel ── */
+    .dc-orch-btn {
+      padding: 8px 14px; border-radius: var(--radius-sm); border: none;
+      background: var(--green); color: #fff; cursor: pointer; font-weight: 600;
+      font-size: 12px; font-family: var(--font);
+      transition: all 0.15s var(--ease);
+      white-space: nowrap;
+    }
+    .dc-orch-btn:hover { background: var(--green); color: #fff; }
+    .dc-orch-btn:disabled { opacity: .35; cursor: not-allowed; }
+    .orch-panel {
+      display: flex; flex-direction: column;
+      background: var(--surface2);
+      border-top: 1px solid var(--border);
+      padding: 12px 14px;
+      gap: 10px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .orch-header {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .orch-title { font-weight: 700; font-size: 13px; color: var(--text); }
+    .orch-close {
+      background: none; border: none; color: var(--muted);
+      font-size: 18px; cursor: pointer; padding: 2px 6px;
+    }
+    .orch-close:hover { color: var(--text); }
+    .orch-phases { display: flex; flex-direction: column; gap: 4px; }
+    .orch-phase {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px; border-radius: var(--radius-sm);
+      font-size: 12px; border: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .orch-phase.running {
+      border-color: var(--accent); background: rgba(56,139,253,0.06);
+      animation: orch-pulse 1.5s ease-in-out infinite;
+    }
+    .orch-phase.completed {
+      border-color: var(--green, #3fb950); background: rgba(46,160,67,0.06);
+    }
+    .orch-phase.failed {
+      border-color: var(--red, #f85149); background: rgba(248,81,73,0.06);
+    }
+    @keyframes orch-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    .orch-phase-icon { font-size: 14px; flex-shrink: 0; }
+    .orch-phase-label { flex: 1; font-weight: 500; }
+    .orch-phase-status {
+      font-size: 10px; color: var(--muted);
+      max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .orch-phase.completed .orch-phase-status { color: var(--green, #3fb950); }
+    .orch-phase.failed .orch-phase-status { color: var(--red, #f85149); }
+    .orch-phase.running .orch-phase-status { color: var(--accent); }
+    .orch-artifacts { margin-top: 8px; }
+    .orch-artifact-tabs {
+      display: flex; gap: 4px; margin-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 6px;
+    }
+    .orch-tab {
+      padding: 4px 10px; border-radius: var(--radius-sm);
+      border: 1px solid var(--border); background: var(--bg);
+      color: var(--muted); font-size: 11px; cursor: pointer;
+      font-family: var(--font); font-weight: 500;
+    }
+    .orch-tab.active {
+      border-color: var(--accent); color: var(--accent);
+      background: rgba(56,139,253,0.08);
+    }
+    .orch-tab:hover:not(.active) { border-color: var(--border-strong); color: var(--text); }
+    .orch-artifact-content {
+      max-height: 200px; overflow-y: auto;
+    }
+    .orch-file { margin-bottom: 4px; }
+    .orch-file-header {
+      padding: 4px 8px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      font-size: 11px; font-family: var(--mono); color: var(--accent);
+    }
+    .orch-file-header:hover { background: var(--surface); }
+    .orch-file-content {
+      margin: 0; padding: 8px 10px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-top: none; border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+      font-size: 11px; font-family: var(--mono);
+      color: var(--text); white-space: pre-wrap; word-break: break-all;
+      max-height: 300px; overflow-y: auto;
+    }
+    .orch-build-btn { margin-top: 8px; align-self: flex-end; }
+
     /* ── Pipeline Builder Agent Chat ── */
     .pb-overlay {
       position: fixed; inset: 0;
