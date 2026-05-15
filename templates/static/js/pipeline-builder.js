@@ -1137,8 +1137,13 @@ function orchRenderFiles(files) {
 }
 
 async function dcSendOrchestration() {
+  if (_orchBusy) return;
   const msg = dcInput.value.trim();
-  if (!msg || _orchBusy) return;
+  if (!msg) {
+    dcAddMsg('agent', '<span style="color:var(--yellow)">Please describe your full pipeline requirements first, then click <b>Full Build</b>.</span>');
+    dcInput.focus();
+    return;
+  }
 
   dcInput.value = '';
   _orchBusy = true;
@@ -1153,12 +1158,14 @@ async function dcSendOrchestration() {
   if (orchArtifacts) orchArtifacts.style.display = 'none';
 
   try {
+    console.log('[FullBuild] Sending orchestration request...');
     const r = await fetch('/pipeline-designer/orchestrate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ message: msg }),
     });
     const d = await r.json();
+    console.log('[FullBuild] Response:', r.status, d);
 
     if (!r.ok) {
       dcAddMsg('agent', `<span style="color:var(--red)">Orchestration failed: ${escHtml(d.detail || '')}</span>`);
