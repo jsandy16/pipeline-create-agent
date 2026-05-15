@@ -951,6 +951,11 @@
     .dc-send:hover:not(:disabled) { background: var(--accent-hover); }
     .dc-send:disabled { opacity: .35; cursor: not-allowed; }
 
+    .dc-btn-group {
+      display: flex; flex-direction: column; gap: 4px;
+      flex-shrink: 0; align-self: flex-end;
+    }
+
     /* ── Orchestration Button & Panel ── */
     .dc-orch-btn {
       padding: 8px 14px; border-radius: var(--radius-sm); border: none;

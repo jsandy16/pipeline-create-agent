@@ -1143,6 +1143,7 @@ async function dcSendOrchestration() {
   dcInput.value = '';
   _orchBusy = true;
   dcSend.disabled = true;
+  if (orchBtn) orchBtn.disabled = true;
 
   dcAddMsg('user', escHtml(msg));
   dcAddMsg('agent', '<b>Starting multi-agent orchestration...</b><br>Processing your requirements through 5 phases.');
@@ -1164,6 +1165,7 @@ async function dcSendOrchestration() {
       orchHidePanel();
       _orchBusy = false;
       dcSend.disabled = false;
+      if (orchBtn) orchBtn.disabled = false;
       return;
     }
 
@@ -1202,10 +1204,12 @@ async function dcSendOrchestration() {
           });
         _orchBusy = false;
         dcSend.disabled = false;
+        if (orchBtn) orchBtn.disabled = false;
       } else if (msg.type === 'orchestration_error') {
         dcAddMsg('agent', `<span style="color:var(--red)">Orchestration error: ${escHtml(msg.message)}</span>`);
         _orchBusy = false;
         dcSend.disabled = false;
+        if (orchBtn) orchBtn.disabled = false;
       }
     };
 
@@ -1213,6 +1217,16 @@ async function dcSendOrchestration() {
       dcAddMsg('agent', '<span style="color:var(--red)">WebSocket connection error</span>');
       _orchBusy = false;
       dcSend.disabled = false;
+      if (orchBtn) orchBtn.disabled = false;
+    };
+
+    _orchWs.onclose = () => {
+      // Safety net: if WS closes without a terminal message, reset state
+      if (_orchBusy) {
+        _orchBusy = false;
+        dcSend.disabled = false;
+        if (orchBtn) orchBtn.disabled = false;
+      }
     };
 
   } catch(e) {
@@ -1220,6 +1234,7 @@ async function dcSendOrchestration() {
     orchHidePanel();
     _orchBusy = false;
     dcSend.disabled = false;
+    if (orchBtn) orchBtn.disabled = false;
   }
 }
 

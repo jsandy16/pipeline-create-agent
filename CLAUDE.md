@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 Spec-driven framework: AWS architecture diagrams / YAML / natural language → validated, deployable Terraform HCL. Deterministic engine (zero LLM for YAML input). See `docs/ARCHITECTURE.md` for detailed reference.
 
 ## Commands
@@ -12,7 +14,8 @@ python main.py examples/simple_ingest.yaml --dry-run          # print HCL, no wr
 python main.py examples/simple_ingest.yaml --apply            # deploy to AWS
 python main.py diagram.png                                     # image → HCL (1 LLM call)
 python main.py                                                 # batch: scan input_dgm/
-python -m pytest tests/ -v                                     # all tests (offline, 149 tests)
+python -m pytest tests/ -v                                     # all tests (offline)
+python -m pytest tests/test_engine.py::TestClass::test_method -v  # single test
 python -m uvicorn app:app --reload --port 8000                 # web UI
 ```
 
@@ -20,11 +23,18 @@ CLI flags: `--out DIR`, `--validate`, `--dry-run`, `--apply`, `--model MODEL`, `
 
 ## AWS credentials
 
-`.env` (gitignored): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=us-east-1`
+`.env` (gitignored): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=us-east-1`, `ANTHROPIC_API_KEY`
 
 ## Core architecture
 
-Input → `PipelineRequest` (Pydantic) → FOR EACH SERVICE: spec_loader → spec_builder (IAM/env/VPC from integration graph) → hcl_renderer (`_render_<type>()`) → pipeline_builder (consolidate + lint + write) → terraform fmt/validate
+**Deterministic engine pipeline:**
+Input → `PipelineRequest` (Pydantic, `schemas.py`) → FOR EACH SERVICE: spec_loader → spec_builder (IAM/env/VPC from integration graph) → hcl_renderer (`_render_<type>()`) → pipeline_builder (consolidate + lint + write) → terraform fmt/validate
+
+**Multi-agent orchestrator** (`agents/orchestrator.py`): 5-phase pipeline for natural language requirements → full infrastructure. Phases: Requirements Analysis → Infrastructure Design (engine) → Application Code Generation → Data Model Generation → Operations Configuration. Uses `schemas_orchestrator.py` for orchestration-specific models. Progress streamed via WebSocket to frontend.
+
+**Web app** (`app.py`): FastAPI application serving `templates/index.html`. Handles diagram upload, YAML generation, config chat (WebSocket), deploy jobs, and the multi-agent orchestrator. Jobs tracked in in-memory dicts (`_jobs`, `_deploys`, `_previews`).
+
+**API operations** (`api/<service_type>/operations.yaml`): Per-service operation definitions used by the developer agent for boto3 code generation.
 
 ## Key design rules
 
@@ -57,6 +67,10 @@ Zero changes needed in: spec_loader, spec_builder, pipeline_builder, hcl_linter,
 | `agents/config_agent.py` | config chat Tier 1/2 | Haiku/Sonnet |
 | `agents/developer_agent.py` | boto3 codegen | Haiku |
 | `agents/pipeline_inspector.py` | runtime error fix | Haiku |
+| `agents/requirements_analyzer.py` | requirements → plan | Sonnet |
+| `agents/application_code_agent.py` | service code gen | Sonnet |
+| `agents/data_model_agent.py` | DDL/catalog gen | Sonnet |
+| `agents/operations_agent.py` | scheduling/monitoring | Sonnet |
 | `tools/terraform_fix.py` | minor TF errors | Haiku |
 | `tools/autofix_agent.py` | TF apply failures | conditional |
 
@@ -78,3 +92,5 @@ Zero changes needed in: spec_loader, spec_builder, pipeline_builder, hcl_linter,
 - Every service type needs both spec AND renderer
 - Integration wiring ownership is in renderers (e.g., S3 owns bucket notification, Lambda owns event source mapping)
 - Config Chat: Tier 0 (keyword, $0) → Tier 1 (Haiku) → Tier 2 (Sonnet). See `engine/spec_index.py`, `engine/config_registry.py`
+- `schemas.py` defines core data contracts (`PipelineRequest`, `ServiceSpec`, `IntegrationSpec`); `schemas_orchestrator.py` extends with orchestration models
+- `engine/sub_component_renderer.py` handles rendering of sub-components within services

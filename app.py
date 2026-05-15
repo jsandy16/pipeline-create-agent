@@ -3254,7 +3254,16 @@ async def ws_orchestrate(ws: WebSocket, orchestration_id: str):
                 if msg.get("type") in ("orchestration_complete", "orchestration_error"):
                     break
             except Exception:
+                # Queue empty — check if orchestration finished; keep draining
+                # before breaking so the terminal message is never lost.
                 if orch["status"] in ("completed", "failed"):
+                    # One more drain pass to catch the terminal message
+                    while True:
+                        try:
+                            msg = log_q.get_nowait()
+                            await ws.send_json(msg)
+                        except Exception:
+                            break
                     break
                 await asyncio.sleep(0.5)
     except WebSocketDisconnect:
